@@ -10,7 +10,6 @@ import math
 from .config import (
     LINK_CONFIRM_FRAMES, LINK_CONTESTED_FRAMES, LINK_GRACE_FRAMES,
     LINK_DRIFT_FRAMES, STALE_CART_FRAMES, REID_DIST_THRESH, REID_MAX_GONE_FRAMES,
-    WALKAWAY_DIST_THRESH,
 )
 from .motion import are_co_moving
 
@@ -39,7 +38,7 @@ class PersonCartLinker:
         "_links", "_link_start_frames", "_link_candidates",
         "_perm_persons", "_perm_carts",
         "_person_for_cart", "_person_raw_for_cart",
-        "_drift_counter", "_walkaway_counter", "_get_display_id",
+        "_drift_counter", "_get_display_id",
     )
 
     def __init__(self, get_display_id_fn):
@@ -56,7 +55,6 @@ class PersonCartLinker:
         self._person_for_cart = {}          # cart_disp -> person_disp
         self._person_raw_for_cart = {}      # cart_disp -> person_raw
         self._drift_counter = {}            # cart_raw -> frames with zero overlap
-        self._walkaway_counter = {}         # cart_raw -> frames person visible but far from cart
 
     # --- Public properties ---
     @property
@@ -66,10 +64,6 @@ class PersonCartLinker:
     @property
     def link_start_frames(self):
         return self._link_start_frames
-
-    @property
-    def walkaway_counter(self):
-        return self._walkaway_counter
 
     @property
     def permanently_linked_persons(self):
@@ -162,44 +156,35 @@ class PersonCartLinker:
             if pd:
                 self._perm_persons.discard(pd)
 
-        # Step 0.5: Drift detection and walkaway tracking.
-        # Two cases when the linked person has zero IoU with the cart:
-        #   (a) Takeover — someone ELSE overlaps the cart → release link
-        #       after LINK_DRIFT_FRAMES (quick handoff).
-        #   (b) Walkaway — nobody else overlaps, person just walked away →
-        #       keep the link but increment walkaway counter so tracker.py
-        #       can treat it as abandonment after ABANDON_FRAMES.
-        # If the linked person has LEFT the frame entirely, that's classic
-        # abandonment — keep the link, reset walkaway (obj_disappeared
-        # handles that case).
+        # Step 0.5: Drift detection — release link ONLY when the linked
+        # person is VISIBLE in the frame but has drifted away from the cart
+        # (IoU < 0.05) while someone else is overlapping it.
+        # If the linked person has LEFT the frame entirely, that's abandonment
+        # — keep the link so POPS abandonment scoring can fire.
         DRIFT_IOU_THRESH = 0.05
         for cart_id, cart_bbox in cart_bboxes.items():
             if cart_id not in self._links:
                 self._drift_counter.pop(cart_id, None)
-                self._walkaway_counter.pop(cart_id, None)
                 continue
             pid = self._links[cart_id]
 
-            # Person must be VISIBLE for drift/walkaway to apply
+            # Person must be VISIBLE for drift to apply
             if pid not in person_bboxes:
-                # Person gone from frame — classic abandonment path
+                # Person gone from frame — this is abandonment, NOT drift
                 self._drift_counter.pop(cart_id, None)
-                self._walkaway_counter.pop(cart_id, None)
                 continue
 
             overlap = _iou(cart_bbox, person_bboxes[pid])
             if overlap >= DRIFT_IOU_THRESH:
-                # Person still engaged with cart — reset both counters
-                self._drift_counter.pop(cart_id, None)
-                self._walkaway_counter.pop(cart_id, None)
+                self._drift_counter.pop(cart_id, None)  # still engaged
             else:
                 # Person is visible but not overlapping the cart.
+                # Only count as drift if someone ELSE is overlapping (takeover).
                 someone_else = any(
                     _iou(cart_bbox, ob) >= DRIFT_IOU_THRESH
                     for op, ob in person_bboxes.items() if op != pid
                 )
                 if someone_else:
-                    # (a) Takeover: release link quickly
                     self._drift_counter[cart_id] = self._drift_counter.get(cart_id, 0) + 1
                     if self._drift_counter[cart_id] >= LINK_DRIFT_FRAMES:
                         cd = gdi('cart', cart_id)
@@ -211,23 +196,8 @@ class PersonCartLinker:
                         self._links.pop(cart_id, None)
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
-                        self._walkaway_counter.pop(cart_id, None)
                 else:
-                    # (b) Walkaway: person visible but far, nobody taking over.
-                    # Only count if person is beyond WALKAWAY_DIST_THRESH from
-                    # the cart — a person stepping aside briefly (e.g. to move
-                    # someone else's cart) should not trigger abandonment.
                     self._drift_counter.pop(cart_id, None)
-                    pb = person_bboxes[pid]
-                    pcx, pcy = (pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2
-                    ccx, ccy = (cart_bbox[0] + cart_bbox[2]) / 2, (cart_bbox[1] + cart_bbox[3]) / 2
-                    dist = math.sqrt((pcx - ccx) ** 2 + (pcy - ccy) ** 2)
-                    if dist > WALKAWAY_DIST_THRESH:
-                        # Person is far — keep link alive, count toward abandonment
-                        self._walkaway_counter[cart_id] = self._walkaway_counter.get(cart_id, 0) + 1
-                    else:
-                        # Person is nearby — not a true walkaway
-                        self._walkaway_counter.pop(cart_id, None)
 
         # Step 1: Handle tracker-ID swaps for linked persons.
         # When the linked person vanishes briefly (tracker swap), find

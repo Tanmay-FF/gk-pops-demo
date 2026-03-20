@@ -3,3 +3,4 @@ REVERT_NOTES.md
 *.pyc
 .claude/
 extract_frames.py
+docs/

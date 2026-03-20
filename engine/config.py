@@ -75,7 +75,7 @@ LINK_CANDIDATE_PATIENCE = 4   # frames a candidate survives being outscored befo
 LINK_DRIFT_FRAMES   = 6       # if linked person IoU < 0.05 with cart for N frames, release link
 STALE_CART_FRAMES   = 30      # purge link after cart absent this many frames
 ABANDON_FRAMES      = 30      # person gone N frames → abandonment
-WALKAWAY_DIST_THRESH = 200    # px — person must be farther than this from cart to count as walkaway
+WALKAWAY_DIST_THRESH = 200    # px — if linked person is farther than this from cart, treat as abandoned
 
 # Re-identification
 REID_DIST_THRESH     = 200    # max pixel distance for cart re-ID
@@ -84,7 +84,7 @@ REID_MAX_GONE_FRAMES = 15     # max frames a cart can be gone and still re-ID
 # Motion thresholds (px/s)
 SPEED_STATIC  = 10
 SPEED_SLOW    = 100
-SPEED_MEDIUM  = 250
+SPEED_MEDIUM  = 240
 
 # Co-movement
 COMOVEMENT_MIN_POSITIONS = 4

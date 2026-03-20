@@ -26,6 +26,7 @@ from .config import (
     YOLO_IMGSZ, CLASSIFY_EVERY_N_FRAMES, JSON_EVERY_N_FRAMES,
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
+    WALKAWAY_DIST_THRESH,
 )
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
@@ -100,6 +101,7 @@ class TrackingEngine:
         self._peak_pops_snapshot= {}
         self._cart_cls_history  = defaultdict(list)  # cd -> [(fill, bag), ...]
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
+        self._walkaway_frames   = {}  # cd -> consecutive frames person is far from cart
 
     def _get_display_id(self, label, raw_id):
         if label not in self._display_map:
@@ -419,20 +421,27 @@ class TrackingEngine:
                 # Link / abandonment
                 linked = False
                 linked_person_raw = None
-                linked_cart_raw = None
                 for cid, pid in links.items():
                     if gdi('cart', cid) == cd:
                         linked = True
                         linked_person_raw = pid
-                        linked_cart_raw = cid
                         break
-                # Classic abandonment: person completely gone from frame
+                # Classic: person gone from frame for N frames
                 person_gone = (linked and linked_person_raw is not None
                                and self._obj_disappeared.get(linked_person_raw, 0) > ABANDON_FRAMES)
-                # Walkaway abandonment: person still visible but far from cart
-                person_walkaway = (linked and linked_cart_raw is not None
-                                   and self._linker.walkaway_counter.get(linked_cart_raw, 0) > ABANDON_FRAMES)
-                abandoned = person_gone or person_walkaway
+                # Walkaway: person visible but far from cart for N consecutive frames
+                person_far = False
+                if linked and linked_person_raw is not None and linked_person_raw in person_bb:
+                    pb = person_bb[linked_person_raw]
+                    pcx, pcy = (pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2
+                    ccx, ccy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+                    dist = ((pcx - ccx) ** 2 + (pcy - ccy) ** 2) ** 0.5
+                    if dist > WALKAWAY_DIST_THRESH:
+                        self._walkaway_frames[cd] = self._walkaway_frames.get(cd, 0) + 1
+                    else:
+                        self._walkaway_frames.pop(cd, None)
+                    person_far = self._walkaway_frames.get(cd, 0) > ABANDON_FRAMES
+                abandoned = person_gone or person_far
 
                 cr = self._cart_cls_cache.get(cd, {})
                 is_valid = cr.get("is_valid", True)
@@ -590,13 +599,63 @@ class TrackingEngine:
             if cd in self._cart_cls_history:
                 history = self._cart_cls_history[cd]
                 if history:
-                    fill_scores = defaultdict(float)
-                    bag_scores = defaultdict(float)
+                    fill_conf = defaultdict(float)
+                    fill_count = defaultdict(int)
+                    bag_conf = defaultdict(float)
+                    bag_count = defaultdict(int)
                     for fill, bag, fc, bc in history:
-                        fill_scores[fill] += fc
-                        bag_scores[bag] += bc
+                        fill_conf[fill] += fc
+                        fill_count[fill] += 1
+                        bag_conf[bag] += bc
+                        bag_count[bag] += 1
+                    # confidence_sum × frame_count — rewards both high confidence and consistency
+                    fill_scores = {f: fill_conf[f] * fill_count[f] for f in fill_count}
+                    bag_scores = {b: bag_conf[b] * bag_count[b] for b in bag_count}
                     best_fill = max(fill_scores, key=fill_scores.get)
                     best_bag = max(bag_scores, key=bag_scores.get)
+
+                    # # [OLD] Abandoned cart override (grab-and-run) — no threshold,
+                    # # fires on ANY non-empty frame in early 30%. Too aggressive:
+                    # # classifier noise in early frames wrongly overrides the vote.
+                    # if best_fill == "empty" and abandoned:
+                    #     n = len(history)
+                    #     early_end = max(1, n * 30 // 100)
+                    #     early_history = history[:early_end]
+                    #     for candidate in ("full", "partial"):
+                    #         if any(f == candidate for f, b, fc, bc in early_history):
+                    #             best_fill = candidate
+                    #             paired_bags = defaultdict(float)
+                    #             for f, b, fc, bc in early_history:
+                    #                 if f == candidate:
+                    #                     paired_bags[b] += bc
+                    #             if paired_bags:
+                    #                 best_bag = max(paired_bags, key=paired_bags.get)
+                    #             break
+
+                    # [NEW] Abandoned cart override (grab-and-run) — with >50%
+                    # threshold. Only overrides if the majority of early frames
+                    # genuinely had items, not just a few noisy outliers.
+                    if best_fill == "empty" and abandoned:
+                        n = len(history)
+                        early_end = max(1, n * 30 // 100)
+                        early_history = history[:early_end]
+                        early_fill_count = defaultdict(int)
+                        for f, b, fc, bc in early_history:
+                            early_fill_count[f] += 1
+                        non_empty = (early_fill_count.get("full", 0)
+                                     + early_fill_count.get("partial", 0))
+                        if non_empty > len(early_history) * 0.5:
+                            for candidate in ("full", "partial"):
+                                if early_fill_count.get(candidate, 0) > 0:
+                                    best_fill = candidate
+                                    paired_bags = defaultdict(float)
+                                    for f, b, fc, bc in early_history:
+                                        if f == candidate:
+                                            paired_bags[b] += bc
+                                    if paired_bags:
+                                        best_bag = max(paired_bags, key=paired_bags.get)
+                                    break
+
                     source = "conf-vote"
 
             # Context (direction, speed, linked, abandoned): from best event
@@ -653,7 +712,7 @@ class TrackingEngine:
         # For abandonment events: POPS copies from Events (Events is truth).
         # For all other carts: the last event copies score from POPS table
         # so the Events table shows the reconciled score.
-        _ABANDON_EVENTS = {"PUSHOUT ALERT", "ABANDONED CART"}
+        _ABANDON_EVENTS = {"ABANDONED CART"}
 
         # Find last event per cart
         _last_event = {}
