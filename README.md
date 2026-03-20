@@ -2,9 +2,6 @@
 
 **AI-powered retail loss prevention system that detects potential cart push-out theft in real time using computer vision, multi-object tracking, and behavioral scoring.**
 
-**Author:** Tanmay Thaker -- Machine Learning Engineer, Gatekeeper Systems
-**Email:** tthaker@gatekeepersystems.com
-
 ---
 
 ## Overview
