@@ -1,6 +1,6 @@
 # POPS -- Push-Out Probability Score
 
-**AI-powered retail loss prevention system that detects potential cart push-out theft in real time using computer vision, multi-object tracking, and behavioral scoring.**
+**AI-powered system to identify potential cart push-out theft in real time using computer vision, multi-object tracking, and behavioral scoring.**
 
 **Author:** Tanmay Thaker -- Machine Learning Engineer, Gatekeeper Systems
 **Email:** tthaker@gatekeepersystems.com
@@ -9,9 +9,26 @@
 
 ## Overview
 
-POPS processes surveillance video to detect, track, and score shopping carts and persons in a retail environment. It links persons to carts, classifies cart contents, analyzes motion direction, and computes a **0–100 risk score** indicating the probability of a push-out theft event.
+POPS processes surveillance video to detect, track, and score shopping carts and persons in a retail environment to assesss the likelihood of a push-out theft event. The system outputs an annotated video with bounding boxes, trails, classification overlays, and a detailed JSON report with per-frame and per-cart analytics. It links persons to carts, classifies cart contents, analyzes motion direction, and computes a **0–100 risk score**.
 
-The system outputs an annotated video with bounding boxes, trails, classification overlays, and a detailed JSON report with per-frame and per-cart analytics.
+---
+
+## Demonstration
+
+Follow these steps to run the POPS demo locally:
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Tanmay-FF/gk-pops-demo
+
+
+2. Navigate into the Project Folder:
+   ```bash
+   cd gk-pops-demo
+
+3. Run demo script:
+   ```bash
+   python run_demo.py
 
 ---
 
@@ -199,23 +216,11 @@ gk-pops-code/
 
 ---
 
-## Getting Started
-
 ### Prerequisites
 
 - Python 3.10+
 - NVIDIA GPU with CUDA support (recommended)
 - FFmpeg installed and on PATH (for video encoding)
-
-### Installation
-
-```bash
-# Clone or copy the project
-cd gk-pops-code
-
-# Install dependencies
-pip install -r requirements.txt
-```
 
 ### Model Weights
 
@@ -230,11 +235,7 @@ All model weights are bundled under the `weights/` directory:
 
 Paths are configured in [engine/config.py](engine/config.py).
 
-### Running the App
-
-```bash
-python demo_app_v2.py
-```
+### UI
 
 The Gradio interface launches at **http://localhost:7860**. Upload a video or pick from the sample videos dropdown, select camera placement, and click **Run Analysis**.
 

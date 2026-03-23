@@ -14,7 +14,7 @@ from engine import TrackingEngine, SAMPLE_VIDEOS
 # ---------------------------------------------------------------------------
 # Engine singleton
 # ---------------------------------------------------------------------------
-engine = TrackingEngine(device='cuda:0')
+engine = TrackingEngine(device='auto')
 
 
 def run_analysis(video_path, camera_placement):
@@ -104,7 +104,7 @@ with gr.Blocks(
                 <p class="gk-brand">GATEKEEPER AI</p>
                 <h1 class="gk-title">POPS &mdash; Push-Out Probability Score</h1>
                 <p class="gk-subtitle">AI-Powered Retail Loss Prevention &mdash; Tracking + Classification + Scoring</p>
-                <p class="gk-subtitle" style="margin-top:4px;font-size:0.7rem;color:#93c5fd;">Built by <strong style="color:#fff;">Tanmay Thaker</strong> &mdash; MLE, Gatekeeper Systems</p>
+                <p class="gk-subtitle" style="margin-top:4px;font-size:0.7rem;color:#93c5fd;"><strong style="color:#fff;">Engineering</strong> &mdash; Gatekeeper Systems</p>
             </div>
             <div class="gk-info-chips">
                 <span class="gk-chip">YOLOv26m</span>
