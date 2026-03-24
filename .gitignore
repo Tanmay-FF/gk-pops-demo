@@ -4,5 +4,5 @@ REVERT_NOTES.md
 extract_frames.py
 __pycache__/
 *venv*/
-.gitignore
+.git*
 
