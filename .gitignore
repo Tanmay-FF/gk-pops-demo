@@ -1,8 +1,0 @@
-sample_videos/
-REVERT_NOTES.md
-*.pyc
-extract_frames.py
-__pycache__/
-*venv*/
-.git*
-
