@@ -34,7 +34,7 @@ Follow these steps to run the POPS demo locally:
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Gradio Web Interface                         │
-│              demo_app_v2.py -- Upload / Sample Videos                │
+│              app_poc_v2.py -- Upload / Sample Videos                │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  ▼
@@ -165,7 +165,9 @@ The linker uses a multi-stage state machine per frame:
 
 ```
 gk-pops-code/
-├── demo_app_v2.py              # Gradio web UI entry point
+├── app_poc_v2.py               # Gradio web UI entry point
+├── create_virtual_env.py       # Generate the virutal env that can run the demo
+├── run_demo.py.py              # Overall orchestrator for demo (creates environment and activates demo)
 ├── requirements.txt            # Python dependencies
 ├── README.md
 │
