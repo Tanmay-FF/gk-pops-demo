@@ -1,4 +1,3 @@
-# Author: Tanmay Thaker <tthaker@gatekeepersystems.com>
 """
 POPS - Push-Out Probability Score: Interactive Demo (v2 — modular)
 ===================================================================
