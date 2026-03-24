@@ -18,7 +18,6 @@ Follow these steps to run the POPS demo locally:
    ```bash
    git clone https://github.com/Tanmay-FF/gk-pops-demo
 
-
 2. Navigate into the Project Folder:
    ```bash
    cd gk-pops-demo
