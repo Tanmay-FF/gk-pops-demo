@@ -613,6 +613,8 @@ class TrackingEngine:
                     bag_scores = {b: bag_conf[b] * bag_count[b] for b in bag_count}
                     best_fill = max(fill_scores, key=fill_scores.get)
                     best_bag = max(bag_scores, key=bag_scores.get)
+                    print(f"[VOTE] Cart {cd}: fill_conf={dict(fill_conf)} fill_count={dict(fill_count)} fill_scores={dict(fill_scores)} → {best_fill}")
+                    print(f"[VOTE] Cart {cd}: bag_conf={dict(bag_conf)} bag_count={dict(bag_count)} bag_scores={dict(bag_scores)} → {best_bag}")
 
                     # # [OLD] Abandoned cart override (grab-and-run) — no threshold,
                     # # fires on ANY non-empty frame in early 30%. Too aggressive:
@@ -632,24 +634,39 @@ class TrackingEngine:
                     #                 best_bag = max(paired_bags, key=paired_bags.get)
                     #             break
 
-                    # [NEW] Abandoned cart override (grab-and-run) — with >50%
-                    # threshold. Only overrides if the majority of early frames
-                    # genuinely had items, not just a few noisy outliers.
+                    # [NEW] Abandoned cart override (grab-and-run) with temporal
+                    # ordering check. Compare first half vs second half of the
+                    # classification history. A real grab-and-run shows items in
+                    # the first half and empty in the second half. Classifier
+                    # noise is distributed evenly across both halves.
+                    # Override only if: first half had >50% items AND second
+                    # half has >70% empty — confirms a clear transition.
                     if best_fill == "empty" and abandoned:
                         n = len(history)
-                        early_end = max(1, n * 30 // 100)
-                        early_history = history[:early_end]
-                        early_fill_count = defaultdict(int)
-                        for f, b, fc, bc in early_history:
-                            early_fill_count[f] += 1
-                        non_empty = (early_fill_count.get("full", 0)
-                                     + early_fill_count.get("partial", 0))
-                        if non_empty > len(early_history) * 0.5:
+                        print(f"[DEBUG] Cart {cd}: history order = {[f for f, b, fc, bc in history]}")
+                        mid = max(1, n // 2)
+                        first_half = history[:mid]
+                        second_half = history[mid:]
+
+                        first_fill_count = defaultdict(int)
+                        for f, b, fc, bc in first_half:
+                            first_fill_count[f] += 1
+                        second_fill_count = defaultdict(int)
+                        for f, b, fc, bc in second_half:
+                            second_fill_count[f] += 1
+
+                        first_had_items = ((first_fill_count.get("full", 0)
+                                            + first_fill_count.get("partial", 0))
+                                           >= len(first_half) * 0.5)
+                        second_is_empty = (second_fill_count.get("empty", 0)
+                                           > len(second_half) * 0.7)
+
+                        if first_had_items and second_is_empty:
                             for candidate in ("full", "partial"):
-                                if early_fill_count.get(candidate, 0) > 0:
+                                if first_fill_count.get(candidate, 0) > 0:
                                     best_fill = candidate
                                     paired_bags = defaultdict(float)
-                                    for f, b, fc, bc in early_history:
+                                    for f, b, fc, bc in first_half:
                                         if f == candidate:
                                             paired_bags[b] += bc
                                     if paired_bags:
