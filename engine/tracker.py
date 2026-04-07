@@ -593,6 +593,17 @@ class TrackingEngine:
             abandoned = snap.get("abandoned", False)
             source = "snapshot"
 
+            # Context (direction, speed, linked, abandoned): from best event.
+            # Loaded BEFORE the vote so grab-and-run override has correct
+            # abandoned state (peak snapshot may not have captured it).
+            if cd in _best_event:
+                ev = _best_event[cd]
+                direction = ev["direction"]
+                linked = ev["linked"]
+                speed_status = ev.get("speed_status", speed_status)
+                abandoned = ev.get("abandoned", abandoned)
+                source = "event-ctx"
+
             # Fill/bag: ALWAYS use confidence-weighted vote from full history.
             # Events can be logged at early frames with wrong predictions;
             # the vote across all frames is more reliable.
@@ -673,17 +684,10 @@ class TrackingEngine:
                                         best_bag = max(paired_bags, key=paired_bags.get)
                                     break
 
-                    source = "conf-vote"
-
-            # Context (direction, speed, linked, abandoned): from best event
-            if cd in _best_event:
-                ev = _best_event[cd]
-                direction = ev["direction"]
-                linked = ev["linked"]
-                speed_status = ev.get("speed_status", speed_status)
-                abandoned = ev.get("abandoned", abandoned)
-                if source == "conf-vote":
-                    source = "conf-vote+event-ctx"
+                    if source == "event-ctx":
+                        source = "conf-vote+event-ctx"
+                    else:
+                        source = "conf-vote"
 
             if best_fill is None:
                 continue
