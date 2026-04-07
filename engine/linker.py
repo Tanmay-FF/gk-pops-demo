@@ -39,6 +39,7 @@ class PersonCartLinker:
         "_perm_persons", "_perm_carts",
         "_person_for_cart", "_person_raw_for_cart",
         "_drift_counter", "_get_display_id",
+        "_total_links",
     )
 
     def __init__(self, get_display_id_fn):
@@ -55,7 +56,7 @@ class PersonCartLinker:
         self._person_for_cart = {}          # cart_disp -> person_disp
         self._person_raw_for_cart = {}      # cart_disp -> person_raw
         self._drift_counter = {}            # cart_raw -> frames with zero overlap
-        self._total_links = 0               # monotonic — total links ever established
+        self._total_links = set()           # unique (person_disp, cart_disp) pairs ever linked
 
     # --- Public properties ---
     @property
@@ -68,7 +69,7 @@ class PersonCartLinker:
 
     @property
     def total_links(self):
-        return self._total_links
+        return len(self._total_links)
 
     @property
     def permanently_linked_persons(self):
@@ -354,12 +355,12 @@ class PersonCartLinker:
                 if best_pid is not None:
                     self._links[cart_id] = best_pid
                     self._link_start_frames[cart_id] = frame_idx
-                    self._total_links += 1
                     claimed.add(best_pid)
                     self._link_candidates.pop(cart_id, None)
                     pd = gdi('person', best_pid)
                     self._perm_persons.add(pd)
                     self._perm_carts.add(cd)
+                    self._total_links.add((pd, cd))
                     self._person_for_cart[cd] = pd
                     self._person_raw_for_cart[cd] = best_pid
             else:
