@@ -776,7 +776,7 @@ class TrackingEngine:
             "summary": {
                 "total_people_seen": len(self._all_people_seen),
                 "total_carts_seen": len(self._all_carts_seen),
-                "total_links_established": len(self._linker.link_start_frames),
+                "total_links_established": self._linker.total_links,
                 "total_events": len(self._event_log),
                 "high_priority": sum(1 for e in self._event_log if e["event"] in HIGH_EVENTS),
                 "medium_priority": sum(1 for e in self._event_log if e["event"] in MEDIUM_EVENTS),
@@ -806,7 +806,7 @@ class TrackingEngine:
         video_html  = ui_builder.build_video_info(source_path, w, h, fps, total_frames, frame_idx)
         det_html    = ui_builder.build_detection_info(
             len(self._all_people_seen), len(self._all_carts_seen),
-            len(self._linker.link_start_frames))
+            self._linker.total_links)
         config_html = ui_builder.build_config_info(
             LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, camera_placement,
             self._classifier.quality_pt, self._classifier.fill_pt, QUALITY_THRESHOLD)
