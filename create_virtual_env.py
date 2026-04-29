@@ -39,20 +39,33 @@ def unzip_and_delete(folder_path = os.getcwd()):
         except Exception as e:
             print(f"Error with {zip_file}: e")
 
+def has_nvidia_gpu():
+    """Returns True if an NVIDIA GPU is detected via nvidia-smi."""
+    try:
+        subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
 def install_cuda_if_missing():
     """
-    Attempts to install CUDA 12.2 if nvcc is not found.
+    Attempts to install CUDA 12.4 if nvcc is not found.
+    Skips entirely if no NVIDIA GPU is detected.
     """
+    if not has_nvidia_gpu():
+        print("No NVIDIA GPU detected. Skipping CUDA installation.")
+        return
+
     try:
         subprocess.check_output(["nvcc", "--version"])
         print("CUDA already installed.")
         return
     except Exception:
-        print("CUDA not found. Installing CUDA 12.2...")
+        print("CUDA not found. Installing CUDA 12.4...")
 
     if os.name == "nt":
         # Windows installer
-        url = "https://developer.nvidia.com/compute/cuda/12.2.0/network_installers/cuda_12.2.0_windows_network.exe"
+        url = "https://developer.nvidia.com/compute/cuda/12.4.0/network_installers/cuda_12.4.0_windows_network.exe"
         installer = "cuda_installer.exe"
 
         subprocess.check_call(["powershell", "-Command", f"Invoke-WebRequest {url} -OutFile {installer}"])
@@ -62,12 +75,12 @@ def install_cuda_if_missing():
         # Linux (Ubuntu example)
         subprocess.check_call([
             "bash", "-c",
-            "wget https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda_12.2.0_535.54.03_linux.run -O cuda.run"
+            "wget https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda_12.4.0_550.54.14_linux.run -O cuda.run"
         ])
         subprocess.check_call(["chmod", "+x", "cuda.run"])
         subprocess.check_call(["sudo", "./cuda.run", "--silent", "--toolkit"])
 
-def add_cuda_path_linux(venv_path, cuda_bin_path="/usr/local/cuda-12.2/bin"):
+def add_cuda_path_linux(venv_path, cuda_bin_path="/usr/local/cuda-12.4/bin"):
     """
     Adds CUDA bin folder to PATH inside the venv bin/activate script for Linux/Mac.
     """
@@ -107,8 +120,8 @@ def add_cuda_path_linux(venv_path, cuda_bin_path="/usr/local/cuda-12.2/bin"):
 
     print(f"Added CUDA bin path to {activate_file}")
 
-def add_cuda_path_windows(venv_path, 
-                          cuda_bin_path=r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin"):
+def add_cuda_path_windows(venv_path,
+                          cuda_bin_path=r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"):
     """
     Adds CUDA path to Windows activate.bat.
     """
@@ -169,25 +182,36 @@ def setup_venv(venv_dir='venv', requirements_file='requirements.txt'):
         add_cuda_path_windows(venv_path)
         python_path = venv_path / 'Scripts' / 'python.exe'
         pip_path = venv_path / 'Scripts' / 'pip.exe'
-        cuda_bin_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin"
+        cuda_bin_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
     else:
         add_cuda_path_linux(venv_path)
         python_path = venv_path / 'bin' / 'python'
         pip_path = venv_path / 'bin' / 'pip'
-        cuda_bin_path = "/usr/local/cuda-12.2/bin"
+        cuda_bin_path = "/usr/local/cuda-12.4/bin"
 
     # Step 3: Upgrade pip
     subprocess.check_call([str(python_path), '-m', 'pip', 'install', '--upgrade', 'pip'])
 
-    # Step 4: Install all other packages...
+    # Step 4: Install PyTorch with CUDA 12.4 before requirements.txt so pip
+    # sees the CUDA build already satisfied and won't downgrade to CPU-only.
     env = os.environ.copy()
     env["PATH"] = f"{cuda_bin_path}{os.pathsep}{env['PATH']}"
 
+    print("\nInstalling PyTorch with CUDA 12.4 support...")
+    subprocess.check_call([
+        str(pip_path), 'install',
+        'torch>=2.0.0,<3.0.0',
+        'torchvision>=0.15.0,<1.0.0',
+        'torchaudio',
+        '--index-url', 'https://download.pytorch.org/whl/cu124',
+    ], env=env)
+
+    # Step 5: Install all other packages...
     print("\nInstalling packages from requirements.txt..")
     subprocess.check_call([str(pip_path), 'install', '-r', str(req_path)], env=env)
     print(f"Installed packages from '{requirements_file}'")
 
-    # Step 5: Explicitly install onnxruntime-gpu from official CUDA index
+    # Step 6: Explicitly install onnxruntime-gpu from official CUDA index
     print("\nInstalling onnxruntime-gpu from ONNX's official CUDA wheel source...")
     subprocess.check_call([
         str(pip_path),
@@ -205,6 +229,7 @@ if __name__ == "__main__":
     try:
         delete_empty_folders(".")
         unzip_and_delete()
+        install_cuda_if_missing()
         setup_venv(venv_name, requirements)
         print(f"\n::venv_name::{venv_name}")
     except Exception as e:
