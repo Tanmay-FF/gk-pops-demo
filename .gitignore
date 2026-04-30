@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+venv_gk-pops-enhanced/
+env/
+
+# Node
+node_modules/
+web/node_modules/
+web/dist/
+
+# Editor / IDE / Claude
+.vscode/
+.idea/
+.claude/worktrees/
+.claude/settings.local.json
+
+# Build / archive artifacts
+*.zip
+engine.zip
+
+# Temp / scratch
+temp/
+tmp/
+
+# Top-level video dumps (recordings, demo outputs, scratch clips)
+/1763*.mp4
+/try.mp4
+/pops_demo_output*.mp4
+
+# Loose HTML/JS/CSS scratch files at repo root (web/ is the real frontend)
+/*.html
+/*.js
+/*.css
+
+# Other root-level scratch assets
+/9C1-Zone.png
+/all_convo.txt
+
+# Docs and design handoff
+/docs/
+/design_handoff_gk_pops/
+/diagrams/
+
+# Demo / test scripts and root-level model weights (kept locally, not pushed)
+/run_demo.py
+/test_cli.py
+/test_cli_img.py
+/mobile_sam.pt
+/yolov8n-pose.pt
+
+# OS
+.DS_Store
+Thumbs.db

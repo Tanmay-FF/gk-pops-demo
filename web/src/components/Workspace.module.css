@@ -1,0 +1,80 @@
+.workspace {
+  display: flex; flex-direction: column; background: var(--bg-0);
+  min-height: 0; overflow: hidden;
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex; align-items: stretch;
+  background: var(--bg-1); border-bottom: 1px solid var(--border-subtle);
+  height: 38px; padding: 0 4px; flex-shrink: 0; overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* Section label — sits before the group's tabs to give visual hierarchy */
+.groupLabel {
+  display: inline-flex; align-items: center;
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-3);
+  padding: 0 8px 0 6px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.groupSep {
+  width: 1px; align-self: stretch; margin: 8px 4px;
+  background: var(--border-subtle);
+}
+
+.tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px; font-size: 12.5px; color: var(--text-2); font-weight: 500;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+  position: relative; white-space: nowrap;
+}
+.tab:hover { color: var(--text-0); }
+.tab.active { color: var(--text-0); border-bottom-color: var(--accent); }
+
+/* Reports group — give it slight visual prominence (it's the primary one) */
+.tab.grp_reports {
+  font-weight: 550;
+}
+.tab.grp_reports.active {
+  background: linear-gradient(
+    to top,
+    color-mix(in oklch, var(--accent) 7%, transparent),
+    transparent 70%
+  );
+}
+
+/* Reference group — slightly muted by default */
+.tab.grp_reference {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.tab.grp_reference:hover { color: var(--text-1); }
+.tab.grp_reference.active { color: var(--text-0); }
+
+.badge {
+  font-family: var(--font-mono); font-size: 10px;
+  background: var(--bg-3); color: var(--text-1);
+  padding: 1px 5px; border-radius: 3px; font-weight: 500;
+}
+.badgeActive { background: var(--accent-tint-strong); color: var(--accent-hi); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+
+.tabsTools {
+  margin-left: auto; display: flex; align-items: center; gap: 4px; padding-right: 6px; flex-shrink: 0;
+}
+.iconBtn {
+  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm); color: var(--text-2); transition: background 0.12s;
+}
+.iconBtn:hover { background: var(--bg-2); color: var(--text-0); }
+
+/* ── Panel ───────────────────────────────────────────────────────────── */
+.panelWrap {
+  flex: 1; overflow: auto; min-height: 0; background: var(--bg-0);
+  display: flex; flex-direction: column;
+}

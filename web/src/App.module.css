@@ -1,0 +1,60 @@
+/* Top-level CSS Grid — mirrors design_handoff_gk_pops/styles.css .app */
+.app {
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  grid-template-columns: 280px 1fr 360px;
+  grid-template-areas:
+    "topbar topbar topbar"
+    "rail   main   dock";
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+.app[data-rail-side="right"] {
+  grid-template-columns: 360px 1fr 280px;
+  grid-template-areas:
+    "topbar topbar topbar"
+    "dock   main   rail";
+}
+.app[data-dock="hidden"] {
+  grid-template-columns: 280px 1fr;
+  grid-template-areas:
+    "topbar topbar"
+    "rail   main";
+}
+.app[data-rail-side="right"][data-dock="hidden"] {
+  grid-template-columns: 1fr 280px;
+  grid-template-areas:
+    "topbar topbar"
+    "main   rail";
+}
+
+.main {
+  grid-area: main;
+  display: grid;
+  grid-template-rows: minmax(0, 1.05fr) 4px minmax(0, 1fr);
+  background: var(--bg-0);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.app[data-focus="true"] .main {
+  grid-template-rows: 1fr;
+}
+
+.splitter {
+  background: var(--bg-0);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: row-resize;
+  position: relative;
+}
+.splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 26px; height: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}

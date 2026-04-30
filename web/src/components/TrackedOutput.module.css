@@ -1,0 +1,88 @@
+.tracked {
+  position:relative; background:var(--bg-inset);
+  display:flex; flex-direction:column; min-height:0;
+}
+.paneHeader {
+  display:flex; align-items:center; gap:10px;
+  padding:0 12px; height:38px; background:var(--bg-1);
+  border-bottom:1px solid var(--border-subtle); flex-shrink:0;
+}
+.paneTitle {
+  display:flex; align-items:center; gap:8px;
+  font-size:12px; font-weight:600; color:var(--text-0); letter-spacing:-0.005em;
+}
+.paneTitle svg { color:var(--accent-hi); }
+.sub { color:var(--text-3); font-weight:400; }
+.paneTag {
+  font-family:var(--font-mono); font-size:10.5px; color:var(--text-3);
+  padding:2px 6px; background:var(--bg-2); border-radius:4px; border:1px solid var(--border-subtle);
+}
+.paneSpaccer { flex:1; }
+.chipAccent {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:2px 8px; border-radius:999px; font-size:11px; font-weight:500;
+  color:var(--accent-hi); border:1px solid var(--accent-tint-strong); background:var(--accent-tint);
+}
+.liveDot { width:6px; height:6px; border-radius:50%; background:var(--accent-hi); }
+.iconBtn {
+  width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:var(--r-sm); color:var(--text-2); border:1px solid transparent; transition:background 0.12s;
+}
+.iconBtn:hover { background:var(--bg-2); color:var(--text-0); }
+
+.trackedBody { flex:1; position:relative; background:var(--bg-inset); overflow:hidden; min-height:0; }
+
+.videoWrap { position:absolute; inset:0; }
+.video { width:100%; height:100%; object-fit:contain; background:#000; }
+
+/* HUD overlays */
+.hud { position:absolute; pointer-events:none; z-index:5; font-family:var(--font-mono); font-size:10.5px; }
+.hudTl { top:12px; left:12px; }
+.hudTr { top:12px; right:12px; }
+.hudRow { display:flex; flex-direction:column; gap:4px; }
+.hudCard {
+  background:oklch(0.14 0.012 254 / 0.85);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  border:1px solid oklch(1 0 0 / 0.07); border-radius:5px; padding:5px 9px;
+  color:var(--text-1); display:flex; flex-direction:row; align-items:center; gap:7px; min-width:90px;
+}
+.hudLbl { font-size:9px; color:var(--text-3); text-transform:uppercase; letter-spacing:0.07em; }
+.hudVal { font-size:12px; color:var(--text-0); font-weight:500; }
+.hudRec {
+  display:flex; align-items:center; gap:6px;
+  background:oklch(0.14 0.012 254 / 0.85); backdrop-filter:blur(8px);
+  padding:5px 9px; border-radius:4px; border:1px solid oklch(1 0 0 / 0.07);
+}
+@keyframes recPulse { 0%, 100% { opacity:1; } 50% { opacity:0.3; } }
+.recDot { width:7px; height:7px; border-radius:50%; background:var(--bad); animation:recPulse 1.4s ease-in-out infinite; }
+.recText { font-family:var(--font-mono); font-size:10.5px; color:var(--text-0); }
+
+/* Timeline */
+.timeline {
+  position:absolute; left:12px; right:12px; bottom:12px; height:32px;
+  background:oklch(0.14 0.012 254 / 0.85); backdrop-filter:blur(8px);
+  border:1px solid oklch(1 0 0 / 0.06); border-radius:6px;
+  padding:6px 10px; display:flex; align-items:center; gap:10px;
+}
+.play {
+  width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;
+  background:var(--accent); border-radius:50%; color:oklch(0.99 0 0); flex-shrink:0; cursor:pointer;
+}
+.play svg { width:9px; height:9px; }
+.time { font-family:var(--font-mono); font-size:10.5px; color:var(--text-0); white-space:nowrap; }
+.bar { flex:1; height:4px; background:oklch(1 0 0 / 0.08); border-radius:2px; position:relative; cursor:pointer; }
+.barFill { position:absolute; left:0; top:0; bottom:0; background:var(--accent); border-radius:2px; }
+
+/* Empty state */
+.emptyCanvas {
+  position:absolute; inset:0;
+  background:radial-gradient(ellipse at 30% 40%, oklch(0.22 0.02 254) 0%, oklch(0.12 0.012 254) 60%),var(--bg-inset);
+  display:flex; align-items:center; justify-content:center;
+}
+.floorGrid {
+  position:absolute; inset:0;
+  background-image:linear-gradient(oklch(1 0 0 / 0.025) 1px, transparent 1px), linear-gradient(90deg, oklch(1 0 0 / 0.025) 1px, transparent 1px);
+  background-size:32px 32px; background-position:-1px -1px;
+  mask-image:radial-gradient(ellipse at center, black 50%, transparent 90%);
+}
+.emptyMsg { position:relative; z-index:1; text-align:center; }

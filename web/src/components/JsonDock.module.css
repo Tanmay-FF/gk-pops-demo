@@ -1,0 +1,43 @@
+.dock {
+  grid-area: dock;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+}
+.header {
+  display:flex; align-items:center; gap:8px;
+  padding:0 10px 0 12px; height:38px;
+  border-bottom:1px solid var(--border-subtle); flex-shrink:0;
+}
+.dockTabs { display:flex; }
+.dockTab {
+  height:38px; padding:0 10px; font-size:12px; color:var(--text-2); font-weight:500;
+  border-bottom:2px solid transparent; margin-bottom:-1px;
+  transition:color 0.12s, border-color 0.12s;
+}
+.dockTab:hover { color:var(--text-0); }
+.dockTab.active { color:var(--text-0); border-bottom-color:var(--accent); }
+.tools { margin-left:auto; display:flex; gap:2px; }
+.iconBtn {
+  width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:var(--r-sm); color:var(--text-2); transition:background 0.12s;
+}
+.iconBtn:hover { background:var(--bg-2); color:var(--text-0); }
+
+.body { flex:1; overflow:auto; min-height:0; }
+.jsonView { font-family:var(--font-mono); font-size:11.5px; padding:10px 14px; }
+
+.footer {
+  padding:8px 10px; border-top:1px solid var(--border-subtle);
+  display:flex; gap:6px; flex-shrink:0;
+}
+.btn {
+  height:26px; display:inline-flex; align-items:center; gap:5px;
+  padding:0 9px; border-radius:5px; font-size:12px; font-weight:500;
+  border:1px solid var(--border-subtle); background:var(--bg-2); color:var(--text-1);
+  transition:background 0.12s; text-decoration:none;
+}
+.btn:hover:not(:disabled) { background:var(--bg-3); }
+.btn:disabled { opacity:0.5; cursor:not-allowed; }
+.primary { background:var(--accent); color:oklch(0.99 0 0); border-color:transparent; font-weight:600; }
+.primary:hover { background:var(--accent-hi); }

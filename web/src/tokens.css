@@ -1,0 +1,74 @@
+/* GK-POPS design tokens — verbatim from design_handoff_gk_pops/styles.css */
+:root {
+  --bg-0: oklch(0.16 0.012 254);
+  --bg-1: oklch(0.195 0.012 254);
+  --bg-2: oklch(0.225 0.012 254);
+  --bg-3: oklch(0.265 0.012 254);
+  --bg-inset: oklch(0.135 0.012 254);
+
+  --border-subtle: oklch(0.27 0.012 254 / 0.6);
+  --border:        oklch(0.32 0.012 254 / 0.8);
+  --border-strong: oklch(0.4 0.012 254);
+
+  --text-0: oklch(0.97 0.005 254);
+  --text-1: oklch(0.82 0.008 254);
+  --text-2: oklch(0.62 0.01 254);
+  --text-3: oklch(0.46 0.012 254);
+  --text-disabled: oklch(0.36 0.012 254);
+
+  --accent-h: 254;
+  --accent:    oklch(0.66 0.18 var(--accent-h));
+  --accent-hi: oklch(0.74 0.18 var(--accent-h));
+  --accent-lo: oklch(0.52 0.18 var(--accent-h));
+  --accent-tint:        oklch(0.66 0.18 var(--accent-h) / 0.14);
+  --accent-tint-strong: oklch(0.66 0.18 var(--accent-h) / 0.22);
+
+  --good: oklch(0.74 0.16 152);
+  --warn: oklch(0.78 0.15 78);
+  --bad:  oklch(0.66 0.2 25);
+
+  --z1: oklch(0.7 0.16 254);
+  --z2: oklch(0.72 0.16 152);
+  --z3: oklch(0.74 0.15 60);
+  --z4: oklch(0.66 0.2 350);
+  --z5: oklch(0.7 0.16 200);
+
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --shadow-1: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 1px 2px oklch(0 0 0 / 0.4);
+  --shadow-2: 0 1px 0 oklch(1 0 0 / 0.05) inset, 0 8px 24px -8px oklch(0 0 0 / 0.6);
+
+  --font-ui:   'Inter', system-ui, -apple-system, Segoe UI, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --pad-y: 6px;
+  --pad-x: 10px;
+  --row-h: 30px;
+  --gap:   10px;
+}
+
+[data-density="compact"]    { --pad-y:4px; --pad-x:8px; --row-h:26px; --gap:8px; }
+[data-density="comfortable"]{ --pad-y:9px; --pad-x:12px; --row-h:36px; --gap:14px; }
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100vh; overflow: hidden; }
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-feature-settings: 'ss01', 'cv11';
+  background: var(--bg-0);
+  color: var(--text-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button { font-family: inherit; font-size: inherit; color: inherit; background: none; border: none; cursor: pointer; padding: 0; }
+input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+input:focus, select:focus, textarea:focus, button:focus { outline: none; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(0.32 0.012 254 / 0.5); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.42 0.012 254 / 0.7); background-clip: padding-box; border: 2px solid transparent; }

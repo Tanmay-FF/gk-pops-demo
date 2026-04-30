@@ -1,0 +1,58 @@
+.root { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
+
+.htmlWrap { flex:1; overflow:auto; min-height:0; }
+.htmlWrap iframe { width:100%; height:100%; border:none; }
+
+.stage {
+  flex:1; position:relative; overflow:hidden;
+  background:radial-gradient(ellipse at 50% 40%, oklch(0.2 0.02 254), oklch(0.12 0.012 254));
+  perspective:600px;
+}
+
+.floor {
+  position:absolute; left:10%; right:10%; top:30%; bottom:10%;
+  background:oklch(0.16 0.015 254);
+  border:1px solid oklch(0.26 0.02 254 / 0.4);
+  border-radius:4px;
+  transform:rotateX(52deg) translateZ(0);
+  background-image:
+    linear-gradient(oklch(1 0 0 / 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, oklch(1 0 0 / 0.03) 1px, transparent 1px);
+  background-size:40px 40px;
+  box-shadow:0 20px 60px -10px oklch(0 0 0 / 0.8);
+}
+
+.pillar {
+  position:absolute; width:14px; height:30px;
+  border-radius:2px; transform:translate(-50%,-50%) rotateX(-10deg);
+}
+.pillarLabel {
+  position:absolute; top:-22px; left:50%; transform:translateX(-50%);
+  font-family:var(--font-mono); font-size:10px; color:oklch(0.99 0 0);
+  background:oklch(0.18 0.012 254 / 0.9); padding:1px 5px; border-radius:3px;
+  border:1px solid; white-space:nowrap;
+}
+
+.hudCards { position:absolute; top:14px; left:14px; display:flex; flex-direction:column; gap:6px; }
+.hudCard {
+  display:flex; flex-direction:column; gap:2px; padding:6px 10px;
+  background:oklch(0.16 0.015 254 / 0.85); backdrop-filter:blur(8px);
+  border:1px solid oklch(1 0 0 / 0.08); border-radius:var(--r-sm);
+}
+.hudLbl { font-size:9.5px; color:var(--text-3); text-transform:uppercase; letter-spacing:0.06em; }
+.hudVal { font-size:12.5px; font-weight:600; color:var(--text-0); font-family:var(--font-mono); }
+
+.viewButtons { position:absolute; bottom:14px; left:14px; display:flex; gap:6px; }
+.viewBtn {
+  display:inline-flex; align-items:center; gap:4px; padding:4px 10px;
+  background:oklch(0.18 0.012 254 / 0.85); backdrop-filter:blur(8px);
+  border:1px solid oklch(1 0 0 / 0.1); border-radius:var(--r-sm);
+  font-size:11.5px; color:var(--text-1); transition:background 0.12s;
+}
+.viewBtn:hover { background:oklch(0.22 0.015 254 / 0.9); color:var(--text-0); }
+
+.overlay {
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; text-align:center;
+  background:oklch(0 0 0 / 0.35);
+}

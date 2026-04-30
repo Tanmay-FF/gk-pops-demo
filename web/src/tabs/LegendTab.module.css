@@ -1,0 +1,29 @@
+.root { display:flex; flex-direction:column; flex:1; min-height:0; overflow:auto; }
+.content { display:flex; flex-direction:column; gap:12px; padding:14px; }
+
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; }
+
+.card {
+  background:var(--bg-1); border:1px solid var(--border-subtle); border-radius:var(--r-md);
+  padding:14px; display:flex; flex-direction:column; gap:0;
+}
+.h4 { font-size:12px; font-weight:600; color:var(--text-0); margin:0 0 10px; text-transform:uppercase; letter-spacing:0.05em; }
+
+.row {
+  display:flex; align-items:center; gap:8px; padding:6px 0;
+  border-bottom:1px solid var(--border-subtle);
+}
+.row:last-child { border-bottom:none; }
+
+.swatch { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
+.rowLabel { flex:1; font-size:12.5px; color:var(--text-0); }
+.rowNote { font-size:11px; color:var(--text-3); }
+
+.kbd {
+  display:inline-block; font-family:var(--font-mono); font-size:11px;
+  background:var(--bg-2); border:1px solid var(--border-subtle); border-radius:3px;
+  padding:1px 6px; color:var(--text-1); min-width:32px; text-align:center;
+  flex-shrink:0;
+}
+
+.emptyZones { font-size:11.5px; color:var(--text-3); padding:8px 0; }
