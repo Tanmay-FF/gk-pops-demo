@@ -24,7 +24,7 @@ Follow these steps to run the POPS demo locally:
 
 3. Run demo script:
    ```bash
-   python run_demo.py
+   python app_poc_v2.py
 
 ---
 
