@@ -54,7 +54,8 @@ from . import ui_builder
 from . import analytics_ui
 from .analytics_builder import run_all as run_analytics, compute_impressions
 from .analytics_models import (
-    AnalyticsResult, TrackRecord, TrajectoryBundle, Zone,
+    AnalyticsResult, CartFactSample, TrackRecord, TrajectoryBundle, Zone,
+    FACTS_SCHEMA_VERSION,
 )
 from .trajectory_cache import TrajectoryCache, make_video_key
 
@@ -111,7 +112,8 @@ class TrackingEngine:
         self._obj_speeds       = defaultdict(list)
         self._obj_labels       = {}
         self._obj_confs        = {}
-        self._obj_bboxes       = {}
+        self._obj_bboxes       = {}          # raw_id -> LATEST bbox (overwritten each frame)
+        self._obj_bbox_history = defaultdict(list)  # raw_id -> [bbox, ...] parallel to _obj_positions
         self._obj_first_frame  = {}
         self._obj_disappeared  = defaultdict(int)
 
@@ -129,6 +131,11 @@ class TrackingEngine:
         self._cart_cls_history  = defaultdict(list)  # cd -> [(fill, bag), ...]
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
         self._walkaway_frames   = {}  # cd -> consecutive frames person is far from cart
+        # Rule-engine fact timeline: cart display_id -> [CartFactSample, ...].
+        # Recorded before the MIN_CART_FRAMES_FOR_POPS guard so brief carts
+        # still have facts even when POPS declines to score them.
+        self._cart_facts        = defaultdict(list)
+        self._cls_last_frame    = {}  # cd -> frame_idx of the last real classification
         self._scene_elements    = []
         # Inputs stashed for finalize_case_report() when process_video is
         # called with defer_case_report=True. Cleared after use.
@@ -291,15 +298,39 @@ class TrackingEngine:
     # ------------------------------------------------------------------
     # Trajectory bundle builder + analytics recompute
     # ------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_timestamps(ts_arr: np.ndarray, first_frame: int,
+                            fps: float) -> tuple[np.ndarray, bool]:
+        """Return (timestamps, was_synthesized).
+
+        Every duration the rule engine reports derives from these values, and
+        OpenCV's CAP_PROP_POS_MSEC returns 0.0 for every frame on some
+        containers/codecs.  Left unchecked, that makes all durations zero, so
+        no rule ever crosses its threshold and the output is an empty alert
+        list indistinguishable from "nothing happened" — a silent wrong answer.
+        Fall back to frame-derived time and let the caller flag the run.
+        """
+        if ts_arr.size == 0:
+            return ts_arr, False
+        span = float(ts_arr[-1] - ts_arr[0])
+        monotonic = bool(np.all(np.diff(ts_arr) >= -1e-6))
+        if span > 1e-6 and monotonic:
+            return ts_arr, False           # usable as-is
+        safe_fps = fps if fps and fps > 0 else 30.0
+        synth = (np.arange(ts_arr.size, dtype=np.float32) + float(first_frame)) / safe_fps
+        return synth.astype(np.float32), True
+
     def _build_trajectory_bundle(self, source_path, w, h, fps, total_frames,
                                  representative_frame):
         """Pack the per-track state collected during process_video() into the
         TrajectoryBundle consumed by analytics_builder."""
         tracks: dict[int, TrackRecord] = {}
+        any_synth = False
         for raw_id, label in self._obj_labels.items():
             positions = self._obj_positions.get(raw_id) or []
             timestamps = self._obj_timestamps.get(raw_id) or []
             speeds = self._obj_speeds.get(raw_id) or []
+            bboxes = self._obj_bbox_history.get(raw_id) or []
             n = min(len(positions), len(timestamps))
             if n == 0:
                 continue
@@ -309,12 +340,25 @@ class TrackingEngine:
             spd = list(speeds[:n]) + [0.0] * max(0, n - len(speeds))
             spd_arr = np.asarray(spd[:n], dtype=np.float32)
             first_f = self._obj_first_frame.get(raw_id, 1)
-            frames_arr = np.arange(first_f, first_f + n, dtype=np.int32)
+            ts_arr, synth = self._sanitize_timestamps(ts_arr, first_f, fps)
+            any_synth = any_synth or synth
+            # bbox history is appended in lockstep with positions; a short
+            # array means a re-identified track whose history did not carry
+            # over, in which case leave it empty rather than misaligned.
+            if len(bboxes) >= n:
+                bbox_arr = np.asarray(bboxes[:n], dtype=np.float32)
+            else:
+                bbox_arr = np.empty((0, 4), dtype=np.float32)
+            # `frames` is DISPLAY ONLY — derive it from the (possibly
+            # synthesised) timestamps rather than assuming the track was
+            # detected in every consecutive frame, which arange() did.
+            safe_fps = fps if fps and fps > 0 else 30.0
+            frames_arr = np.rint(ts_arr * safe_fps).astype(np.int32)
             display_id = self._display_map.get(label, {}).get(raw_id, raw_id)
             tracks[raw_id] = TrackRecord(
                 raw_id=raw_id, label=label, display_id=int(display_id),
                 positions=pos_arr, timestamps=ts_arr,
-                frames=frames_arr, speeds=spd_arr,
+                frames=frames_arr, speeds=spd_arr, bboxes=bbox_arr,
             )
 
         bundle = TrajectoryBundle(
@@ -326,6 +370,9 @@ class TrackingEngine:
             cart_pops=dict(self._peak_pops_snapshot),
             event_log=list(self._event_log),
             representative_frame=representative_frame,
+            cart_facts={cd: list(v) for cd, v in self._cart_facts.items()},
+            facts_schema_version=FACTS_SCHEMA_VERSION,
+            timestamps_synthesized=any_synth,
         )
         return bundle
 
@@ -530,7 +577,8 @@ class TrackingEngine:
                         self._linker.try_reidentify_cart(
                             raw, bb, cur_cart_raws, self._display_map,
                             self._obj_positions, self._obj_timestamps,
-                            self._obj_speeds, self._obj_disappeared)
+                            self._obj_speeds, self._obj_disappeared,
+                            self._obj_bbox_history)
 
                 # Draw + collect detections
                 for box, id_, c, conf in zip(boxes, ids, clss, confs):
@@ -554,6 +602,11 @@ class TrackingEngine:
 
                     self._obj_positions[raw].append((cx, cy))
                     self._obj_timestamps[raw].append(timestamp)
+                    # Parallel to _obj_positions — the rule engine needs bbox
+                    # extent per sample (a cart can block a doorway while its
+                    # centroid sits outside the polygon). _obj_bboxes below is
+                    # only the latest frame, overwritten each iteration.
+                    self._obj_bbox_history[raw].append((x1, y1, x2, y2))
                     self._obj_labels[raw] = label
                     self._obj_confs[raw] = conf
                     self._obj_bboxes[raw] = bb_int
@@ -587,6 +640,7 @@ class TrackingEngine:
                     cd = gdi('cart', raw)
                     result = self._classifier.classify(im0, bb)
                     self._cart_cls_cache[cd] = result
+                    self._cls_last_frame[cd] = frame_idx
                     if result.get("quality") == "valid_cart":
                         self._cart_cls_history[cd].append(
                             (result["fill"], result["bag"],
@@ -616,17 +670,21 @@ class TrackingEngine:
                         old = self._motion_cache[cart_raw]
                         self._motion_cache[cart_raw] = (old[0], old[1], old[2], old[3], person_dir)
 
-            # --- POPS scoring for each cart ---
+            # --- Per-cart facts + POPS scoring ---
+            # Fact recording for the rule engine happens BEFORE the cart-age
+            # guard, so brief carts still get a fact timeline even when POPS
+            # declines to score them.  Everything hoisted above the guard is a
+            # PURE READ — the _walkaway_frames counter is still mutated below
+            # it, because a re-identified cart inherits a link while its
+            # cart_age resets to ~0, and incrementing the counter during that
+            # window would let `abandoned` fire earlier than it does today.
             for raw, c, _, bb in frame_detections:
                 if names[int(c)] != 'cart':
                     continue
                 cd = gdi('cart', raw)
-                cart_age = frame_idx - self._obj_first_frame.get(raw, frame_idx)
-                if cart_age < MIN_CART_FRAMES_FOR_POPS:
-                    continue  # too new — might be a flicker
                 speed, _, speed_status, _, dir_label = self._motion_cache[raw]
 
-                # Link / abandonment
+                # Link state — pure read of the linker's map
                 linked = False
                 linked_person_raw = None
                 for cid, pid in links.items():
@@ -637,6 +695,33 @@ class TrackingEngine:
                 # Classic: person gone from frame for N frames
                 person_gone = (linked and linked_person_raw is not None
                                and self._obj_disappeared.get(linked_person_raw, 0) > ABANDON_FRAMES)
+
+                cr = self._cart_cls_cache.get(cd, {})
+                is_valid = cr.get("is_valid", True)
+                fill_lbl = cr.get("fill", "unclassified")
+                bag_lbl  = cr.get("bag", "not_applicable")
+
+                # Rule-engine fact sample — raw observations only.  Recorded
+                # before the grab-and-run fill override below, which is
+                # POPS-specific reasoning rather than an observation.
+                self._cart_facts[cd].append(CartFactSample(
+                    t=timestamp, frame=frame_idx,
+                    fill=fill_lbl, bag=bag_lbl,
+                    fill_conf=float(cr.get("fill_conf", 0.0)),
+                    quality=cr.get("quality", "unclassified"),
+                    fill_stale_frames=frame_idx - self._cls_last_frame.get(cd, frame_idx),
+                    linked=linked,
+                    linked_person_display=(gdi('person', linked_person_raw)
+                                           if linked_person_raw is not None else None),
+                    abandoned_linker=bool(
+                        person_gone
+                        or self._walkaway_frames.get(cd, 0) > ABANDON_FRAMES),
+                ))
+
+                cart_age = frame_idx - self._obj_first_frame.get(raw, frame_idx)
+                if cart_age < MIN_CART_FRAMES_FOR_POPS:
+                    continue  # too new — might be a flicker
+
                 # Walkaway: person visible but far from cart for N consecutive frames
                 person_far = False
                 if linked and linked_person_raw is not None and linked_person_raw in person_bb:
@@ -650,11 +735,6 @@ class TrackingEngine:
                         self._walkaway_frames.pop(cd, None)
                     person_far = self._walkaway_frames.get(cd, 0) > ABANDON_FRAMES
                 abandoned = person_gone or person_far
-
-                cr = self._cart_cls_cache.get(cd, {})
-                is_valid = cr.get("is_valid", True)
-                fill_lbl = cr.get("fill", "unclassified")
-                bag_lbl  = cr.get("bag", "not_applicable")
 
                 # For abandoned carts: if currently empty but previously had
                 # items, use the peak fill from history.  A cart that went from

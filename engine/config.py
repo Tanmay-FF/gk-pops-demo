@@ -154,6 +154,62 @@ ZONE_CONGESTION_QUEUE_FORMING_SCORE = 45.0
 ZONE_CONGESTION_BACKED_UP_SCORE     = 70.0
 
 # ---------------------------------------------------------------------------
+# Operational rule engine (engine/rules.py)
+# ---------------------------------------------------------------------------
+# Decision logic for the operational categories lives here, not in model
+# weights — how long a cart must sit before it counts as abandoned is tuned by
+# editing these values, no retraining.
+#
+# All durations are in SECONDS and converted to sample counts at runtime from
+# the video's own timestamps. ABANDON_FRAMES above is deliberately NOT reused:
+# 30 frames is ~1s at 30fps, which is link bookkeeping, whereas operational
+# abandonment is a minutes-scale question.
+RULE_ENGINE_ENABLED          = True
+
+# Duration thresholds (seconds)
+RULE_BLOCKED_DOOR_S          = 45.0    # egress compliance — shortest fuse
+RULE_STATIC_CART_S           = 120.0   # housekeeping / dwell
+RULE_ABANDONED_CART_S        = 180.0   # retrieval workflow
+
+# Static test — two signals, not just speed. compute_motion() derives speed
+# from a first-to-last delta over the last <=5 positions, so bbox jitter on a
+# physically stationary cart can keep it above SPEED_STATIC indefinitely.
+# Requiring low positional SPREAD as well is immune to that jitter.
+RULE_STATIC_POS_SPREAD_PX    = 12.0    # max distance from the window's centroid
+RULE_STATIC_WINDOW_S         = 3.0
+
+# Door geometry — a cart can block a doorway while its centroid sits outside a
+# thin door polygon, so doors test bbox overlap fraction, not centroid-inside.
+RULE_DOOR_OVERLAP_FRAC       = 0.15    # (cart bbox ∩ door polygon) / bbox area
+
+# Attendance (abandoned-cart rule). Per-track samples have their own
+# timestamps, so "was anyone near this cart at time t" needs a shared time grid.
+RULE_ATTENDED_RADIUS_PX      = 220.0
+RULE_TIME_GRID_HZ            = 2.0
+RULE_GRID_STALENESS_S        = 1.5     # a person seen longer ago than this is not "present"
+
+# Interval hygiene. Positions are only appended when a track is DETECTED, so a
+# long occlusion leaves two samples far apart in time that look like continuous
+# presence. The density gate rejects intervals that aren't actually observed.
+RULE_INTERVAL_MERGE_S        = 3.0     # bridge sub-threshold gaps in one interval
+RULE_MAX_SAMPLE_GAP_S        = 2.0     # reject intervals sampled sparser than this
+RULE_MIN_SAMPLES             = 8
+
+# Classified-observation counts (NOT frames — fill only refreshes every
+# CLASSIFY_EVERY_N_FRAMES, so "10 consecutive frames of empty" can be one
+# observation repeated).
+RULE_EMPTY_CONFIRM_OBS       = 3
+
+# Entry window for the incoming-cart rule: direction is judged over the first
+# N seconds after the cart appears, not over its whole track.
+RULE_ENTRY_WINDOW_S          = 4.0
+
+# Which zone kinds each rule monitors.
+RULE_DOOR_KINDS              = ("door",)
+RULE_STATIC_KINDS            = ("aisle", "analytics")
+RULE_DESIGNATED_AREA_KINDS   = ("fixture",)   # cart corrals — carve-out for abandonment
+
+# ---------------------------------------------------------------------------
 # Zone-free crowd-cluster detection (queue spike alert)
 # ---------------------------------------------------------------------------
 # Two people are considered "in the same cluster" when their centroids are
