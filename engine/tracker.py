@@ -71,7 +71,26 @@ class TrackingEngine:
         self.model = YOLO(model_path)
         self.model.to(self.device)
         if self.device == "cuda":
-            torch.backends.cudnn.benchmark = True
+            # cudnn.benchmark is deliberately OFF. It is normally a free win for
+            # fixed input shapes, but measured on this stack (RTX 3070 Ti Laptop,
+            # torch 2.11+cu128) it is a large net loss on BOTH axes:
+            #
+            #                     benchmark=True   benchmark=False
+            #   detector 1st call     63,393 ms          842 ms
+            #   pose     1st call     73,505 ms          342 ms
+            #   detector steady        49.2 ms         37.3 ms
+            #   pose     steady        27.1 ms         25.2 ms
+            #
+            # The exhaustive per-conv algorithm search costs ~137 s of one-time
+            # stall across the two YOLO models (plus ~15 s for the classifiers)
+            # and still picks slower kernels than the default heuristic — the
+            # trial allocations thrash on a memory-constrained laptop card. That
+            # stall was the whole of the "nothing happens for ~140 s after
+            # clicking Run Analysis" symptom; steady state never needed work.
+            #
+            # Re-measure before turning this back on; on a desktop card with
+            # memory headroom the trade may well go the other way.
+            torch.backends.cudnn.benchmark = False
         self.names = self.model.names
         self.tracker_config = tracker_config
 
