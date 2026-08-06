@@ -192,7 +192,14 @@ pyinstrument==5.1.2
 pymc==5.28.4
 pymc3==3.11.6
 pymongo==4.17.0
-pynvml==13.0.1
+# nvidia-ml-py replaces pynvml. The pynvml package is now only a redirector
+# shim that emits a FutureWarning on every interpreter start ("The pynvml
+# package is deprecated") while the real module ships in nvidia-ml-py. torch
+# imports `pynvml` opportunistically for NVML memory stats and nothing here
+# imports it directly, so pinning nvidia-ml-py keeps torch._HAS_PYNVML True
+# without the warning. Do not re-add pynvml: both provide a module named
+# `pynvml`, and the shim wins and re-introduces the warning.
+nvidia-ml-py==13.610.43
 pyodide==0.0.2
 pyOpenSSL==26.1.0
 PyQt4==4.11.4
