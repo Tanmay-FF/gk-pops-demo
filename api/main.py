@@ -246,8 +246,12 @@ async def recompute_analytics(req: RecomputeRequest):
         lambda: _engine.recompute_analytics(video_path, engine_zones),
     )
 
-    # recompute_analytics returns (analytics_summary_html, spikes_html, dwell_html, journey_html, heatmap_image)
-    analytics_summary_html, spikes_html, dwell_html, journey_html, heatmap_img = result
+    # recompute_analytics returns (summary, spikes, dwell, journey,
+    #                              heatmap_bgr, heatmap_path, ops_alerts_html)
+    # This previously unpacked 5 names from a 6-tuple and raised ValueError on
+    # every call; the arity is now pinned to the engine's actual return.
+    (analytics_summary_html, spikes_html, dwell_html, journey_html,
+     heatmap_img, _heatmap_path, _ops_alerts_html) = result
 
     # heatmap_img may be a numpy array or path
     heatmap_url: Optional[str] = None

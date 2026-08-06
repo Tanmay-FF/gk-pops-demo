@@ -59,6 +59,37 @@ def extract_first_frame(video_path: str) -> Optional[np.ndarray]:
         cap.release()
 
 
+def _segments_cross(p1, p2, p3, p4) -> bool:
+    """True when segment p1p2 properly crosses p3p4 (shared endpoints excluded)."""
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if v == 0 else (1 if v > 0 else -1)
+
+    d1 = orient(p3, p4, p1)
+    d2 = orient(p3, p4, p2)
+    d3 = orient(p1, p2, p3)
+    d4 = orient(p1, p2, p4)
+    return ((d1 * d2 < 0) and (d3 * d4 < 0))
+
+
+def _is_self_intersecting(arr: np.ndarray) -> bool:
+    """Brute-force edge-pair test. Polygons here are hand-drawn (a handful of
+    vertices), so O(V^2) is free and exact beats clever."""
+    n = len(arr)
+    if n < 4:
+        return False
+    for i in range(n):
+        a1, a2 = arr[i], arr[(i + 1) % n]
+        for j in range(i + 1, n):
+            # Skip adjacent edges (they legitimately share a vertex)
+            if j == i or (j + 1) % n == i or (i + 1) % n == j:
+                continue
+            b1, b2 = arr[j], arr[(j + 1) % n]
+            if _segments_cross(a1, a2, b1, b2):
+                return True
+    return False
+
+
 def validate_polygon(pts: list[tuple[int, int]]) -> tuple[bool, str]:
     """Cheap sanity checks before promoting an in-progress polygon to a Zone.
     Returns (ok, message)."""
@@ -71,6 +102,13 @@ def validate_polygon(pts: list[tuple[int, int]]) -> tuple[bool, str]:
     diffs = np.diff(arr, axis=0, append=arr[:1])
     if np.any(np.all(diffs == 0, axis=1)):
         return False, "Polygon has duplicate consecutive vertices."
+    # A figure-of-eight polygon is filled by fillPoly's even-odd rule, which
+    # punches holes where the loops overlap. Zone membership then reports
+    # "outside" for pixels the user clearly meant to include, so reject it at
+    # draw time rather than letting a rule silently under-fire later.
+    if _is_self_intersecting(arr):
+        return False, ("Polygon edges cross each other — redraw it without "
+                       "self-intersections.")
     return True, ""
 
 

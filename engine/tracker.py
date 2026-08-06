@@ -30,6 +30,7 @@ from .config import (
     WALKAWAY_DIST_THRESH,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
     POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
+    RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
 )
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
@@ -378,14 +379,23 @@ class TrackingEngine:
 
     def recompute_analytics(self, source_path, zones, *,
                             analytics_out_dir=None,
-                            dwell_threshold_s=30.0):
+                            dwell_threshold_s=30.0,
+                            camera_placement=None):
         """Skip detection — pull a cached TrajectoryBundle and re-run analytics
-        with the supplied zones.  Returns the four analytics outputs only."""
+        with the supplied zones.
+
+        This is the path that makes the operational rule engine cheap: editing
+        a door zone or retuning a threshold re-evaluates every rule over the
+        cached facts with no GPU work at all.
+        """
         if analytics_out_dir is None:
             analytics_out_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
         os.makedirs(analytics_out_dir, exist_ok=True)
         zones = list(zones or [])
+        if camera_placement is None:
+            camera_placement = getattr(self, "_camera_placement",
+                                       "Outside (facing entrance)")
 
         bundle = None
         if source_path:
@@ -396,21 +406,27 @@ class TrackingEngine:
 
         if bundle is None:
             empty_msg = analytics_ui.build_analytics_empty_state(has_video=bool(source_path))
-            return ("", empty_msg, empty_msg, empty_msg, None, None)
+            return ("", empty_msg, empty_msg, empty_msg, None, None,
+                    ui_builder.build_operational_alerts(
+                        [], "Run an analysis first — there are no cached "
+                            "trajectories to evaluate."))
 
         result = run_analytics(
             bundle, zones,
             dwell_threshold_s=dwell_threshold_s,
             heatmap_background=bundle.representative_frame,
             out_dir=analytics_out_dir,
+            camera_placement=camera_placement,
         )
         summary = analytics_ui.build_analytics_summary(zones, result)
         spikes  = analytics_ui.build_queue_spikes_banner(result.queue_spikes)
         dwell   = analytics_ui.build_dwell_table(zones, result.dwell_summary, result.dwell_rows)
         journey = analytics_ui.build_journey_table(result.journey_matrix, result.journey_labels)
+        ops     = ui_builder.build_operational_alerts(
+            result.rule_findings, result.rules_unavailable_reason)
         # Return both the ndarray (gr.Image) and the path (gr.File).
         return (summary, spikes, dwell, journey,
-                result.heatmap_composite, result.heatmap_png_path)
+                result.heatmap_composite, result.heatmap_png_path, ops)
 
     def _ensure_pose_model(self):
         if self._pose_model is None:
@@ -1171,6 +1187,7 @@ class TrackingEngine:
         analytics_result: AnalyticsResult = run_analytics(
             bundle, list(zones), out_dir=analytics_out_dir,
             heatmap_background=rep_frame,
+            camera_placement=camera_placement,
         )
 
         # --- Build HTML ---
@@ -1223,7 +1240,46 @@ class TrackingEngine:
         alert_banner_html = ui_builder.build_alert_banner(
             self._event_log, analytics_result.queue_spikes,
             analytics_result.spike_events,
+            analytics_result.rule_findings,
         )
+        ops_alerts_html = ui_builder.build_operational_alerts(
+            analytics_result.rule_findings,
+            analytics_result.rules_unavailable_reason,
+        )
+
+        # Operational findings go in the JSON under their OWN key, never spliced
+        # into "events". The event log drives FrameCapturer, which JPEG-encodes
+        # a full frame for every new event name and hands those frames to the
+        # VLM case report — so anything added to "events" leaves the device by
+        # default. Keeping rules separate is what makes the Phase-2
+        # child-in-cart work safe to add here later.
+        full_json["rule_findings"] = [
+            {
+                "rule_id": f.rule_id, "label": f.label, "severity": f.severity,
+                "cart_id": f.cart_display_id,
+                "zone_id": f.zone_id, "zone_name": f.zone_name,
+                "start_t": f.start_t, "end_t": f.end_t,
+                "duration_s": f.duration_s, "threshold_s": f.threshold_s,
+                "ongoing_at_end_of_video": f.ongoing_at_eov,
+                "confidence": f.confidence, "n_samples": f.n_samples,
+                "reasons": list(f.reasons), "evidence": dict(f.evidence),
+            }
+            for f in analytics_result.rule_findings
+        ]
+        full_json["rule_engine"] = {
+            "unavailable_reason": analytics_result.rules_unavailable_reason,
+            "timestamps_synthesized": bundle.timestamps_synthesized,
+            "thresholds_s": {
+                "blocked_door": RULE_BLOCKED_DOOR_S,
+                "static_cart": RULE_STATIC_CART_S,
+                "abandoned_cart": RULE_ABANDONED_CART_S,
+            },
+        }
+        # Re-emit now that the rule keys exist (the first write happened before
+        # analytics ran, since analytics consumes the bundle built from it).
+        with open(json_path, 'w') as f_json:
+            json.dump(full_json, f_json, indent=2)
+        json_str = json.dumps(full_json, indent=2)
 
         # --- Analytics HTML ---
         analytics_summary_html = analytics_ui.build_analytics_summary(list(zones), analytics_result)
@@ -1295,7 +1351,7 @@ class TrackingEngine:
                 bev3d_html, bev2d_html, case_report_html, case_report_file,
                 analytics_summary_html, spikes_html, dwell_html, journey_html,
                 heatmap_img_bgr, heatmap_path,
-                alert_banner_html)
+                alert_banner_html, ops_alerts_html)
 
     # ------------------------------------------------------------------
     # Case-report generation (extracted so it can run synchronously inside

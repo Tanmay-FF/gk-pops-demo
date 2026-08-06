@@ -49,10 +49,11 @@ def _alert_chip(title: str, detail: str) -> str:
     )
 
 
-def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
-    """Sticky top-of-page notification surfacing HIGH POPS events and severe
-    zone congestion. Returns "" when nothing is worth flagging — caller is
-    expected to hide the component in that case.
+def build_alert_banner(event_log, queue_spikes, spike_events=None,
+                       rule_findings=None) -> str:
+    """Sticky top-of-page notification surfacing HIGH POPS events, severe
+    zone congestion, and operational rule findings. Returns "" when nothing is
+    worth flagging — caller is expected to hide the component in that case.
 
     Args:
         event_log:    list of per-frame logged events (HIGH_EVENTS get flagged).
@@ -60,6 +61,13 @@ def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
         spike_events: list[dict] from analytics_result.spike_events — same data
                       but may also include `source: "crowd_cluster"` rows that
                       aren't tied to a user-defined zone.
+        rule_findings: list[RuleFinding] from the operational rule engine.
+                      These use their OWN severity vocabulary
+                      (INFO/WATCH/ACTION/SAFETY) rather than SpikeSeverity, so
+                      they need their own filter — reusing the congestion
+                      filter would drop every one of them silently. Only
+                      SAFETY and ACTION reach the sticky banner; WATCH/INFO
+                      live in the operational-alerts table only.
     """
     high_events = [e for e in (event_log or []) if e.get("event") in HIGH_EVENTS]
     severe_spikes = [s for s in (queue_spikes or [])
@@ -70,7 +78,13 @@ def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
                     if e.get("severity") in ("BACKED_UP", "QUEUE_FORMING")
                     and e.get("zone_id") not in seen_zone_ids]
 
-    if not high_events and not severe_spikes and not crowd_events:
+    safety_rules = [f for f in (rule_findings or [])
+                    if getattr(f, "severity", None) == "SAFETY"]
+    action_rules = [f for f in (rule_findings or [])
+                    if getattr(f, "severity", None) == "ACTION"]
+
+    if (not high_events and not severe_spikes and not crowd_events
+            and not safety_rules and not action_rules):
         return ""
 
     # Keep the highest-severity event per cart so we don't double-count.
@@ -88,7 +102,8 @@ def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
     crowd_queueing  = [e for e in crowd_events if e.get("severity") == "QUEUE_FORMING"]
 
     # Hot palette when something truly critical happened, amber otherwise.
-    critical = bool(pushouts or backed_up or crowd_backed_up)
+    # A blocked fire exit outranks a queue, so SAFETY joins this condition.
+    critical = bool(pushouts or backed_up or crowd_backed_up or safety_rules)
     if critical:
         grad = "linear-gradient(135deg,#7f1d1d 0%,#dc2626 55%,#f97316 100%)"
         accent = "#fee2e2"
@@ -130,11 +145,36 @@ def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
             labels += f" +{len(crowd_queueing) - 3} more"
         chips.append(_alert_chip(f"Crowd Spike × {len(crowd_queueing)}", labels))
 
+    # Operational rule chips — grouped by rule so one doorway blocked by two
+    # carts reads as one incident rather than two.
+    def _rule_chip(findings, title_singular):
+        by_rule: dict = {}
+        for f in findings:
+            by_rule.setdefault(f.label, []).append(f)
+        for label, group in by_rule.items():
+            places = ", ".join(
+                (g.zone_name or f"C{g.cart_display_id}") for g in group[:3])
+            if len(group) > 3:
+                places += f" +{len(group) - 3} more"
+            longest = max(g.duration_s for g in group)
+            chips.append(_alert_chip(
+                f"{label} × {len(group)}", f"{places} · up to {longest:.0f}s"))
+
+    if safety_rules:
+        _rule_chip(safety_rules, "Safety")
+    if action_rules:
+        _rule_chip(action_rules, "Action")
+
     n_total = (len(pushouts) + len(high_pri) + len(severe_spikes)
-               + len(crowd_events))
-    headline = ("Action required — review the flagged carts and zones below"
-                if critical else
-                "Heads up — congestion forming in one or more zones")
+               + len(crowd_events) + len(safety_rules) + len(action_rules))
+    if safety_rules:
+        headline = "Safety issue — egress or pathway obstructed, see below"
+    elif critical:
+        headline = "Action required — review the flagged carts and zones below"
+    elif action_rules:
+        headline = "Operational follow-up needed — unattended carts detected"
+    else:
+        headline = "Heads up — congestion forming in one or more zones"
 
     return (
         f"<div class='gk-alert-banner' role='alert' aria-live='assertive' "
@@ -163,6 +203,111 @@ def build_alert_banner(event_log, queue_spikes, spike_events=None) -> str:
         f"flex-shrink:0;line-height:1;padding:0;' title='Dismiss'>&times;</button>"
         f"</div></div>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Operational alerts (rule engine)
+# ---------------------------------------------------------------------------
+_RULE_SEV_COLOR = {
+    "SAFETY": "#b71c1c",
+    "ACTION": "#e65100",
+    "WATCH":  "#f9a825",
+    "INFO":   "#1565c0",
+}
+_RULE_SEV_BG = {
+    "SAFETY": "#fce4ec",
+    "ACTION": "#fff3e0",
+    "WATCH":  "#fffde7",
+    "INFO":   "#e3f2fd",
+}
+
+
+def _mmss(t: float) -> str:
+    t = max(0.0, float(t))
+    return f"{int(t // 60):02d}:{int(t % 60):02d}"
+
+
+def build_operational_alerts(rule_findings, unavailable_reason=None) -> str:
+    """Table of operational rule findings — one row per incident.
+
+    An empty findings list is NOT rendered as "no issues found" when the rules
+    could not actually run: `unavailable_reason` is shown instead. Silently
+    reporting "all clear" for a run where no zones were drawn (or where a
+    stale cached bundle had no fact timeline) would be a wrong answer dressed
+    up as a clean bill of health.
+    """
+    if unavailable_reason:
+        return (
+            f'<div style="padding:16px 18px;background:#fff8e1;border-radius:10px;'
+            f'border-left:4px solid #f9a825;font-family:{_FONT};">'
+            f'<div style="font-weight:800;color:#8d6e00;font-size:0.95rem;">'
+            f'Operational rules did not run</div>'
+            f'<div style="color:#5d4c00;font-size:0.88rem;margin-top:4px;">'
+            f'{unavailable_reason}</div></div>'
+        )
+
+    if not rule_findings:
+        return (
+            f'<div style="padding:16px 18px;background:#e8f5e9;border-radius:10px;'
+            f'border-left:4px solid #2e7d32;font-family:{_FONT};">'
+            f'<div style="font-weight:800;color:#1b5e20;font-size:0.95rem;">'
+            f'No operational issues detected</div>'
+            f'<div style="color:#2e7d32;font-size:0.88rem;margin-top:4px;">'
+            f'Rules evaluated successfully and nothing crossed its threshold.'
+            f'</div></div>'
+        )
+
+    head = (
+        f'<div style="padding:8px;background:#fff;border-radius:10px;font-family:{_FONT};">'
+        f'<table style="width:100%;border-collapse:collapse;font-size:0.9rem;'
+        f'font-family:{_FONT};border-radius:8px;overflow:hidden;'
+        f'box-shadow:0 1px 6px rgba(0,0,0,0.08);line-height:1.45;">'
+        f'<thead><tr style="background:linear-gradient(135deg,#1e3a5f,#2563eb);color:#fff;">'
+    )
+    for col in ("Severity", "Issue", "Cart", "Zone", "Start", "Duration", "Why"):
+        head += (f'<th style="padding:11px 12px;text-align:left;font-size:0.78rem;'
+                 f'letter-spacing:0.6px;text-transform:uppercase;font-weight:700;'
+                 f'color:#fff;">{col}</th>')
+    head += '</tr></thead><tbody>'
+
+    body = ""
+    for f in rule_findings:
+        sev = getattr(f, "severity", "INFO")
+        col = _RULE_SEV_COLOR.get(sev, "#546e7a")
+        bg = _RULE_SEV_BG.get(sev, "#f5f5f5")
+        dur = f"{f.duration_s:.0f}s"
+        if getattr(f, "ongoing_at_eov", False):
+            dur = f"&ge; {dur} (ongoing)"
+        why = "; ".join(getattr(f, "reasons", []) or [])
+        if getattr(f, "confidence", "high") == "degraded":
+            why += ("  <span style='color:#8d6e00;font-weight:700;'>"
+                    "[degraded: timing derived from frame rate]</span>")
+        also = (getattr(f, "evidence", {}) or {}).get("also_carts") or []
+        cart_txt = f"C{f.cart_display_id}"
+        if also:
+            cart_txt += f" (+{', '.join('C' + str(c) for c in also)})"
+        body += (
+            f'<tr style="background:{bg};">'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">'
+            f'<span style="background:{col};color:#fff;padding:3px 10px;'
+            f'border-radius:4px;font-size:0.72rem;font-weight:800;'
+            f'letter-spacing:0.4px;">{sev}</span></td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'font-weight:700;color:#111827;">{f.label}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'color:#111827;">{cart_txt}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'color:#111827;">{f.zone_name or "&mdash;"}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'color:#111827;font-variant-numeric:tabular-nums;">{_mmss(f.start_t)}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'color:#111827;font-variant-numeric:tabular-nums;">{dur}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;'
+            f'color:#374151;font-size:0.84rem;">{why}</td>'
+            f'</tr>'
+        )
+
+    return head + body + '</tbody></table></div>'
 
 
 def styled_table(title, rows, header_gradient=("#1e3a5f", "#2563eb"), row_tint="#e8f0fe"):

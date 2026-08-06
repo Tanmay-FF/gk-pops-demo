@@ -19,6 +19,7 @@ from .analytics_models import (
     AnalyticsResult, DwellRow, JourneyEdge, QueueSpike,
     TrajectoryBundle, Zone,
 )
+from . import rules as rule_engine
 from .config import (
     SPEED_STATIC,
     ZONE_CONGESTION_MIN_OCCUPANCY,
@@ -826,12 +827,17 @@ def run_all(bundle: TrajectoryBundle,
             heatmap_background: Optional[np.ndarray] = None,
             out_dir: Optional[str] = None,
             min_dwell_s: float = 1.0,
+            camera_placement: str = "Outside (facing entrance)",
             ) -> AnalyticsResult:
     """Single entry point used by the UI.  Empty zones → only the heatmap is computed.
 
     Layout zones (kind != "analytics") are filtered out here — they're for the
     Floor Map BEV's structural overlay and never participate in dwell, journey,
     or congestion analytics.
+
+    The operational rule engine is the exception: it reads door / aisle /
+    fixture zones, which is why it gets the FULL zone list rather than
+    analytics_zones.
     """
     analytics_zones = [z for z in zones if getattr(z, "kind", "analytics") == "analytics"]
     membership = build_zone_membership(bundle, analytics_zones)
@@ -881,6 +887,18 @@ def run_all(bundle: TrajectoryBundle,
 
     insight = build_insight_text(bundle, analytics_zones, dwell_summary, spikes, edges)
 
+    # --- Operational rule engine ------------------------------------------
+    # Gets the full zone list (door / aisle / fixture), not analytics_zones.
+    # Isolated behind try/except: a rule bug must never take down dwell,
+    # heatmap, or the POPS dashboard alongside it.
+    try:
+        rule_findings, rules_reason = rule_engine.evaluate_rules(
+            bundle, zones, camera_placement=camera_placement)
+    except Exception as e:                                   # pragma: no cover
+        import traceback
+        traceback.print_exc()
+        rule_findings, rules_reason = [], f"Rule evaluation failed: {e}"
+
     return AnalyticsResult(
         dwell_rows=dwell_rows,
         dwell_summary=dwell_summary,
@@ -893,4 +911,6 @@ def run_all(bundle: TrajectoryBundle,
         queue_spikes=spikes,
         spike_events=spike_events,
         insight_text=insight,
+        rule_findings=rule_findings,
+        rules_unavailable_reason=rules_reason,
     )

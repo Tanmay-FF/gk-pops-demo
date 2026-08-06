@@ -11,6 +11,8 @@ import cv2
 import gradio as gr
 
 from engine import TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor
+from engine import ui_builder
+from engine.config import TEST_VIDEO_DIR
 from engine.config import VLM_BACKENDS, VLM_DEFAULT_BACKEND
 from engine.trajectory_cache import make_video_key
 from engine.floor_bev2d_builder import build_floor_2d_html
@@ -47,7 +49,7 @@ ZONE_KIND_OPTIONS = [
     ("Fixture",  "fixture"),
     ("Door",     "door"),
 ]
-EMPTY_RUN_RETURN_LEN = 20     # outputs of run_analysis (matches process_video tuple + duplicated heatmap path + alert banner)
+EMPTY_RUN_RETURN_LEN = 21     # outputs of run_analysis (matches process_video tuple + duplicated heatmap path + alert banner + operational alerts)
 
 
 def _empty_run_outputs(message: str = "No video selected"):
@@ -60,6 +62,7 @@ def _empty_run_outputs(message: str = "No video selected"):
         "", "", "", "",                                     # analytics summary/spikes/dwell/journey
         None, None,                                          # heatmap_image, heatmap_file
         gr.update(value="", visible=False),                 # alert banner — hidden when no run
+        "",                                                  # operational alerts table
     )
 
 
@@ -87,7 +90,7 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
             zones=list(zones_state or []),
             defer_case_report=True,
         )
-        # Engine returns 20 outputs:
+        # Engine returns 21 outputs:
         #   0..8   misc html / video / json
         #   9      bev3d_html (full <!DOCTYPE> document)
         #   10     bev2d_html (full <!DOCTYPE> document)
@@ -96,6 +99,7 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
         #   17     heatmap_img_bgr (ndarray)
         #   18     heatmap_path
         #   19     alert_banner_html
+        #   20     ops_alerts_html (operational rule findings)
         out = list(result)
 
         # Wrap the 3D and 2D BEV documents in an iframe srcdoc so each new
@@ -108,16 +112,18 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
         if out[10]:
             out[10] = _wrap_in_iframe(out[10], height_px=620)
 
-        alert_html   = out[-1] or ""
-        heatmap_path = out[-2]
-        heatmap_bgr  = out[-3]
+        ops_html     = out[-1] or ""
+        alert_html   = out[-2] or ""
+        heatmap_path = out[-3]
+        heatmap_bgr  = out[-4]
         heatmap_rgb  = _bgr_ndarray_to_rgb(heatmap_bgr)
         alert_update = gr.update(value=alert_html, visible=bool(alert_html.strip()))
         if alert_html.strip():
             gr.Warning("Alerts detected — review the banner at the top of the page.")
-        # Replace the trailing 3-tuple (BGR, path, alert HTML) with
-        # (RGB, path, alert update). Slots 9 / 10 already swapped to iframes.
-        yield tuple(out[:-3]) + (heatmap_rgb, heatmap_path, alert_update)
+        # Replace the trailing 4-tuple (BGR, path, alert HTML, ops HTML) with
+        # (RGB, path, alert update, ops HTML). Slots 9 / 10 already swapped to
+        # iframes.
+        yield tuple(out[:-4]) + (heatmap_rgb, heatmap_path, alert_update, ops_html)
 
         # ----- Phase 2: run deferred VLM and refresh case-report tab only -----
         try:
@@ -133,8 +139,8 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
             return
         no_op = gr.update()
         # Outputs slot 11 = case_report_html, slot 12 = case_report_download.
-        # 11 leading no-ops, then the two updates, then 7 trailing no-ops.
-        yield (no_op,) * 11 + (case_html, case_file) + (no_op,) * 7
+        # 11 leading no-ops, then the two updates, then 8 trailing no-ops.
+        yield (no_op,) * 11 + (case_html, case_file) + (no_op,) * 8
     except Exception as e:
         gr.Warning(f"Error: {str(e)}")
         traceback.print_exc()
@@ -193,9 +199,19 @@ def close_polygon(current_poly, zone_name, applies_to, zone_kind, zones_state, f
         return zones_state or [], pts, _bgr_to_rgb(overlay), _zone_summary_html(zones_state or []), gr.update()
 
     zones_state = list(zones_state or [])
+    kind = zone_kind or "analytics"
+    # Layout zones are PLACES, not track-type filters. "Track type" defaults to
+    # "person", so a hand-drawn door or aisle left at that default would match
+    # zero cart tracks and the operational rules over it would silently never
+    # fire. Force "both" for layout kinds.
+    if kind in ("door", "aisle", "fixture", "wall"):
+        if applies_to != "both":
+            gr.Info(f"{kind.capitalize()} zones apply to people and carts — "
+                    f'"Track type" set to "both".')
+        applies_to = "both"
     new_zone = zone_editor.make_zone(
         zone_name, pts, applies_to, len(zones_state),
-        kind=zone_kind or "analytics",
+        kind=kind,
     )
     zones_state.append(new_zone)
 
@@ -235,24 +251,34 @@ def delete_zone(zone_id, zones_state, first_frame, current_poly):
     return new_state, overlay, _zone_summary_html(new_state), gr.update(choices=delete_choices, value=None)
 
 
-def recompute_analytics_handler(video_path, zones_state):
+def recompute_analytics_handler(video_path, zones_state, camera_placement):
+    def _empty(has_video):
+        empty = analytics_ui.build_analytics_empty_state(has_video=has_video)
+        return ("", empty, empty, empty, None, None,
+                ui_builder.build_operational_alerts(
+                    [], "Analytics could not be recomputed."))
+
     if not video_path:
         gr.Warning("Upload a video first.")
-        empty = analytics_ui.build_analytics_empty_state(has_video=False)
-        return "", empty, empty, empty, None, None
+        return _empty(False)
     try:
-        # Engine returns (summary, spikes, dwell, journey, heatmap_bgr, heatmap_path).
-        # heatmap_bgr is a BGR ndarray ready for gr.Image after channel-flip.
-        result = engine.recompute_analytics(video_path, list(zones_state or []))
-        heatmap_bgr  = result[-2]
-        heatmap_path = result[-1]
-        heatmap_rgb  = _bgr_ndarray_to_rgb(heatmap_bgr)
-        return result[:-2] + (heatmap_rgb, heatmap_path)
+        # Engine returns (summary, spikes, dwell, journey, heatmap_bgr,
+        # heatmap_path, ops_alerts). heatmap_bgr is a BGR ndarray ready for
+        # gr.Image after channel-flip.
+        #
+        # This is the cheap path for the rule engine: zone edits and threshold
+        # changes re-evaluate every operational rule off the cached facts
+        # without touching the GPU.
+        result = engine.recompute_analytics(
+            video_path, list(zones_state or []),
+            camera_placement=camera_placement)
+        summary, spikes, dwell, journey, heatmap_bgr, heatmap_path, ops = result
+        heatmap_rgb = _bgr_ndarray_to_rgb(heatmap_bgr)
+        return (summary, spikes, dwell, journey, heatmap_rgb, heatmap_path, ops)
     except Exception as e:
         gr.Warning(f"Recompute failed: {e}")
         traceback.print_exc()
-        empty = analytics_ui.build_analytics_empty_state(has_video=True)
-        return "", empty, empty, empty, None, None
+        return _empty(True)
 
 
 def invalidate_cache_handler(video_path):
@@ -1308,6 +1334,22 @@ with gr.Blocks(
                 with gr.Tab("Events"):
                     events_html = gr.HTML("")
 
+                # ── Operational Alerts (rule engine) ────────────────────
+                # Separate tab from Events on purpose: these are rule-engine
+                # outcomes with their own severity vocabulary, not POPS
+                # theft-risk events, and they must not share the event log.
+                with gr.Tab("Operational Alerts"):
+                    gr.HTML(
+                        "<div style='font-family:\"Nunito Sans\",sans-serif;"
+                        "font-size:0.85rem;color:#64748b;padding:4px 8px 10px;'>"
+                        "Blocked doors, static carts, unattended carts and "
+                        "incoming empty carts. Thresholds are configurable in "
+                        "<code>engine/config.py</code> — edit a zone and hit "
+                        "<b>Recompute Analytics</b> to re-evaluate without "
+                        "re-running detection.</div>"
+                    )
+                    ops_alerts_html = gr.HTML("")
+
                 # ── Analytics ───────────────────────────────────────────
                 with gr.Tab("Analytics"):
                     analytics_summary_html = gr.HTML(
@@ -1482,15 +1524,15 @@ with gr.Blocks(
             case_report_html, case_report_download,
             analytics_summary_html, spikes_html, dwell_html, journey_html,
             heatmap_image, heatmap_file,
-            alert_banner_html,
+            alert_banner_html, ops_alerts_html,
         ],
     )
 
     recompute_btn.click(
         fn=recompute_analytics_handler,
-        inputs=[video_input, zones_state],
+        inputs=[video_input, zones_state, camera_placement],
         outputs=[analytics_summary_html, spikes_html, dwell_html, journey_html,
-                 heatmap_image, heatmap_file],
+                 heatmap_image, heatmap_file, ops_alerts_html],
     )
 
     floor_gen_btn.click(
@@ -1508,7 +1550,10 @@ if __name__ == "__main__":
     _ANALYTICS_OUT_DIR = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "temp")
     os.makedirs(_ANALYTICS_OUT_DIR, exist_ok=True)
+    _allowed_paths = [_ANALYTICS_OUT_DIR]
+    if os.path.isdir(TEST_VIDEO_DIR):
+        _allowed_paths.append(TEST_VIDEO_DIR)
     demo.launch(
         server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True,
-        allowed_paths=[_ANALYTICS_OUT_DIR],
+        allowed_paths=_allowed_paths,
     )
