@@ -176,6 +176,19 @@ else:
         broken, np.empty(0, dtype=np.int32), fps)
     check("a missing frame record degrades instead of raising",
           synth3 is True and ts3.size == broken.size)
+    # A track too short to HAVE a span is not evidence of a broken clock. The
+    # caller ORs this flag across every track, so counting a one-frame
+    # detection as evidence marked entire healthy runs degraded.
+    for n_short in (0, 1):
+        short = np.zeros(n_short, dtype=np.float32)
+        _t, s_short = TrackingEngine._sanitize_timestamps(
+            short, np.arange(n_short, dtype=np.int32) + 1, fps)
+        check(f"a {n_short}-sample track does not claim a broken clock",
+              s_short is False)
+    # Two real samples still detect a genuinely stuck clock.
+    _t, s_stuck = TrackingEngine._sanitize_timestamps(
+        np.zeros(2, dtype=np.float32), np.asarray([10, 11], dtype=np.int32), fps)
+    check("two samples with an identical stamp still flag it", s_stuck is True)
 
 check("FACTS_SCHEMA_VERSION was bumped so cached bundles are re-evaluated",
       FACTS_SCHEMA_VERSION >= 2, f"v{FACTS_SCHEMA_VERSION}")

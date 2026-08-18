@@ -348,7 +348,14 @@ class TrackingEngine:
         track, so no threshold could be crossed and the density gate saw a
         sampling rate 8x denser than reality. Both failures were silent.
         """
-        if ts_arr.size == 0:
+        # Fewer than two samples has no MEASURABLE span, which is not the same
+        # as a broken clock. Treating it as one was a false positive with real
+        # consequences: the caller ORs this flag across every track, so a
+        # single 1-sample person track (a one-frame detection, of which a busy
+        # clip has several) marked the whole run degraded — stamping every
+        # finding "confidence: degraded" and printing "CAP_PROP_POS_MSEC was
+        # unusable for this video" on a video whose timing was perfect.
+        if ts_arr.size < 2:
             return ts_arr, False
         span = float(ts_arr[-1] - ts_arr[0])
         monotonic = bool(np.all(np.diff(ts_arr) >= -1e-6))
