@@ -490,10 +490,10 @@ canvas#floor-bev{{
   <!-- Overview -->
   <div class="sb-section" id="sb-overview">
     <div class="sb-hdr">Overview</div>
-    <div class="sb-row"><span>People</span><b id="ov-people">—</b></div>
-    <div class="sb-row"><span>Carts</span><b id="ov-carts">—</b></div>
-    <div class="sb-row"><span>Duration</span><b id="ov-dur">—</b></div>
-    <div class="sb-row"><span>Mode</span><b id="ov-mode">—</b></div>
+    <div class="sb-row"><span>People</span><b id="ov-people">n/a</b></div>
+    <div class="sb-row"><span>Carts</span><b id="ov-carts">n/a</b></div>
+    <div class="sb-row"><span>Duration</span><b id="ov-dur">n/a</b></div>
+    <div class="sb-row"><span>Mode</span><b id="ov-mode">n/a</b></div>
   </div>
 
   <!-- Zones -->
@@ -1036,7 +1036,7 @@ canvas#floor-bev{{
     selectedTrackId=trackId;
     const isPerson=(label==='person');
     const prefix=isPerson?'Person':'Cart';
-    document.getElementById('journey-hdr').textContent=`${{prefix}} ${{trackId}} — Journey`;
+    document.getElementById('journey-hdr').textContent=`${{prefix}} ${{trackId}} - Journey`;
     const jdata=JOURNEY_MAP[trackId];
     const empty=document.getElementById('journey-empty');
     const steps=document.getElementById('journey-steps');
@@ -1050,7 +1050,7 @@ canvas#floor-bev{{
     let html='';
     jdata.zones.forEach(function(z,i){{
       const dw=jdata.dwell[z];
-      const dwStr=dw!=null?dw.toFixed(1)+'s':'—';
+      const dwStr=dw!=null?dw.toFixed(1)+'s':'n/a';
       html+=`<div class="journey-step">
         <span class="step-num">${{i+1}}</span>
         <span class="step-zone">${{z}}</span>

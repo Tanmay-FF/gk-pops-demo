@@ -179,15 +179,27 @@ def setup_venv(venv_dir='venv', requirements_file='requirements.txt'):
     # Step 3: Upgrade pip
     subprocess.check_call([str(python_path), '-m', 'pip', 'install', '--upgrade', 'pip'])
 
-    # Step 4: Install all other packages...
+    # Step 4: Install CUDA-enabled torch/torchvision BEFORE requirements.txt.
+    # requirements.txt has no torch pin, so torch arrives transitively (via
+    # ultralytics) from plain PyPI, which resolves to the CPU-only wheel on
+    # Windows. Installing the CUDA build first means the later requirements
+    # install just satisfies the already-installed pin.
     env = os.environ.copy()
     env["PATH"] = f"{cuda_bin_path}{os.pathsep}{env['PATH']}"
 
+    print("\nInstalling CUDA-enabled torch/torchvision (cu128)...")
+    subprocess.check_call([
+        str(pip_path), 'install',
+        'torch==2.11.0+cu128', 'torchvision==0.26.0+cu128',
+        '--index-url', 'https://download.pytorch.org/whl/cu128',
+    ], env=env)
+
+    # Step 5: Install all other packages...
     print("\nInstalling packages from requirements.txt..")
     subprocess.check_call([str(pip_path), 'install', '-r', str(req_path)], env=env)
     print(f"Installed packages from '{requirements_file}'")
 
-    # Step 5: Explicitly install onnxruntime-gpu from official CUDA index
+    # Step 6: Explicitly install onnxruntime-gpu from official CUDA index
     print("\nInstalling onnxruntime-gpu from ONNX's official CUDA wheel source...")
     subprocess.check_call([
         str(pip_path),

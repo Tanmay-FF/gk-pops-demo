@@ -90,7 +90,8 @@ class PersonCartLinker:
     # --- Cart re-identification ---
     def try_reidentify_cart(self, new_raw_id, bbox, current_cart_raws,
                             display_map, obj_positions, obj_timestamps,
-                            obj_speeds, obj_disappeared, obj_bbox_history=None):
+                            obj_speeds, obj_disappeared, obj_bbox_history=None,
+                            obj_frames=None):
         """Transfer identity when tracker assigns a new raw ID to same physical cart."""
         cart_map = display_map.get('cart')
         if not cart_map or new_raw_id in cart_map:
@@ -137,6 +138,11 @@ class PersonCartLinker:
         # rule engine's door-overlap test silently skips it.
         if obj_bbox_history is not None and best_old in obj_bbox_history:
             obj_bbox_history[new_raw_id] = obj_bbox_history.pop(best_old)
+        # Same reasoning for the frame record: it is the synthesized-timestamp
+        # fallback's only clock, so a re-identified cart that loses it gets its
+        # whole pre-reid history stamped from the frame it was re-found on.
+        if obj_frames is not None and best_old in obj_frames:
+            obj_frames[new_raw_id] = obj_frames.pop(best_old)
 
     # --- Main per-frame update ---
     def update(self, person_bboxes: dict, cart_bboxes: dict,

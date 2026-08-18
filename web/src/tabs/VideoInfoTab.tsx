@@ -18,12 +18,12 @@ export const VideoInfoTab: React.FC = () => {
             <h3 className={s.h3}>Video Information</h3>
             {info ? (
               <dl className={s.dl}>
-                <dt>Video Name</dt><dd className={s.mono}>{info.video_name ?? '—'}</dd>
-                <dt>Resolution</dt><dd>{info.width ?? '—'} × {info.height ?? '—'}</dd>
+                <dt>Video Name</dt><dd className={s.mono}>{info.video_name ?? 'n/a'}</dd>
+                <dt>Resolution</dt><dd>{info.width ?? 'n/a'} × {info.height ?? 'n/a'}</dd>
                 <dt>Total Frames</dt><dd>{(info.total_frames ?? 0).toLocaleString()}</dd>
                 <dt>Frames Processed</dt><dd>{(info.total_frames ?? 0).toLocaleString()}</dd>
-                <dt>FPS</dt><dd>{info.fps ?? '—'}</dd>
-                <dt>Duration</dt><dd>{(info as any).duration ?? '—'}</dd>
+                <dt>FPS</dt><dd>{info.fps ?? 'n/a'}</dd>
+                <dt>Duration</dt><dd>{(info as any).duration ?? 'n/a'}</dd>
               </dl>
             ) : (
               <div className={s.empty}><Icons.cam size={22} style={{ color: 'var(--text-3)' }} /><span>No video loaded</span></div>
@@ -32,9 +32,9 @@ export const VideoInfoTab: React.FC = () => {
             <h3 className={s.h3} style={{ marginTop: 20 }}>Detection Summary</h3>
             {summary ? (
               <dl className={s.dl}>
-                <dt>Unique Persons</dt><dd style={{ fontWeight: 600, color: COLOR_PERSON }}>{summary.total_people_seen ?? '—'}</dd>
-                <dt>Unique Carts</dt><dd style={{ fontWeight: 600, color: COLOR_CART }}>{summary.total_carts_seen ?? '—'}</dd>
-                <dt>Person-Cart Links</dt><dd style={{ fontWeight: 600, color: COLOR_LINK }}>{summary.total_links_established ?? '—'}</dd>
+                <dt>Unique Persons</dt><dd style={{ fontWeight: 600, color: COLOR_PERSON }}>{summary.total_people_seen ?? 'n/a'}</dd>
+                <dt>Unique Carts</dt><dd style={{ fontWeight: 600, color: COLOR_CART }}>{summary.total_carts_seen ?? 'n/a'}</dd>
+                <dt>Person-Cart Links</dt><dd style={{ fontWeight: 600, color: COLOR_LINK }}>{summary.total_links_established ?? 'n/a'}</dd>
               </dl>
             ) : (
               <div className={s.empty}><span>Run analysis to see stats</span></div>
@@ -50,7 +50,7 @@ export const VideoInfoTab: React.FC = () => {
                 <dt>Frames Processed</dt><dd>{(procInfo.total_frames_processed ?? 0).toLocaleString()}</dd>
                 <dt>JSON Sample Rate</dt><dd>every {procInfo.json_every_n ?? '?'} frames</dd>
                 <dt>Quality Threshold</dt><dd>{procInfo.quality_threshold ?? '0.55'}</dd>
-                <dt>Device</dt><dd>{procInfo.device ?? '—'}</dd>
+                <dt>Device</dt><dd>{procInfo.device ?? 'n/a'}</dd>
               </dl>
             ) : (
               <dl className={s.dl}>

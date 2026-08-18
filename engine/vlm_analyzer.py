@@ -2,9 +2,11 @@
 """
 Multi-backend VLM analyzer for POPS case reports.
 
-Supports Claude API (primary) and open-source local models
-(Moondream2, Qwen2-VL-2B, InternVL2-2B) that fit within 8 GB VRAM
-alongside the detection + classification models.
+Default backend is Qwen3-VL-2B (local) — sized to fit alongside the
+detection + classification models within 8 GB VRAM once the detection
+stack's GPU memory is released before case-report generation (see
+TrackingEngine._run_case_report). Claude API and other open-source local
+models (Moondream2, InternVL2-2B) remain available as alternate backends.
 """
 import base64
 import time
@@ -15,7 +17,7 @@ from io import BytesIO
 from PIL import Image
 
 from .config import (
-    MOONDREAM2_MODEL_ID, QWEN2_VL_MODEL_ID, INTERNVL2_MODEL_ID,
+    MOONDREAM2_MODEL_ID, QWEN3_VL_MODEL_ID, INTERNVL2_MODEL_ID,
     VLM_MAX_TOKENS_PER_FRAME, VLM_MAX_TOKENS_SUMMARY,
 )
 
@@ -58,9 +60,9 @@ analysing security camera footage processed by the POPS (Push-Out Probability
 Score) system.
 
 POPS scores range 0-100:
-  0-30  LOW      — Normal shopping behaviour
-  31-70 MEDIUM   — Suspicious activity, needs verification
-  71-100 HIGH    — Likely theft / push-out
+  0-30  LOW      - Normal shopping behaviour
+  31-70 MEDIUM   - Suspicious activity, needs verification
+  71-100 HIGH    - Likely theft / push-out
 
 Key behaviours:
   - Person pushing a shopping cart toward the exit (OUTBOUND) = potential push-out
@@ -91,7 +93,7 @@ def _frame_prompt(capture: dict) -> str:
 
     if is_high:
         focus = (
-            "Pack the maximum suspect-identifying detail — clothing colors and "
+            "Pack the maximum suspect-identifying detail - clothing colors and "
             "style, build, hair, accessories, distinguishing marks, cart contents, "
             "movement direction."
         )
@@ -102,14 +104,15 @@ def _frame_prompt(capture: dict) -> str:
         )
 
     return (
-        f"POPS context — t={ts:.1f}s, trigger={trigger}, score={score}, "
+        f"POPS context - t={ts:.1f}s, trigger={trigger}, score={score}, "
         f"event={event}, fill={fill}, bag={bag}, direction={direction}.\n\n"
         f"{focus}\n\n"
-        f"HARD CONSTRAINTS — your reply MUST follow all of these:\n"
+        f"HARD CONSTRAINTS - your reply MUST follow all of these:\n"
         f"  - Maximum 3 lines, around 60 words total.\n"
         f"  - Plain prose only. Single paragraph.\n"
         f"  - No markdown headers, no tables, no bullet points, no numbered lists.\n"
         f"  - No section labels like 'Person:', 'Cart:', 'Behaviour:'.\n"
+        f"  - Never use em dashes. Use commas, colons or full stops instead.\n"
         f"  - No preamble, no closing remarks. Start with the description directly."
     )
 
@@ -245,7 +248,7 @@ def _build_deterministic_normal_summary(pops_summary: dict,
     )
     if top_dwell and top_dwell.get("avg_dwell_s", 0.0) >= 5.0:
         es.append(
-            f"Highest-dwell zone: {top_dwell.get('zone_name', '?')} — "
+            f"Highest-dwell zone: {top_dwell.get('zone_name', '?')} - "
             f"avg {top_dwell.get('avg_dwell_s', 0.0):.1f}s, "
             f"p95 {top_dwell.get('p95_s', 0.0):.1f}s, "
             f"{int(top_dwell.get('n_visits', 0))} visits."
@@ -301,7 +304,7 @@ def _build_deterministic_normal_summary(pops_summary: dict,
         "risk_assessment": " ".join(ra),
         "suspect_profile": "",  # case_report_builder hides empty profiles
         "actionable_insights_lp": "\n".join(f"- {line}" for line in lp),
-        "actionable_insights_leo": "- Not applicable — no incident detected.",
+        "actionable_insights_leo": "- Not applicable - no incident detected.",
     }
 
 
@@ -322,7 +325,7 @@ def _high_incident_prompt(frame_descs: list[FrameAnalysis],
 The POPS system has flagged a HIGH-risk incident based on the FINAL score
 table below. The suspect is the person linked to Cart {suspect_key}, which
 reached a peak POPS score of {max_score}. Build the case report
-EXCLUSIVELY around this suspect — every clothing, accessory, and behavioural
+EXCLUSIVELY around this suspect - every clothing, accessory, and behavioural
 detail must come from the suspect frame descriptions below.
 
 === SUSPECT FRAME DESCRIPTIONS ===
@@ -340,7 +343,7 @@ EXECUTIVE SUMMARY:
 <2-3 sentences describing what the suspect did, referencing Cart {suspect_key} and the peak POPS score {max_score}. If STORE ANALYTICS CONTEXT shows queue spikes or high-dwell zones, mention them by name; otherwise omit.>
 
 RISK LEVEL: HIGH
-CONFIDENCE: <a single number between 0.5 and 1.0 — how clearly the suspect was visible>
+CONFIDENCE: <a single number between 0.5 and 1.0 - how clearly the suspect was visible>
 
 RISK ASSESSMENT:
 <2-3 sentences on the threat, referencing the peak POPS score and the specific behaviour observed.>
@@ -365,7 +368,7 @@ LAW ENFORCEMENT SUMMARY:
 - <bullet 2>
 - <bullet 3>
 
-HARD CONSTRAINTS — your reply MUST follow ALL of these:
+HARD CONSTRAINTS - your reply MUST follow ALL of these:
 - Replace every <placeholder> with concrete details from the frames above.
 - Do NOT include the angle brackets or the word "placeholder" in your reply.
 - Do NOT mention carts, persons, or zones not in the POPS table / analytics block above.
@@ -373,6 +376,7 @@ HARD CONSTRAINTS — your reply MUST follow ALL of these:
 - SUSPECT PROFILE: exactly 8 bullets, each on its own single line.
 - LP TEAM RECOMMENDATIONS: 3-5 bullets. LAW ENFORCEMENT SUMMARY: 3-5 bullets.
 - Each header on its OWN line. Do NOT collapse the report into one paragraph.
+- Never use em dashes. Use commas, colons or full stops instead.
 - Do NOT repeat any sentence. Stop as soon as LAW ENFORCEMENT SUMMARY is complete."""
 
 
@@ -394,7 +398,7 @@ def _normal_situation_prompt(frame_descs: list[FrameAnalysis],
 The POPS system reviewed {vid} and found NO high-risk incidents. The peak
 POPS score across all carts was {max_score} (the HIGH threshold is
 {HIGH_POPS_THRESHOLD}). Provide a neutral, non-incident situation summary
-based on the representative frames and final POPS table below — there is no
+based on the representative frames and final POPS table below - there is no
 suspect to profile.
 
 === REPRESENTATIVE FRAMES ===
@@ -408,29 +412,30 @@ GROUNDED IN THE REPRESENTATIVE FRAMES AND POPS TABLE ABOVE. Do NOT carry
 placeholder text, bracket markers, or example values into your final reply.
 
 EXECUTIVE SUMMARY:
-<2-3 sentences describing what is visible — general shopping activity, store conditions. If STORE ANALYTICS CONTEXT lists queue spikes or high-dwell zones, call them out by zone name. Otherwise state that store activity appeared normal. Do NOT frame anyone as a suspect.>
+<2-3 sentences describing what is visible - general shopping activity, store conditions. If STORE ANALYTICS CONTEXT lists queue spikes or high-dwell zones, call them out by zone name. Otherwise state that store activity appeared normal. Do NOT frame anyone as a suspect.>
 
 RISK LEVEL: LOW
 CONFIDENCE: 0.9
 
 RISK ASSESSMENT:
-<1-2 sentences confirming no security incidents were detected. Reference the peak POPS score {max_score} and what it indicates — e.g. routine browsing.>
+<1-2 sentences confirming no security incidents were detected. Reference the peak POPS score {max_score} and what it indicates - e.g. routine browsing.>
 
 SUSPECT PROFILE:
-Not applicable — no high-risk subject.
+Not applicable - no high-risk subject.
 
 LP TEAM RECOMMENDATIONS:
 - Continue routine monitoring.
 - <one general operational note if anything is worth a passing mention; otherwise omit this line>
 
 LAW ENFORCEMENT SUMMARY:
-- Not applicable — no incident detected.
+- Not applicable - no incident detected.
 
-HARD CONSTRAINTS — your reply MUST follow ALL of these:
+HARD CONSTRAINTS - your reply MUST follow ALL of these:
 - Replace every <placeholder> with concrete details from the frames / analytics above.
 - Do NOT include the angle brackets or the word "placeholder" in your reply.
 - Headers must be on their own lines (do NOT collapse into one paragraph).
 - Do NOT mention carts, persons, or zones absent from the POPS table or analytics block.
+- Never use em dashes. Use commas, colons or full stops instead.
 - Do NOT repeat any sentence. Stop as soon as LAW ENFORCEMENT SUMMARY is complete."""
 
 
@@ -507,6 +512,14 @@ class VLMAnalyzer:
                                max_score, result, analytics_block: str = ""):
         """Describe ONLY the suspect cart's captures, then build the
         structured incident report."""
+        # The risk level is NOT the VLM's to decide. POPS already scored this
+        # cart at or above HIGH_POPS_THRESHOLD — that is the only reason this
+        # branch runs — and the prompt hands the model "RISK LEVEL: HIGH" as a
+        # fixed line, not a question. Set FIRST, before any model call, so that
+        # neither a header the parser fails to recognise nor an outright VLM
+        # failure can leave a genuine push-out rendering as UNKNOWN.
+        result.risk_level = "HIGH"
+
         suspect_caps = [c for c in captures if _is_suspect_capture(c, suspect_key)]
         # If trigger labelling missed the suspect (rare), fall back to all
         # captures so we still produce a report rather than a blank one.
@@ -531,6 +544,13 @@ class VLMAnalyzer:
         )
         summary_text = self._call_vlm(None, prompt, VLM_MAX_TOKENS_SUMMARY)
         self._parse_summary(summary_text, result)
+        if result.risk_level in ("UNKNOWN", "LOW", "MEDIUM"):
+            # The model contradicted (or lost) the level it was given. POPS is
+            # the scorer of record, so clamp back rather than let a 2B model
+            # downgrade an incident the deterministic pipeline already flagged.
+            # CRITICAL is left alone — that is the model escalating, not
+            # disagreeing.
+            result.risk_level = "HIGH"
 
     def _analyze_normal_situation(self, captures, pops_summary, video_info,
                                   max_score, result, analytics_block: str = "",
@@ -589,7 +609,7 @@ class VLMAnalyzer:
         elif "Moondream" in self._backend:
             return self._call_moondream(image_bytes, prompt, max_tokens)
         elif "Qwen" in self._backend:
-            return self._call_qwen(image_bytes, prompt, max_tokens)
+            return self._call_qwen3vl(image_bytes, prompt, max_tokens)
         elif "InternVL" in self._backend:
             return self._call_internvl(image_bytes, prompt, max_tokens)
         else:
@@ -714,28 +734,28 @@ class VLMAnalyzer:
                                                   self._local_tokenizer)
 
     # ------------------------------------------------------------------
-    # Qwen2-VL-2B (local, ~4 GB VRAM)
+    # Qwen3-VL-2B (local, ~4 GB VRAM)
     # ------------------------------------------------------------------
-    def _load_qwen(self):
+    def _load_qwen3vl(self):
         if self._local_model is not None:
             return
         try:
-            from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+            from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
         except ImportError as e:
             raise RuntimeError(
-                "Qwen2-VL requires transformers>=4.45.0. "
-                "Run: pip install 'transformers>=4.45.0' qwen-vl-utils"
+                "Qwen3-VL requires transformers>=4.57.0. "
+                "Run: pip install 'transformers>=4.57.0'"
             ) from e
-        print(f"[VLM] Loading {QWEN2_VL_MODEL_ID} ...")
-        self._local_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            QWEN2_VL_MODEL_ID, device_map="auto",
-            torch_dtype="auto")
-        self._local_processor = AutoProcessor.from_pretrained(QWEN2_VL_MODEL_ID)
+        print(f"[VLM] Loading {QWEN3_VL_MODEL_ID} ...")
+        self._local_model = Qwen3VLForConditionalGeneration.from_pretrained(
+            QWEN3_VL_MODEL_ID, device_map="auto",
+            dtype="auto")
+        self._local_processor = AutoProcessor.from_pretrained(QWEN3_VL_MODEL_ID)
         self._local_model.eval()
-        print("[VLM] Qwen2-VL loaded.")
+        print("[VLM] Qwen3-VL loaded.")
 
-    def _call_qwen(self, image_bytes, prompt, max_tokens):
-        self._load_qwen()
+    def _call_qwen3vl(self, image_bytes, prompt, max_tokens):
+        self._load_qwen3vl()
         messages = [{"role": "system", "content": [{"type": "text", "text": _SYSTEM_PROMPT}]}]
         user_content = []
         if image_bytes:
@@ -757,7 +777,7 @@ class VLMAnalyzer:
                 padding=True).to(self._local_model.device)
         import torch
         with torch.no_grad():
-            # Small VLMs (Qwen2-VL-2B in particular) loop badly with greedy
+            # Small VLMs (Qwen3-VL-2B in particular) loop badly with greedy
             # defaults — the same sentence repeats until max_tokens runs out.
             # Repetition penalty + n-gram block + EOS gives clean truncation.
             out = self._local_model.generate(
@@ -825,29 +845,41 @@ class VLMAnalyzer:
         """
         import re
 
+        # Header spellings are matched with a WIDE net on purpose. Qwen3-VL-2B
+        # reliably produces the right seven sections but renames them as it
+        # goes — observed in one run: "RISK ASSESSENT" (typo), "SUSPECT
+        # PROFILES" (plural), "LAW ENFORCER SUMMARY" (wrong word). Each miss
+        # silently drops a whole section, so `\w*` stems beat exact spellings.
         SECTION_KEYS = [
-            ("executive_summary",     r"executive\s+summary"),
+            ("executive_summary",     r"executive\s+summ\w*"),
             ("risk_level_marker",     r"risk\s+level"),
             ("confidence_marker",     r"confidence"),
-            ("risk_assessment",       r"risk\s+assessment"),
-            ("suspect_profile",       r"suspect\s+profile"),
+            ("risk_assessment",       r"risk\s+assess\w*"),
+            ("suspect_profile",       r"suspect\s+profiles?"),
             ("actionable_insights_lp",
                 r"(?:lp\s+team\s+recommendations?|loss\s+prevention(?:\s+team)?\s+recommendations?)"),
             ("actionable_insights_leo",
-                r"(?:law\s+enforcement\s+summary|law\s+enforcement\s+recommendations?)"),
+                r"law\s+enforce\w*\s+(?:summary|recommendations?)"),
         ]
         # Match each header optionally on its own line; allow ":" or "-" or
         # whitespace as the body separator.
+        #
+        # The trailing bold group is load-bearing. Models write the header as
+        # `**RISK LEVEL:** HIGH` — bold CLOSES after the colon, not before it.
+        # Without consuming that `**`, every section body began with a literal
+        # "**", which was merely ugly for prose fields but broke risk level
+        # outright: the old extractor took value.split()[0] == "**", stripped
+        # non-alpha to "", and its `if token` guard then left a genuine
+        # push-out reading UNKNOWN.
         header_re = re.compile(
-            r"(?im)^\s*(?:[#*\-•–—]?\s*)?"   # leading bullet/dash
-            r"(?:\*\*|__)?"                                  # markdown bold open
+            r"(?im)^\s*(?:[#*\-•–—]{0,3}\s*)?"   # leading bullet/dash/#'s
+            r"(?:\*\*|__)?"                      # markdown bold open
             r"(" + "|".join(rx for _, rx in SECTION_KEYS) + r")"
-            r"(?:\*\*|__)?"                                  # markdown bold close
-            r"\s*[:–—\-]\s*",                      # separator
+            r"(?:\*\*|__)?"                      # bold close BEFORE separator
+            r"\s*[:–—\-]\s*"                     # separator
+            r"(?:\*\*|__)?[ \t]*",               # bold close AFTER separator
             re.IGNORECASE,
         )
-        # Map regex string → attribute key (case-insensitive lookup).
-        rx_to_attr = {rx.lower(): attr for attr, rx in SECTION_KEYS}
 
         matches = list(header_re.finditer(text))
         if not matches:
@@ -860,7 +892,8 @@ class VLMAnalyzer:
         # Slice [match.end → next match.start] into each field.
         sliced: dict[str, str] = {}
         for i, m in enumerate(matches):
-            attr = next((rx_to_attr[k] for k in rx_to_attr if re.fullmatch(k, m.group(1).lower())), None)
+            attr = next((a for a, rx in SECTION_KEYS
+                         if re.fullmatch(rx, m.group(1), re.IGNORECASE)), None)
             if attr is None:
                 continue
             start = m.end()
@@ -873,11 +906,22 @@ class VLMAnalyzer:
         # risk_level / confidence markers (single tokens, not free text).
         for attr, value in sliced.items():
             if attr == "risk_level_marker":
-                token = value.split()[0] if value else ""
-                # Strip trailing punctuation/markdown so "HIGH." → "HIGH"
-                token = re.sub(r"[^A-Za-z]+", "", token).upper()
-                if token:
-                    result.risk_level = token
+                # Search the whole slice for a known level rather than trusting
+                # the first whitespace-delimited token: "**HIGH**", "HIGH —
+                # push-out", and "Level: HIGH" all have to work.
+                m_lvl = re.search(
+                    r"\b(LOW|MEDIUM|MODERATE|HIGH|CRITICAL|UNKNOWN)\b",
+                    value, re.IGNORECASE)
+                if m_lvl:
+                    token = m_lvl.group(1).upper()
+                    result.risk_level = "MEDIUM" if token == "MODERATE" else token
+                else:
+                    # Unrecognised wording — keep the old behaviour so a level
+                    # we simply don't have a name for still reaches the report.
+                    first = value.split()[0] if value.split() else ""
+                    token = re.sub(r"[^A-Za-z]+", "", first).upper()
+                    if token:
+                        result.risk_level = token
             elif attr == "confidence_marker":
                 num_match = re.search(r"\d+(?:\.\d+)?", value)
                 if num_match:
@@ -895,11 +939,20 @@ class VLMAnalyzer:
         # Last-resort salvage: if the headed fields didn't populate risk_level,
         # confidence, or risk_assessment, scan the executive summary for inline
         # mentions in either word order: "risk level is HIGH" OR "HIGH risk".
+        # The gap between the label and the value has to absorb BOTH shapes,
+        # and they are not the same thing:
+        #   prose    — "risk level is medium"      (a connector word)
+        #   markdown — "**RISK LEVEL:** HIGH"      (`:`, `*`, `*`, space)
+        # When this block runs at all it is because header slicing failed,
+        # which usually means raw markdown is still sitting inline. `\W{0,3}`
+        # on either side of an optional connector covers both; either half
+        # alone silently misses the other case.
+        _GAP = r"\W{0,3}\s*(?:is|are|of|=|:)?\W{0,3}\s*"
         if result.risk_level == "UNKNOWN" and result.executive_summary:
             patterns = [
-                r"risk\s+level\s+(?:is|=|:)?\s*(LOW|MEDIUM|MODERATE|HIGH|CRITICAL|UNKNOWN)",
+                r"risk\s+level" + _GAP + r"(LOW|MEDIUM|MODERATE|HIGH|CRITICAL|UNKNOWN)",
                 r"\b(LOW|MEDIUM|MODERATE|HIGH|CRITICAL)\s+risk\b",
-                r"indicat\w+\s+(?:a|an)?\s*(LOW|MEDIUM|MODERATE|HIGH|CRITICAL)\s+(?:risk|threat|priority)",
+                r"indicat\w+\s+(?:a|an)?\s*(LOW|MEDIUM|MODERATE|HIGH|CRITICAL)\s+(?:risk|threat|priority|likelihood)",
             ]
             for pat in patterns:
                 m = re.search(pat, result.executive_summary, re.IGNORECASE)
@@ -909,7 +962,7 @@ class VLMAnalyzer:
                     break
 
         if result.confidence == 0.0 and result.executive_summary:
-            m = re.search(r"confidence\s+(?:is|=|:|of)?\s*(\d+(?:\.\d+)?)\s*(%?)",
+            m = re.search(r"confidence" + _GAP + r"(\d+(?:\.\d+)?)\s*(%?)",
                           result.executive_summary, re.IGNORECASE)
             if m:
                 try:

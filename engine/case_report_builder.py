@@ -4,10 +4,14 @@ Case report HTML builder — generates professional LP / law-enforcement
 incident reports from VLM analysis + POPS data.
 """
 import base64
+import html
 import uuid
 from datetime import datetime
 
-from .ui_builder import _FONT, _EVENT_BADGE, _badge
+from . import highlights
+from .ui_builder import (
+    _FONT, _EVENT_BADGE, _badge, _mmss, resolve_event_label,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +23,30 @@ _RISK_COLORS = {
     "LOW": ("#2e7d32", "#e8f5e9"),
     "UNKNOWN": ("#546e7a", "#eceff1"),
 }
+
+#: (foreground, background) per operational rule severity — same palette shape
+#: as _RISK_COLORS so the two panels read as one document.
+_OPS_SEVERITY_COLORS = {
+    "SAFETY": ("#b71c1c", "#fce4ec"),
+    "ACTION": ("#e65100", "#fff8e1"),
+    "WATCH":  ("#a16207", "#fefce8"),
+    "INFO":   ("#546e7a", "#eceff1"),
+}
+#: Severity vocab + selection thresholds live in engine.highlights now — it is
+#: the single source of truth shared with the tracking JSON's
+#: operational_highlights key, so this report and that export can never
+#: disagree on what counts as "severe" or "top".
+
+
+def _esc(value) -> str:
+    """Escape a value for HTML text content.
+
+    Zone names come from the zone editor, i.e. they are user-typed, and this
+    document is written to disk and opened in a browser. The older sections of
+    this file interpolate engine-generated strings and escape nothing; anything
+    added here goes through this.
+    """
+    return html.escape("" if value is None else str(value), quote=False)
 
 
 def _section(title, body, icon=""):
@@ -199,7 +227,7 @@ def _build_timeline(event_log, frame_analyses):
     for ev in event_log:
         entries.append({
             "ts": ev["timestamp"], "type": "event",
-            "text": f'Cart {ev["cart_id"]}: {_badge(ev["event"])} &mdash; '
+            "text": f'Cart {ev["cart_id"]}: {_badge(ev["event"])} - '
                     f'POPS {ev["pops_score"]} | {ev["fill"]}/{ev["bag"]} | '
                     f'{ev["direction"]} | Speed: {ev["speed_status"]}',
         })
@@ -282,7 +310,10 @@ def _build_pops_analysis(peak_snapshots, pops_data):
             raw_cid = int(cd[1:])
         snap = peak_snapshots.get(raw_cid, peak_snapshots.get(cd, {}))
         score = info.get("max_score", 0)
-        event = info.get("peak_event", "?")
+        # Same naming as the in-app POPS table — a report that called this row
+        # "INBOUND" while the dashboard called it "INCOMING CART WITHOUT ITEMS"
+        # would read as two different findings.
+        event = resolve_event_label(snap, info.get("peak_event", "?"))
         fill = snap.get("fill", "?")
         bag = snap.get("bag", "?")
         direction = snap.get("direction", "?")
@@ -313,6 +344,230 @@ def _build_pops_analysis(peak_snapshots, pops_data):
         f'</tr>{rows}</table>'
     )
     return _section("POPS Analysis", table, "&#128202;")
+
+
+def _ops_notice(title, detail, fg, bg):
+    return (
+        f'<div style="background:{bg};border-left:4px solid {fg};'
+        f'padding:10px 14px;border-radius:6px;font-family:{_FONT};'
+        f'font-size:0.85rem;color:#1f2937;">'
+        f'<strong style="color:{fg};">{title}</strong>'
+        + (f'<div style="margin-top:4px;color:#475569;">{detail}</div>'
+           if detail else "")
+        + '</div>'
+    )
+
+
+def _build_ops_findings_block(analytics_result):
+    """Operational rule findings — three distinct states, never two.
+
+    "No issues found" and "the rules could not run" are different answers and
+    are rendered differently. Collapsing them would report a clean bill of
+    health for a clip where nothing was ever checked, which is the failure
+    build_operational_alerts exists to avoid.
+    """
+    reason = getattr(analytics_result, "rules_unavailable_reason", None)
+    findings = getattr(analytics_result, "rule_findings", None)
+    state, shown, remainder = highlights.ops_findings_state(reason, findings)
+
+    # Coverage notes ride along with ALL THREE states, clean included, and come
+    # from the same highlights helper the app panel and the JSON use. A report
+    # that says "nothing crossed its threshold" without mentioning that the
+    # clock was synthesised, or that four intervals were discarded as too
+    # sparsely observed, is a clean bill of health nobody audited.
+    notes = highlights.ops_diagnostics(
+        getattr(analytics_result, "rule_diagnostics", None))
+    notes_block = ""
+    if notes:
+        items = "".join(f"<li>{_esc(n)}</li>" for n in notes)
+        notes_block = _ops_notice(
+            "Coverage notes for this run",
+            f'<ul style="margin:6px 0 0 18px;padding:0;">{items}</ul>',
+            "#a16207", "#fefce8")
+
+    if state == "unavailable":
+        return notes_block + _ops_notice(
+            "Operational rules did not run", _esc(reason),
+            "#a16207", "#fefce8")
+    if state == "clean":
+        return notes_block + _ops_notice(
+            "No operational issues detected",
+            "Rules evaluated successfully and nothing crossed its threshold.",
+            "#2e7d32", "#e8f5e9")
+
+    # Highlights, not a second copy of the ops tab's 100-row table: `shown`
+    # leads with everything severe, and when nothing is severe carries the
+    # top few so the section still carries evidence rather than only a count.
+    rows = ""
+    for f in shown:
+        sev = getattr(f, "severity", "INFO")
+        fg, bg = _OPS_SEVERITY_COLORS.get(sev, _OPS_SEVERITY_COLORS["INFO"])
+        dur = f"{getattr(f, 'duration_s', 0.0):.0f}s"
+        if getattr(f, "ongoing_at_eov", False):
+            # Still open when the video ended — the duration is a floor, not a
+            # measurement, and saying so is the difference between "resolved in
+            # 40s" and "was still happening when we stopped looking".
+            dur = f"&ge; {dur} (ongoing)"
+        why = "; ".join(_esc(r) for r in (getattr(f, "reasons", None) or []))
+        if getattr(f, "confidence", "high") == "degraded":
+            why += (" <span style='color:#a16207;font-weight:700;'>"
+                    "[degraded: timing derived from frame rate]</span>")
+        zone = _esc(getattr(f, "zone_name", None)) or "n/a"
+
+        rows += (
+            f'<tr style="border-bottom:1px solid #e2e8f0;background:#fff;">'
+            f'<td style="padding:8px;"><span style="background:{fg};color:#fff;'
+            f'padding:2px 8px;border-radius:4px;font-size:0.72rem;'
+            f'font-weight:800;letter-spacing:0.04em;">{_esc(sev)}</span></td>'
+            f'<td style="padding:8px;font-weight:700;color:#1e3a5f;">'
+            f'{_esc(getattr(f, "label", ""))}</td>'
+            f'<td style="padding:8px;color:#1f2937;">'
+            f'C{_esc(getattr(f, "cart_display_id", "?"))}</td>'
+            f'<td style="padding:8px;color:#1f2937;">{zone}</td>'
+            f'<td style="padding:8px;color:#1f2937;white-space:nowrap;">'
+            f'{_mmss(getattr(f, "start_t", 0.0))}</td>'
+            f'<td style="padding:8px;color:#1f2937;white-space:nowrap;">{dur}</td>'
+            f'<td style="padding:8px;color:#64748b;font-size:0.8rem;">{why}</td>'
+            f'</tr>'
+        )
+
+    table = (
+        f'<table style="width:100%;border-collapse:collapse;font-family:{_FONT};'
+        f'font-size:0.85rem;background:#fff;border:1px solid #e2e8f0;'
+        f'border-radius:6px;overflow:hidden;">'
+        f'<tr style="background:linear-gradient(135deg,#1e3a5f,#2563eb);color:#fff;">'
+        f'<th style="padding:8px;text-align:left;">Severity</th>'
+        f'<th style="padding:8px;text-align:left;">Issue</th>'
+        f'<th style="padding:8px;text-align:left;">Cart</th>'
+        f'<th style="padding:8px;text-align:left;">Zone</th>'
+        f'<th style="padding:8px;text-align:left;">Start</th>'
+        f'<th style="padding:8px;text-align:left;">Duration</th>'
+        f'<th style="padding:8px;text-align:left;">Why</th>'
+        f'</tr>{rows}</table>'
+    )
+    if remainder > 0:
+        table += (
+            f'<div style="font-size:0.78rem;color:#64748b;margin-top:6px;'
+            f'font-family:{_FONT};">+{remainder} lower-severity finding'
+            f'{"s" if remainder != 1 else ""} in the Operational Alerts tab.</div>'
+        )
+    return notes_block + table
+
+
+def _build_congestion_block(analytics_result):
+    """Queue spikes + top dwell zones.
+
+    Independent of the rule engine on purpose: `rules_unavailable_reason` can
+    be set because the clip is shorter than every rule threshold, which says
+    nothing about whether congestion was measured. Gating this behind that
+    field would hide data we actually have.
+    """
+    spikes, dwell = highlights.select_congestion(
+        getattr(analytics_result, "queue_spikes", None),
+        getattr(analytics_result, "dwell_summary", None))
+
+    if not spikes and not dwell:
+        return _ops_notice("No congestion measured",
+                           "No zone occupancy or dwell data for this clip.",
+                           "#546e7a", "#eceff1")
+
+    blocks = ""
+    if spikes:
+        items = ""
+        for s in spikes:
+            sev = getattr(s, "severity", "")
+            fg = "#b71c1c" if sev == "BACKED_UP" else "#e65100"
+            reasons = ", ".join(_esc(r) for r in (getattr(s, "reasons", None) or [])[:3])
+            items += (
+                f'<li style="margin-bottom:6px;color:#1f2937;">'
+                f'<span style="background:{fg};color:#fff;padding:1px 7px;'
+                f'border-radius:4px;font-size:0.7rem;font-weight:800;">'
+                f'{_esc(sev.replace("_", " "))}</span> '
+                f'<strong>{_esc(getattr(s, "zone_name", "?"))}</strong> '
+                f'- avg dwell {getattr(s, "avg_dwell_s", 0.0):.1f}s, '
+                f'peak occupancy {getattr(s, "peak_occupancy", 0)}'
+                + (f' <span style="color:#64748b;">({reasons})</span>' if reasons else "")
+                + '</li>'
+            )
+        blocks += (
+            f'<h4 style="color:#1e3a5f;margin:0 0 8px;font-size:0.85rem;'
+            f'font-weight:800;text-transform:uppercase;letter-spacing:0.04em;">'
+            f'Queue spikes</h4>'
+            f'<ul style="margin:0 0 14px;padding-left:20px;line-height:1.6;'
+            f'font-size:0.85rem;">{items}</ul>'
+        )
+    else:
+        blocks += (
+            f'<div style="font-size:0.85rem;color:#475569;margin-bottom:14px;">'
+            f'No queue spikes - zone occupancy stayed within normal limits.'
+            f'</div>'
+        )
+
+    if dwell:
+        rows = ""
+        for d in dwell:
+            rows += (
+                f'<tr style="border-bottom:1px solid #f1f5f9;">'
+                f'<td style="padding:6px 10px;font-weight:700;color:#1e3a5f;">'
+                f'{_esc(d.get("zone_name", "?"))}</td>'
+                f'<td style="padding:6px 10px;color:#1f2937;">'
+                f'{float(d.get("avg_dwell_s", 0.0)):.1f}s</td>'
+                f'<td style="padding:6px 10px;color:#1f2937;">'
+                f'{float(d.get("p95_s", 0.0)):.1f}s</td>'
+                f'<td style="padding:6px 10px;color:#1f2937;">'
+                f'{int(d.get("n_visits", 0))}</td>'
+                f'</tr>'
+            )
+        blocks += (
+            f'<h4 style="color:#1e3a5f;margin:0 0 8px;font-size:0.85rem;'
+            f'font-weight:800;text-transform:uppercase;letter-spacing:0.04em;">'
+            f'Highest-dwell zones</h4>'
+            f'<table style="width:100%;border-collapse:collapse;'
+            f'font-family:{_FONT};font-size:0.82rem;background:#fff;'
+            f'border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">'
+            f'<tr style="background:#f1f5f9;color:#1e3a5f;">'
+            f'<th style="padding:6px 10px;text-align:left;">Zone</th>'
+            f'<th style="padding:6px 10px;text-align:left;">Avg dwell</th>'
+            f'<th style="padding:6px 10px;text-align:left;">p95</th>'
+            f'<th style="padding:6px 10px;text-align:left;">Visits</th>'
+            f'</tr>{rows}</table>'
+        )
+    return blocks
+
+
+def _build_ops_highlights(analytics_result):
+    """Operations Highlights — the operational read of the clip, alongside the
+    theft-risk read the rest of the report carries.
+
+    Rule findings are deliberately independent of POPS scoring (see
+    RuleFinding's docstring), so this section is built on BOTH branches: a
+    LOW-risk clip with a blocked fire exit still needs it.
+
+    Returns "" when no analytics were supplied at all — an absent section is
+    honest, whereas an "all clear" built from no data would not be.
+    """
+    if analytics_result is None:
+        return ""
+
+    insight = (getattr(analytics_result, "insight_text", "") or "").strip()
+    insight_html = ""
+    if insight:
+        insight_html = (
+            f'<div style="background:#eff6ff;border:1px solid #bfdbfe;'
+            f'border-radius:6px;padding:10px 14px;margin-bottom:12px;'
+            f'font-size:0.85rem;color:#1e3a5f;line-height:1.55;">'
+            f'<strong>Auto-insight:</strong> {_esc(insight)}</div>'
+        )
+
+    body = (
+        f'<div style="font-family:{_FONT};color:#1f2937;">'
+        f'{insight_html}'
+        f'{_build_ops_findings_block(analytics_result)}'
+        f'<div style="margin-top:14px;">'
+        f'{_build_congestion_block(analytics_result)}'
+        f'</div></div>'
+    )
+    return _section("Operations Highlights", body, "&#128737;")
 
 
 def _build_insights(report_data):
@@ -372,7 +627,7 @@ def _vlm_unavailable_banner(report_data):
     return (
         f'<div style="background:#fff3e0;border-left:5px solid #e65100;padding:12px 16px;'
         f'border-radius:6px;margin-bottom:16px;font-family:{_FONT};font-size:0.85rem;">'
-        f'&#9888; <strong>VLM Analysis Unavailable</strong> &mdash; '
+        f'&#9888; <strong>VLM Analysis Unavailable</strong> - '
         f'This is a data-only report. {report_data.error_message or ""}</div>'
     )
 
@@ -382,8 +637,14 @@ def _vlm_unavailable_banner(report_data):
 # ---------------------------------------------------------------------------
 
 def build_case_report_html(report_data, captures, pops_data,
-                           event_log, peak_snapshots, video_info):
+                           event_log, peak_snapshots, video_info,
+                           analytics_result=None):
     """Build the case report.
+
+    analytics_result (optional AnalyticsResult): drives the Operations
+    Highlights section — rule findings, queue spikes, dwell. Optional so the
+    signature stays usable without it; the section is omitted when absent
+    rather than rendered as an empty all-clear.
 
     Returns (gradio_html, standalone_html).
     """
@@ -402,6 +663,9 @@ def build_case_report_html(report_data, captures, pops_data,
         _build_timeline(event_log, frame_analyses),
         _build_evidence_gallery(captures, frame_analyses),
         _build_pops_analysis(peak_snapshots, pops_data),
+        # Ops sits between the POPS table and the recommendations: both are
+        # evidence, and the LP / law-enforcement actions should stay last.
+        _build_ops_highlights(analytics_result),
         _build_insights(report_data),
         _build_technical(report_data, video_info),
         (f'<div style="text-align:center;color:#94a3b8;font-size:0.7rem;'

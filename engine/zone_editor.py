@@ -9,6 +9,7 @@ unit-testable and lets the same helpers be reused (e.g., to bake a
 """
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from typing import Iterable, Optional
 
@@ -16,6 +17,9 @@ import cv2
 import numpy as np
 
 from .analytics_models import Zone, ZoneAppliesTo, ZoneKind
+
+#: Kinds that describe a PLACE on the floor rather than an analytics region.
+LAYOUT_KINDS: tuple[ZoneKind, ...] = ("wall", "aisle", "fixture", "door")
 
 
 # Distinct, well-saturated BGR palette (chosen to be visible over both light
@@ -107,7 +111,7 @@ def validate_polygon(pts: list[tuple[int, int]]) -> tuple[bool, str]:
     # "outside" for pixels the user clearly meant to include, so reject it at
     # draw time rather than letting a rule silently under-fire later.
     if _is_self_intersecting(arr):
-        return False, ("Polygon edges cross each other — redraw it without "
+        return False, ("Polygon edges cross each other - redraw it without "
                        "self-intersections.")
     return True, ""
 
@@ -121,11 +125,20 @@ _LAYOUT_COLORS_BGR: dict[str, tuple[int, int, int]] = {
 }
 
 
+def zone_color_for(kind: ZoneKind, idx: int) -> tuple[int, int, int]:
+    """Colour a zone gets for a given kind. Layout kinds are colour-coded by
+    type so the overlay reads as a floor plan; analytics zones just cycle the
+    palette. Exposed because `kind` is editable after creation — the colour is
+    derived from it, so retyping a zone has to recompute this or the overlay
+    and the sidebar swatch disagree with the zone's actual type."""
+    return _LAYOUT_COLORS_BGR[kind] if kind != "analytics" else polygon_color(idx)
+
+
 def make_zone(name: str, polygon_pts: Iterable[tuple[int, int]],
               applies_to: ZoneAppliesTo, idx: int,
               kind: ZoneKind = "analytics") -> Zone:
     poly = np.asarray(list(polygon_pts), dtype=np.int32)
-    color = _LAYOUT_COLORS_BGR[kind] if kind != "analytics" else polygon_color(idx)
+    color = zone_color_for(kind, idx)
     default_name = f"Zone {idx + 1}" if kind == "analytics" else f"{kind.capitalize()} {idx + 1}"
     return Zone(
         zone_id=str(uuid.uuid4())[:8],
@@ -135,6 +148,97 @@ def make_zone(name: str, polygon_pts: Iterable[tuple[int, int]],
         kind=kind,
         color=color,
     )
+
+
+# ---------------------------------------------------------------------------
+# Editing zones after they are drawn
+#
+# Every function here is (zones, ...) -> (new_zones, changed) and never mutates
+# the list it is given. `changed` exists because the UI drives these from
+# Gradio events that fire more than once per user action — the caller uses it
+# to decide whether to redraw and whether to rebuild the row list.
+# ---------------------------------------------------------------------------
+def coerce_applies_to(kind: ZoneKind,
+                      applies_to: ZoneAppliesTo) -> ZoneAppliesTo:
+    """Layout zones are PLACES, not track-type filters.
+
+    `applies_to` defaults to "person", so a door or aisle left at that default
+    matches zero cart tracks — and the blocked-door / static-cart rules over it
+    then report nothing while the zone looks perfectly correct on screen. Force
+    "both" for every layout kind, at draw time and at edit time alike.
+    """
+    return "both" if kind in LAYOUT_KINDS else (applies_to or "person")
+
+
+def find_zone(zones: list[Zone], zone_id: str) -> int:
+    """Index of zone_id, or -1. Zones are addressed by id rather than position
+    because the list can be rebuilt between a click and its handler."""
+    for i, z in enumerate(zones):
+        if z.zone_id == zone_id:
+            return i
+    return -1
+
+
+def _replaced(zones: list[Zone], i: int, **fields) -> list[Zone]:
+    out = list(zones)
+    out[i] = dataclasses.replace(out[i], **fields)     # Zone is frozen
+    return out
+
+
+def rename_zone(zones: list[Zone], zone_id: str,
+                new_name: str) -> tuple[list[Zone], bool]:
+    """Rename in place. Blank names are ignored rather than accepted — an
+    unnamed zone is unreadable in the overlay, the dwell table and the rule
+    output alike."""
+    zones = list(zones or [])
+    i = find_zone(zones, zone_id)
+    clean = (new_name or "").strip()
+    if i < 0 or not clean or clean == zones[i].name:
+        return zones, False
+    return _replaced(zones, i, name=clean), True
+
+
+def retype_zone(zones: list[Zone], zone_id: str,
+                kind: ZoneKind) -> tuple[list[Zone], bool]:
+    """Change a zone's kind, re-deriving everything that hangs off it.
+
+    `color` is derived from the kind and `applies_to` is constrained by it, so
+    a retype that only wrote `kind` would leave the overlay drawing a door in
+    an analytics colour and, worse, leave a door filtering on people only.
+    """
+    zones = list(zones or [])
+    i = find_zone(zones, zone_id)
+    if i < 0 or zones[i].kind == kind:
+        return zones, False
+    return _replaced(zones, i,
+                     kind=kind,
+                     applies_to=coerce_applies_to(kind, zones[i].applies_to),
+                     color=zone_color_for(kind, i)), True
+
+
+def set_zone_applies_to(zones: list[Zone], zone_id: str,
+                        applies_to: ZoneAppliesTo) -> tuple[list[Zone], bool]:
+    zones = list(zones or [])
+    i = find_zone(zones, zone_id)
+    if i < 0:
+        return zones, False
+    wanted = coerce_applies_to(zones[i].kind, applies_to)
+    if wanted == zones[i].applies_to:
+        return zones, False
+    return _replaced(zones, i, applies_to=wanted), True
+
+
+def remove_zone(zones: list[Zone],
+                zone_id: str) -> tuple[list[Zone], Optional[Zone]]:
+    """Drop a zone. Survivors keep their colours on purpose — re-running the
+    palette over the remaining zones would recolour the whole overlay on every
+    delete, which reads as though the wrong zone went."""
+    zones = list(zones or [])
+    i = find_zone(zones, zone_id)
+    if i < 0:
+        return zones, None
+    removed = zones.pop(i)
+    return zones, removed
 
 
 def _zone_label(z: Zone) -> str:

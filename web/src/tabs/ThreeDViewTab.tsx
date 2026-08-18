@@ -43,13 +43,13 @@ export const ThreeDViewTab: React.FC = () => {
           <div className={s.hudCard}>
             <span className={s.hudLbl}>Persons</span>
             <span className={s.hudVal} style={{ color: COLOR_PERSON }}>
-              {runResult?.tracking_json?.summary?.unique_persons ?? '—'}
+              {runResult?.tracking_json?.summary?.unique_persons ?? 'n/a'}
             </span>
           </div>
           <div className={s.hudCard}>
             <span className={s.hudLbl}>Carts</span>
             <span className={s.hudVal} style={{ color: COLOR_CART }}>
-              {runResult?.tracking_json?.summary?.unique_carts ?? '—'}
+              {runResult?.tracking_json?.summary?.unique_carts ?? 'n/a'}
             </span>
           </div>
         </div>

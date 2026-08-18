@@ -14,9 +14,19 @@ from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLE
 #   No cart detected → 0,  INBOUND → 5,  UNCLEAR → 5
 #
 # B. Threat Indicators (additive, OUTBOUND):
-#   Base +15, EMPTY -15, PARTIAL +15,
-#   FULL+BAGGED +20, FULL+UNBAGGED +45,
-#   FAST +15, MEDIUM +5
+#   Base +15, EMPTY -15,
+#   PARTIAL+BAGGED +15, PARTIAL+UNBAGGED +30,
+#   FULL+BAGGED    +20, FULL+UNBAGGED    +50,
+#   loose merchandise on the move (unbagged + partial/full, not STATIC) +10,
+#   FAST +15, MEDIUM +5,
+#   FAST + unbagged + partial/full +15 (rushing with loose items)
+#
+#   The reachable OUTBOUND totals matter more than the terms. A full unbagged
+#   cart clears the 71 HIGH line at walking pace (75 SLOW / 80 MEDIUM) instead
+#   of topping out at 70; standing still it stays MEDIUM (65), which is the
+#   rule engine's business rather than POPS's. Partial+unbagged reaches HIGH
+#   only when also FAST (85). Partial+bagged is still capped at 55 — items that
+#   look paid for.
 #
 # C. Linked damping (UNKNOWN direction only):
 #   If a person is WITH the cart (linked) and direction is UNKNOWN
@@ -70,6 +80,30 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
             score += _FILL_SCORE_OUTBOUND.get(fill_label, 0)
         # Velocity
         score += _SPEED_SCORE_OUTBOUND.get(speed_status, 0)
+        # Loose merchandise ON THE MOVE toward the exit, at any pace.
+        #
+        # Without this term the textbook pushout — walk a full unbagged cart
+        # calmly out the exit — was arithmetically incapable of reaching HIGH:
+        # 15 base + 50 full/unbagged + 5 MEDIUM = 70, one point under the 71
+        # classify_event() needs. Nothing in 71..94 was reachable at all, and
+        # the whole high tier hinged on speed crossing SPEED_MEDIUM (240 px/s),
+        # a threshold that varies with resolution and camera distance. Someone
+        # who simply does not run scored the same tier as a paying customer.
+        #
+        # STATIC is excluded on purpose. A loaded cart standing still near the
+        # exit is not leaving yet, and that situation already has an owner: the
+        # operational rule engine's blocked-door / unattended-cart categories,
+        # which reason about it with duration evidence POPS does not have.
+        # Including it here would spend the high tier on parked carts.
+        #
+        # Deliberately additive rather than a re-tuned base table: the
+        # abandonment floors (max(score, 75) / max(score, 60)) and the
+        # partial+bagged cap of 55 are treated as spec — see
+        # tests/test_grabrun_override.py, which pins all three — and an additive
+        # term under those floors cannot move them.
+        if (bag_label == "unbagged" and fill_label in ("partial", "full")
+                and speed_status != "STATIC"):
+            score += 10
         # Combo: rushing with loose items is the classic pushout pattern
         if speed_status == "FAST" and bag_label == "unbagged" and fill_label in ("partial", "full"):
             score += 15
@@ -109,6 +143,42 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     return score if score <= 100 else 100
 
 
+_FILL_RANK = {"partial": 1, "full": 2}
+
+
+def peak_sustained_fill(fill_sequence, min_run: int) -> str | None:
+    """Highest-severity fill label that appears in a run of >= `min_run`.
+
+    Grab-and-run detection: a cart whose final vote is "empty" but which held
+    merchandise earlier means someone took the items out. Answering that with a
+    first-half/second-half proportion test does not work on real classifier
+    histories — an actual pushout reads items -> empty -> items as the cart is
+    occluded and re-exposed at the door, and neither half is cleanly loaded nor
+    cleanly empty. What DOES separate signal from noise is contiguity: a stray
+    single-observation "partial" on an empty cart cannot sustain a run, and a
+    cart that really held items produces a long one wherever it sits in the
+    timeline.
+
+    Returns None when no non-empty label sustains a long enough run, i.e. the
+    "empty" verdict stands.
+    """
+    best_run: dict[str, int] = {}
+    i, n = 0, len(fill_sequence)
+    while i < n:
+        label = fill_sequence[i]
+        j = i
+        while j + 1 < n and fill_sequence[j + 1] == label:
+            j += 1
+        if label in _FILL_RANK:
+            best_run[label] = max(best_run.get(label, 0), j - i + 1)
+        i = j + 1
+
+    qualified = [f for f, run in best_run.items() if run >= min_run]
+    if not qualified:
+        return None
+    return max(qualified, key=lambda f: _FILL_RANK[f])
+
+
 def classify_event(pops_score: int, linked: bool,
                    direction_label: str, abandoned: bool = False):
     """Return (event_name, event_color_bgr) based on POPS score + context."""
@@ -131,6 +201,42 @@ def classify_event(pops_score: int, linked: bool,
     if linked:
         return "MONITORING", COLOR_MONITORING
     return "LOW PRIORITY", COLOR_CLEAR
+
+
+def prune_event_log(event_log) -> tuple[list, int]:
+    """Drop rows that are not events, and collapse duplicates per cart.
+
+    Returns (kept, n_dropped). Lives here rather than inline in
+    TrackingEngine.process_video() so the invariant is testable without
+    decoding a video: after reconciliation, EVERY row must still name a real
+    event, and a cart must not carry the same event twice.
+
+    Why it is needed: the end-of-run reconciliation rewrites a cart's logged
+    rows with `classify_event(final_score, ...)`, and that can return a name
+    which is not in LOGGABLE_EVENTS at all — a row logged live as MEDIUM
+    PRIORITY (33) reconciles to LOW PRIORITY (16) once the confidence-weighted
+    fill vote replaces a noisy single-frame reading. Nothing was dropping
+    those, so build_events_timeline() rendered non-events as events and they
+    shipped in full_json["events"].
+
+    Earliest row wins on a collapse: the log records when a cart FIRST reached
+    an event, which is the same rule `already_logged` enforces in the frame
+    loop.
+    """
+    kept: list = []
+    seen: set[tuple] = set()
+    dropped = 0
+    for ev in (event_log or []):
+        if ev.get("event") not in LOGGABLE_EVENTS:
+            dropped += 1
+            continue
+        key = (ev.get("cart_id"), ev.get("event"))
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        kept.append(ev)
+    return kept, dropped
 
 
 # Event names that trigger logging

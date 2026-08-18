@@ -54,17 +54,17 @@ BEV_LEGEND_BG       = (40, 40, 45)
 # VLM / Case Report
 # ---------------------------------------------------------------------------
 VLM_BACKENDS = [
+    "Qwen3-VL-2B (local)",
     "Claude (API)",
     "Moondream2 (local)",
-    "Qwen2-VL-2B (local)",
     "InternVL2-2B (local)",
 ]
-VLM_DEFAULT_BACKEND = "Claude (API)"
+VLM_DEFAULT_BACKEND = "Qwen3-VL-2B (local)"
 FRAME_CAPTURE_POPS_MEDIUM = 30
 FRAME_CAPTURE_POPS_HIGH   = 70
 FRAME_CAPTURE_MAX         = 8
 MOONDREAM2_MODEL_ID  = "vikhyatk/moondream2"
-QWEN2_VL_MODEL_ID   = "Qwen/Qwen2-VL-2B-Instruct"
+QWEN3_VL_MODEL_ID   = "Qwen/Qwen3-VL-2B-Instruct"
 INTERNVL2_MODEL_ID   = "OpenGVLab/InternVL2-2B"
 VLM_MAX_TOKENS_PER_FRAME = 200
 VLM_MAX_TOKENS_SUMMARY   = 1500
@@ -88,12 +88,40 @@ BAG_NA_IDX  = BAG_CLASSES.index("not_applicable")
 # prediction to "empty" regardless of other class scores.
 # Set to 1.0 to disable (i.e., always use argmax).
 EMPTY_OVERRIDE_THRESH = 0.5
+
+# Grab-and-run detection (finalisation). Minimum number of CONSECUTIVE
+# classified observations of partial/full needed before an abandoned cart's
+# final "empty" verdict is overridden back to loaded.
+#
+# Contiguity is the noise guard, not confidence: a stray single-frame "partial"
+# on a genuinely empty cart cannot reach four consecutive observations, while a
+# cart that really held merchandise trivially does. At
+# CLASSIFY_EVERY_N_FRAMES=8 and 20 fps, 4 observations is ~1.6s of sustained
+# merchandise.
+GRABRUN_MIN_RUN_OBS = 4
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------
 YOLO_IMGSZ              = 640  # YOLO input size (640=accurate, 480=fast, 384=fastest)
 CLASSIFY_EVERY_N_FRAMES = 8
 JSON_EVERY_N_FRAMES     = 1   # 1 = every frame (slower), higher = faster
+
+# ---------------------------------------------------------------------------
+# Progress REPORTING cadence — a UI transport setting, not a processing one
+# ---------------------------------------------------------------------------
+# Every frame is still fully processed, classified, scored and logged. This
+# only caps how often the browser is TOLD about it.
+#
+# Why it needs a cap: each progress() call pushes an SSE message, and Gradio
+# re-renders a status tracker for EVERY output component of the event. The run
+# event has 22 outputs, so per-frame reporting on a 417-frame clip is ~9,200
+# component updates — enough to drive Svelte's reactive scheduler into
+# `effect_update_depth_exceeded` and wedge the tab after the run completes.
+#
+# The first and last frame always report, so the bar still starts at 0 and
+# lands on 100%.
+PROGRESS_MAX_UPDATES    = 50    # per run, excluding the forced first/last
+PROGRESS_MIN_INTERVAL_S = 0.15  # never report more often than this
 
 # ---------------------------------------------------------------------------
 # Pose estimation (optional, toggled in UI). Used to overlay skeletons in
@@ -236,9 +264,24 @@ COMOVEMENT_WINDOW        = 6
 COMOVEMENT_STATIC_PX     = 5
 COMOVEMENT_COS_THRESH    = 0.3
 
-# Direction #1763835397930_B8A44FB9F678-medium.mp41763835397930_B8A44FB9F678-medium.mp4
+# Direction
 DIRECTION_MIN_POSITIONS  = 10
 DIRECTION_MIN_DY         = 20
+
+# Direction is judged over the last N SECONDS of a track, not over its whole
+# history. _obj_positions is never trimmed, so a first-to-last delta answers
+# "where did this track start relative to where it is now" — and a shopper who
+# enters through the entrance and later leaves through the same door retraces
+# their own path, netting a delta under DIRECTION_MIN_DY. That reads as
+# UNKNOWN, which loses the OUTBOUND base score and the fill/bag terms with it:
+# a full unbagged cart walking out scores 70 as OUTBOUND and 25 as UNKNOWN, and
+# 25 is under the 31 that gets an event logged at all.
+#
+# Seconds rather than a sample count on purpose: positions are appended per
+# DETECTION, so "the last 40 samples" is 2s for a cleanly tracked cart and 30s
+# for a sparsely detected one. Same index-as-time confusion the rule engine's
+# timestamp handling exists to avoid.
+DIRECTION_WINDOW_S       = 4.0
 
 # ---------------------------------------------------------------------------
 # Fixed classifier weights

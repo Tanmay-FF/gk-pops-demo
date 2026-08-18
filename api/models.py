@@ -10,6 +10,12 @@ class ZoneIn(BaseModel):
     points: list[list[float]]   # [[x, y], ...]  source-pixel coords
     applies_to: str = "person"
     zone_index: int = 0         # for palette color assignment
+    # analytics | wall | aisle | door | fixture. Without this the engine-side
+    # Zone always defaulted to "analytics", and RULE_DOOR_KINDS == ("door",)
+    # matched nothing - so the blocked-door rule could not fire on anything
+    # drawn through the API, while every zone (walls included) became a
+    # static-cart zone and fixtures lost their abandonment carve-out.
+    kind: str = "analytics"
 
 
 class ZoneOut(BaseModel):
@@ -18,6 +24,9 @@ class ZoneOut(BaseModel):
     polygon: list[list[int]]    # [[x, y], ...]
     applies_to: str
     color: list[int]            # [B, G, R]
+    # See ZoneIn.kind. Defaulted so an older client that omits it still
+    # validates - it just keeps the previous analytics-only behaviour.
+    kind: str = "analytics"
 
 
 class RunRequest(BaseModel):

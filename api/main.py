@@ -71,13 +71,24 @@ _UPLOAD_DIR.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 
 def _zone_out_to_engine(z: ZoneOut) -> Zone:
+    """Wire ZoneOut -> engine Zone.
+
+    `kind` has to come across or the operational rules cannot see the layout:
+    RULE_DOOR_KINDS is ("door",), so a zone that arrives as the default
+    "analytics" is invisible to the blocked-door rule and simultaneously
+    counts as a static-cart zone. `applies_to` and `color` are then DERIVED
+    from the kind for the same reason zone_editor.retype_zone() derives them -
+    a door left at the default applies_to="person" matches zero cart tracks.
+    """
     polygon = np.array(z.polygon, dtype=np.int32)
+    kind = getattr(z, "kind", "analytics") or "analytics"
     return Zone(
         zone_id=z.zone_id,
         name=z.name,
         polygon=polygon,
-        applies_to=z.applies_to,
-        color=tuple(z.color),
+        applies_to=zone_editor.coerce_applies_to(kind, z.applies_to),
+        kind=kind,
+        color=tuple(z.color) if z.color else zone_editor.zone_color_for(kind, 0),
     )
 
 
@@ -168,7 +179,7 @@ async def run_analysis(req: RunRequest):
     """Run the full POPS pipeline on the uploaded video."""
     session = _sessions.get(req.video_id)
     if not session:
-        raise HTTPException(status_code=404, detail="video_id not found — upload first")
+        raise HTTPException(status_code=404, detail="video_id not found - upload first")
 
     video_path = session["video_path"]
     engine_zones = [_zone_out_to_engine(z) for z in req.zones]
@@ -185,6 +196,17 @@ async def run_analysis(req: RunRequest):
         ),
     )
 
+    # KNOWN BROKEN, and left that way deliberately: this unpacks 19 names from
+    # a tuple the engine grew to 21, so /api/run raises ValueError before it can
+    # return anything. It was already failing this way before the 3D View and
+    # Bird's-Eye 2D tabs were removed (it was 19-vs-23 then).
+    #
+    # Not silently patched, because `bev3d_html` / `bev2d_html` below no longer
+    # exist: process_video does not build them, and the React tabs that render
+    # those fields (web/src/tabs/ThreeDViewTab.tsx, BirdsEyeTwoDTab.tsx) would
+    # come up blank with no explanation. A loud ValueError beats two empty
+    # panels that look like a data problem. Fixing this endpoint means deciding
+    # what those tabs should say — see RunResult in api/models.py.
     (out_path, json_path, json_str,
      video_html, det_html, config_html, legend_html, pops_html, events_html,
      bev3d_html, bev2d_html, case_report_html, case_report_file,
@@ -247,11 +269,15 @@ async def recompute_analytics(req: RecomputeRequest):
     )
 
     # recompute_analytics returns (summary, spikes, dwell, journey,
-    #                              heatmap_bgr, heatmap_path, ops_alerts_html)
-    # This previously unpacked 5 names from a 6-tuple and raised ValueError on
-    # every call; the arity is now pinned to the engine's actual return.
+    #                              heatmap_bgr, heatmap_path, ops_alerts_html,
+    #                              alert_banner, tab_counts, pops_summary)
+    # Star-unpack the tail on purpose. Pinning the exact arity is what broke
+    # this endpoint twice: the Gradio UI keeps gaining panels the engine
+    # returns HTML for, and every one of them turned a working /api/recompute
+    # into a ValueError on the first call. The names below are positional and
+    # stable; anything appended is not this endpoint's business.
     (analytics_summary_html, spikes_html, dwell_html, journey_html,
-     heatmap_img, _heatmap_path, _ops_alerts_html) = result
+     heatmap_img, _heatmap_path, _ops_alerts_html, *_ui_only) = result
 
     # heatmap_img may be a numpy array or path
     heatmap_url: Optional[str] = None
@@ -295,7 +321,14 @@ async def make_zone(z: ZoneIn):
     ok, msg = zone_editor.validate_polygon(pts)
     if not ok:
         raise HTTPException(status_code=422, detail=msg)
-    zone = zone_editor.make_zone(z.name, pts, z.applies_to, z.zone_index)
+    # `kind` has to reach make_zone(): it derives the colour, the default name
+    # and (via coerce_applies_to) the track-type filter from it. Dropping it
+    # here meant a client that asked for a door got an analytics zone back, so
+    # the kind was already lost before /api/run or /api/recompute saw it.
+    kind = z.kind or "analytics"
+    zone = zone_editor.make_zone(z.name, pts,
+                                 zone_editor.coerce_applies_to(kind, z.applies_to),
+                                 z.zone_index, kind=kind)
     b, g, r = zone.color
     return MakeZoneResult(zone=ZoneOut(
         zone_id=zone.zone_id,
@@ -303,6 +336,7 @@ async def make_zone(z: ZoneIn):
         polygon=zone.polygon.tolist(),
         applies_to=zone.applies_to,
         color=[b, g, r],
+        kind=zone.kind,
     ))
 
 

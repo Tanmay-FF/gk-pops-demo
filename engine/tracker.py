@@ -25,9 +25,10 @@ from .config import (
     MODEL_PATH, TRACKER_CONFIG,
     COLOR_PERSON, COLOR_CART,
     YOLO_IMGSZ, CLASSIFY_EVERY_N_FRAMES, JSON_EVERY_N_FRAMES,
+    PROGRESS_MAX_UPDATES, PROGRESS_MIN_INTERVAL_S,
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
-    WALKAWAY_DIST_THRESH,
+    WALKAWAY_DIST_THRESH, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
     POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
     RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
@@ -36,7 +37,7 @@ from .classifier import CartClassifier
 from .linker import PersonCartLinker
 from .motion import compute_motion, compute_direction_label
 from .scoring import (
-    compute_pops, classify_event,
+    compute_pops, classify_event, peak_sustained_fill, prune_event_log,
     LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS,
 )
 from .renderer import (
@@ -45,15 +46,19 @@ from .renderer import (
     draw_pose_skeleton,
 )
 from .video_io import open_video, create_writer, reencode_to_mp4
-from .bev3d_builder import build_3d_bev_html, slim_frame_for_3d
-from .bev2d_builder import build_2d_bev_html, slim_frame_for_2d
-from .bev2d_orientation import attach_orientations
+# The 3D View, Bird's-Eye 2D and Floor Map surfaces were removed from this
+# build. They embedded PER-FRAME data in a full HTML document that the browser
+# received in the same message as everything else, and the page froze at 100%.
+# bev3d_builder / bev2d_builder / bev2d_orientation / floor_bev2d_builder are
+# still in the tree, just unimported.
 from .frame_capturer import FrameCapturer
 from .vlm_analyzer import VLMAnalyzer
 from .case_report_builder import build_case_report_html
 from . import ui_builder
 from . import analytics_ui
-from .analytics_builder import run_all as run_analytics, compute_impressions
+from . import highlights
+from . import rules as rule_engine
+from .analytics_builder import run_all as run_analytics
 from .analytics_models import (
     AnalyticsResult, CartFactSample, TrackRecord, TrajectoryBundle, Zone,
     FACTS_SCHEMA_VERSION,
@@ -86,10 +91,10 @@ class TrackingEngine:
             # and still picks slower kernels than the default heuristic — the
             # trial allocations thrash on a memory-constrained laptop card. That
             # stall was the whole of the "nothing happens for ~140 s after
-            # clicking Run Analysis" symptom; steady state never needed work.
+            # clicking Run Analysis" symptom.
             #
             # Re-measure before turning this back on; on a desktop card with
-            # memory headroom the trade may well go the other way.
+            # headroom the trade may well go the other way.
             torch.backends.cudnn.benchmark = False
         self.names = self.model.names
         self.tracker_config = tracker_config
@@ -134,6 +139,10 @@ class TrackingEngine:
         self._obj_confs        = {}
         self._obj_bboxes       = {}          # raw_id -> LATEST bbox (overwritten each frame)
         self._obj_bbox_history = defaultdict(list)  # raw_id -> [bbox, ...] parallel to _obj_positions
+        # raw_id -> [frame_idx, ...] parallel to _obj_positions. The REAL frame
+        # each sample was detected on; _sanitize_timestamps() needs it to build a
+        # fallback clock that does not assume gap-free detection.
+        self._obj_frames       = defaultdict(list)
         self._obj_first_frame  = {}
         self._obj_disappeared  = defaultdict(int)
 
@@ -223,8 +232,10 @@ class TrackingEngine:
                 speed, direction, speed_status, accel = compute_motion(
                     self._obj_positions[raw_id], self._obj_timestamps[raw_id],
                     self._obj_speeds[raw_id], fps)
-                dir_label = compute_direction_label(self._obj_positions[raw_id],
-                                                    getattr(self, '_camera_placement', 'Outside (facing entrance)'))
+                dir_label = compute_direction_label(
+                    self._obj_positions[raw_id],
+                    getattr(self, '_camera_placement', 'Outside (facing entrance)'),
+                    self._obj_timestamps[raw_id], DIRECTION_WINDOW_S)
             display_id = gdi('person' if is_person else 'cart', raw_id)
             prefix = "P" if is_person else "C"
             key = f"{prefix}{display_id}"
@@ -319,7 +330,7 @@ class TrackingEngine:
     # Trajectory bundle builder + analytics recompute
     # ------------------------------------------------------------------
     @staticmethod
-    def _sanitize_timestamps(ts_arr: np.ndarray, first_frame: int,
+    def _sanitize_timestamps(ts_arr: np.ndarray, frames_arr: np.ndarray,
                             fps: float) -> tuple[np.ndarray, bool]:
         """Return (timestamps, was_synthesized).
 
@@ -329,6 +340,13 @@ class TrackingEngine:
         no rule ever crosses its threshold and the output is an empty alert
         list indistinguishable from "nothing happened" — a silent wrong answer.
         Fall back to frame-derived time and let the caller flag the run.
+
+        The fallback derives from `frames_arr`, the REAL frame index of each
+        sample. It used to be `arange(n) + first_frame`, which counts SAMPLES —
+        and samples only exist where the track was detected. A cart parked in a
+        doorway for 4 minutes but detected one frame in eight came out as a 30s
+        track, so no threshold could be crossed and the density gate saw a
+        sampling rate 8x denser than reality. Both failures were silent.
         """
         if ts_arr.size == 0:
             return ts_arr, False
@@ -337,7 +355,12 @@ class TrackingEngine:
         if span > 1e-6 and monotonic:
             return ts_arr, False           # usable as-is
         safe_fps = fps if fps and fps > 0 else 30.0
-        synth = (np.arange(ts_arr.size, dtype=np.float32) + float(first_frame)) / safe_fps
+        if frames_arr.size == ts_arr.size and frames_arr.size:
+            # frame_idx is 1-based; CAP_PROP_POS_MSEC is 0.0 on the first frame,
+            # so subtract one to keep the two clocks on the same origin.
+            synth = (frames_arr.astype(np.float64) - 1.0) / safe_fps
+        else:                              # no frame record (very old state)
+            synth = np.arange(ts_arr.size, dtype=np.float64) / safe_fps
         return synth.astype(np.float32), True
 
     def _build_trajectory_bundle(self, source_path, w, h, fps, total_frames,
@@ -351,6 +374,7 @@ class TrackingEngine:
             timestamps = self._obj_timestamps.get(raw_id) or []
             speeds = self._obj_speeds.get(raw_id) or []
             bboxes = self._obj_bbox_history.get(raw_id) or []
+            frames = self._obj_frames.get(raw_id) or []
             n = min(len(positions), len(timestamps))
             if n == 0:
                 continue
@@ -359,8 +383,15 @@ class TrackingEngine:
             # _obj_speeds may be slightly shorter or longer than positions
             spd = list(speeds[:n]) + [0.0] * max(0, n - len(speeds))
             spd_arr = np.asarray(spd[:n], dtype=np.float32)
-            first_f = self._obj_first_frame.get(raw_id, 1)
-            ts_arr, synth = self._sanitize_timestamps(ts_arr, first_f, fps)
+            # Recorded per detection, so it is parallel to positions. A short
+            # array means state from before _obj_frames existed; fall back to
+            # first_frame + arange rather than misaligning the two.
+            if len(frames) >= n:
+                frames_arr = np.asarray(frames[:n], dtype=np.int32)
+            else:
+                first_f = self._obj_first_frame.get(raw_id, 1)
+                frames_arr = (np.arange(n, dtype=np.int32) + int(first_f))
+            ts_arr, synth = self._sanitize_timestamps(ts_arr, frames_arr, fps)
             any_synth = any_synth or synth
             # bbox history is appended in lockstep with positions; a short
             # array means a re-identified track whose history did not carry
@@ -369,11 +400,6 @@ class TrackingEngine:
                 bbox_arr = np.asarray(bboxes[:n], dtype=np.float32)
             else:
                 bbox_arr = np.empty((0, 4), dtype=np.float32)
-            # `frames` is DISPLAY ONLY — derive it from the (possibly
-            # synthesised) timestamps rather than assuming the track was
-            # detected in every consecutive frame, which arange() did.
-            safe_fps = fps if fps and fps > 0 else 30.0
-            frames_arr = np.rint(ts_arr * safe_fps).astype(np.int32)
             display_id = self._display_map.get(label, {}).get(raw_id, raw_id)
             tracks[raw_id] = TrackRecord(
                 raw_id=raw_id, label=label, display_id=int(display_id),
@@ -399,7 +425,8 @@ class TrackingEngine:
     def recompute_analytics(self, source_path, zones, *,
                             analytics_out_dir=None,
                             dwell_threshold_s=30.0,
-                            camera_placement=None):
+                            camera_placement=None,
+                            rule_thresholds=None):
         """Skip detection — pull a cached TrajectoryBundle and re-run analytics
         with the supplied zones.
 
@@ -427,8 +454,9 @@ class TrackingEngine:
             empty_msg = analytics_ui.build_analytics_empty_state(has_video=bool(source_path))
             return ("", empty_msg, empty_msg, empty_msg, None, None,
                     ui_builder.build_operational_alerts(
-                        [], "Run an analysis first — there are no cached "
-                            "trajectories to evaluate."))
+                        [], "Run an analysis first - there are no cached "
+                            "trajectories to evaluate."),
+                    "", ui_builder.build_tab_counts({}), "")
 
         result = run_analytics(
             bundle, zones,
@@ -436,16 +464,68 @@ class TrackingEngine:
             heatmap_background=bundle.representative_frame,
             out_dir=analytics_out_dir,
             camera_placement=camera_placement,
+            rule_thresholds=rule_thresholds,
         )
         summary = analytics_ui.build_analytics_summary(zones, result)
         spikes  = analytics_ui.build_queue_spikes_banner(result.queue_spikes)
         dwell   = analytics_ui.build_dwell_table(zones, result.dwell_summary, result.dwell_rows)
         journey = analytics_ui.build_journey_table(result.journey_matrix, result.journey_labels)
         ops     = ui_builder.build_operational_alerts(
-            result.rule_findings, result.rules_unavailable_reason)
+            result.rule_findings, result.rules_unavailable_reason,
+            result.rule_diagnostics)
+        # Retuning a threshold changes which rules fired, so the sticky banner
+        # and the tab badges have to move with it — otherwise the page keeps
+        # advertising findings the user just tuned away.
+        alert = ui_builder.build_alert_banner(
+            self._event_log, result.queue_spikes, result.spike_events,
+            result.rule_findings)
+        counts = ui_builder.build_tab_counts(
+            self._tab_counts(result))
+        # The POPS table now carries the operational categories, so retuning a
+        # threshold has to rebuild it as well — otherwise that tab keeps
+        # advertising categories the user just tuned away. "" when this process
+        # holds no POPS state; the caller reads that as "leave the tab alone"
+        # rather than overwriting a good table with an empty one.
+        pops = (ui_builder.build_pops_summary(
+                    self._max_pops_per_cart, self._peak_pops_snapshot,
+                    result.rule_findings)
+                if self._max_pops_per_cart else "")
         # Return both the ndarray (gr.Image) and the path (gr.File).
         return (summary, spikes, dwell, journey,
-                result.heatmap_composite, result.heatmap_png_path, ops)
+                result.heatmap_composite, result.heatmap_png_path, ops,
+                alert, counts, pops)
+
+    def _tab_counts(self, analytics_result) -> dict:
+        """Badge counts for the tab nav — how many findings live behind each
+        tab, so the user can see where the content is without clicking."""
+        findings = list(getattr(analytics_result, "rule_findings", []) or [])
+        n_high = sum(1 for e in self._event_log if e.get("event") in HIGH_EVENTS)
+        n_sev = sum(1 for f in findings if f.severity in ("SAFETY", "ACTION"))
+        return {
+            "Events": {
+                "n": len(self._event_log),
+                "tone": "DANGER" if n_high else "INFO",
+            },
+            "Operational Alerts": {
+                "n": len(findings),
+                "tone": "DANGER" if n_sev else "INFO",
+            },
+            "POPS": {
+                # The POPS table also lists carts the rule engine flagged but
+                # that were never scored, so the badge counts the union — a
+                # badge of 3 over a 4-row table reads as a bug. Take the flagged
+                # set from cart_flag_index(), which is what actually decides the
+                # rows: a cart folded in via evidence["also_carts"] gets a row
+                # while never appearing as any finding's own cart_display_id.
+                "n": len(set(self._max_pops_per_cart)
+                         | set(ui_builder.cart_flag_index(findings))),
+                "tone": "DANGER" if n_high else "INFO",
+            },
+            "Analytics": {
+                "n": len(getattr(analytics_result, "queue_spikes", []) or []),
+                "tone": "WARN",
+            },
+        }
 
     def _ensure_pose_model(self):
         if self._pose_model is None:
@@ -453,6 +533,38 @@ class TrackingEngine:
             self._pose_model = YOLO(POSE_MODEL_PATH)
             self._pose_model.to(self.device)
         return self._pose_model
+
+    # ------------------------------------------------------------------
+    # Detection-stack GPU memory is only needed during the frame loop.
+    # A local VLM case-report pass runs after that loop finishes, so we
+    # temporarily move YOLO/pose/classifier off the GPU to give the VLM
+    # the full card — otherwise the detection stack's ~5-6 GB footprint
+    # plus a VLM's own weights can exceed an 8 GB card, forcing slow
+    # CPU-offload or (on Windows/WDDM) shared-memory paging instead of a
+    # clean OOM.
+    # ------------------------------------------------------------------
+    def _release_detection_gpu_memory(self):
+        if self.device != "cuda":
+            return
+        self.model.to("cpu")
+        if self._pose_model is not None:
+            self._pose_model.to("cpu")
+        if self._classifier._quality_model is not None:
+            self._classifier._quality_model.to("cpu")
+        if self._classifier._fill_model is not None:
+            self._classifier._fill_model.to("cpu")
+        torch.cuda.empty_cache()
+
+    def _restore_detection_gpu_memory(self):
+        if self.device != "cuda":
+            return
+        self.model.to(self.device)
+        if self._pose_model is not None:
+            self._pose_model.to(self.device)
+        if self._classifier._quality_model is not None:
+            self._classifier._quality_model.to(self.device)
+        if self._classifier._fill_model is not None:
+            self._classifier._fill_model.to(self.device)
 
     @staticmethod
     def _bbox_iou(a, b):
@@ -512,7 +624,23 @@ class TrackingEngine:
                       zones=None,
                       analytics_out_dir=None,
                       defer_case_report: bool = False,
-                      progress=gr.Progress()):
+                      rule_thresholds=None,
+                      enable_pose: bool = True,
+                      progress=None):
+        # A FRESH progress tracker per run, never a default argument.
+        #
+        # `progress=gr.Progress()` in this signature was evaluated ONCE at
+        # import, so a single Progress object served every run for the lifetime
+        # of the process — and gradio.helpers.Progress keeps mutable state on
+        # the instance (`self.iterables`) that only unwinds when a tracked
+        # iterator raises StopIteration. The frame loop below breaks out early
+        # on the last decodable frame, so every run leaked one entry, and
+        # Progress reports the WHOLE list on every step: run 2 drew two
+        # progress bars, run 3 drew three, each frozen at the frame its run
+        # gave up on. Gradio only injects a bound tracker for a parameter it
+        # sees on the EVENT function, and this is not one, so nothing was ever
+        # replacing it. Instantiating here costs nothing and cannot accumulate.
+        progress = progress if progress is not None else gr.Progress()
         self._reset()
         self._camera_placement = camera_placement
         self._classifier.set_quality_threshold(QUALITY_THRESHOLD)
@@ -530,14 +658,13 @@ class TrackingEngine:
         cap, w, h, fps, total_frames = open_video(source_path)
 
         # SAM-based one-shot scene layout detection is disabled — the user
-        # draws zones explicitly in the Zone Editor, and the 2D BEV reads
-        # only those (any analytics-kind zone with applies_to in person/both
-        # is auto-promoted to a fixture in the 2D builder loop below).
+        # draws zones explicitly in the Zone Editor. `_scene_elements` is kept
+        # (always empty) because renderer.render_bev() still reads it; its only
+        # consumer in this pipeline, the 2D BEV fixture rollup, is gone.
         _ok, _first_frame = cap.read()
         self._scene_elements = []
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind before main loop
-        # Tracked output is camera-only — BEV lives in dedicated tabs
-        # (Bird's-Eye 2D / 3D View / Floor Map).
+        # Tracked output is camera-only.
         writer, avi_path = create_writer(w, h, fps)
         names = self.names
         gdi = self._get_display_id
@@ -547,17 +674,42 @@ class TrackingEngine:
         # Timing accumulators
         _t_yolo = 0.0; _t_cls = 0.0; _t_draw = 0.0; _t_json = 0.0; _t_other = 0.0
         _t_pose = 0.0
-        slim_3d_frames = []
         frame_capturer = FrameCapturer()
 
-        # Pose is now always-on. Eagerly load so the first frame doesn't stall.
-        self._ensure_pose_model()
+        # Eagerly load so the first frame doesn't stall — but only when pose
+        # is actually on. The cold load is ~73s (see the timing table above),
+        # and charging that to a run that never reads a keypoint is the whole
+        # thing the toggle exists to avoid.
+        if enable_pose:
+            self._ensure_pose_model()
 
         frame_idx = 0
-        for _ in progress.tqdm(range(total_frames), desc="Processing frames"):
+        # progress(...) rather than progress.tqdm(...) on purpose. tqdm() APPENDS
+        # a tracked iterable to the Progress instance and pops it only when the
+        # iterator raises StopIteration — which `break` below never does, since
+        # CAP_PROP_FRAME_COUNT routinely over-reports and the decoder runs dry
+        # first. __call__ builds `self.iterables + [one]` without appending, so
+        # no amount of breaking can leave anything behind.
+        # Report at most PROGRESS_MAX_UPDATES times, first and last always.
+        # Every frame below is still fully processed and logged — this throttles
+        # only the SSE notification. Gradio re-renders a status tracker for each
+        # of the run event's 22 output components on every progress message, so
+        # per-frame reporting was ~9,200 client-side component updates per clip
+        # and drove Svelte into `effect_update_depth_exceeded` after the run.
+        _prog_every = max(1, total_frames // max(1, PROGRESS_MAX_UPDATES))
+        _prog_last_t = 0.0
+        for _frame_no in range(total_frames):
             ok, im0 = cap.read()
             if not ok:
                 break
+            _is_edge = (_frame_no == 0 or _frame_no == total_frames - 1)
+            _now = time.perf_counter()
+            if _is_edge or (_frame_no % _prog_every == 0
+                            and _now - _prog_last_t >= PROGRESS_MIN_INTERVAL_S):
+                _prog_last_t = _now
+                # Tuple form keeps the existing "N/N steps" readout; a bare float
+                # would switch the bar to a bare percentage.
+                progress((_frame_no + 1, total_frames), desc="Processing frames")
             frame_idx += 1
             timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
@@ -568,23 +720,31 @@ class TrackingEngine:
                                            imgsz=YOLO_IMGSZ, verbose=False)
             _t_yolo += time.perf_counter() - _t0
 
-            # --- Pose estimation (always on) ---
+            # --- Pose estimation (optional, toggled in the UI) ---
             # Run once per frame on the full image; results are matched to
             # tracked persons by bbox IoU below.
+            #
+            # When off, these stay at their initial values and the match/draw
+            # block further down is skipped by its existing
+            # `pose_kps_arr is not None` guard — pose feeds ONLY the skeleton
+            # overlay, so nothing in POPS, linking, the JSON or analytics
+            # changes. Every frame is still fully processed either way; this is
+            # a per-run choice, not per-frame sampling.
             pose_boxes = []
             pose_kps_arr = None
-            _t0 = time.perf_counter()
-            with torch.no_grad():
-                pres = self._pose_model.predict(
-                    im0, imgsz=POSE_IMGSZ, conf=POSE_CONF_THRESHOLD,
-                    device=self.device, verbose=False,
-                )
-            if pres and pres[0].boxes is not None and pres[0].keypoints is not None:
-                pb = pres[0].boxes.xyxy.cpu().numpy()
-                pk = pres[0].keypoints.data.cpu().numpy()  # (N, 17, 3)
-                pose_boxes = [tuple(map(float, row)) for row in pb]
-                pose_kps_arr = pk
-            _t_pose += time.perf_counter() - _t0
+            if enable_pose:
+                _t0 = time.perf_counter()
+                with torch.no_grad():
+                    pres = self._pose_model.predict(
+                        im0, imgsz=POSE_IMGSZ, conf=POSE_CONF_THRESHOLD,
+                        device=self.device, verbose=False,
+                    )
+                if pres and pres[0].boxes is not None and pres[0].keypoints is not None:
+                    pb = pres[0].boxes.xyxy.cpu().numpy()
+                    pk = pres[0].keypoints.data.cpu().numpy()  # (N, 17, 3)
+                    pose_boxes = [tuple(map(float, row)) for row in pb]
+                    pose_kps_arr = pk
+                _t_pose += time.perf_counter() - _t0
 
             person_count = 0
             cart_count = 0
@@ -613,7 +773,7 @@ class TrackingEngine:
                             raw, bb, cur_cart_raws, self._display_map,
                             self._obj_positions, self._obj_timestamps,
                             self._obj_speeds, self._obj_disappeared,
-                            self._obj_bbox_history)
+                            self._obj_bbox_history, self._obj_frames)
 
                 # Draw + collect detections
                 for box, id_, c, conf in zip(boxes, ids, clss, confs):
@@ -642,6 +802,7 @@ class TrackingEngine:
                     # centroid sits outside the polygon). _obj_bboxes below is
                     # only the latest frame, overwritten each iteration.
                     self._obj_bbox_history[raw].append((x1, y1, x2, y2))
+                    self._obj_frames[raw].append(frame_idx)
                     self._obj_labels[raw] = label
                     self._obj_confs[raw] = conf
                     self._obj_bboxes[raw] = bb_int
@@ -692,7 +853,8 @@ class TrackingEngine:
                     self._obj_positions[raw], self._obj_timestamps[raw],
                     self._obj_speeds[raw], fps)
                 dir_label = compute_direction_label(
-                    self._obj_positions[raw], camera_placement)
+                    self._obj_positions[raw], camera_placement,
+                    self._obj_timestamps[raw], DIRECTION_WINDOW_S)
                 self._motion_cache[raw] = (speed, direction, speed_status, accel, dir_label)
                 self._obj_speeds[raw].append(speed)
 
@@ -807,6 +969,9 @@ class TrackingEngine:
                         "quality": quality_lbl,
                         "speed_status": speed_status,
                         "linked": linked, "abandoned": abandoned,
+                        # When the peak happened — lets the POPS table row seek
+                        # the tracked video straight to the moment.
+                        "timestamp": round(timestamp, 2), "frame": frame_idx,
                     }
 
 
@@ -906,21 +1071,10 @@ class TrackingEngine:
                 frame_json = self._build_frame_json(
                     frame_idx, timestamp, frame_detections, fps)
                 self._json_frames[str(frame_idx)] = frame_json
-
-                # Reuse the per-frame pose match for the slim 3D frame.
-                pose_for_frame = None
-                bbox_for_frame = None
-                if raw_to_kps:
-                    pose_for_frame = {
-                        f"P{gdi('person', raw)}": kps
-                        for raw, kps in raw_to_kps.items()
-                    }
-                    bbox_for_frame = {
-                        f"P{gdi('person', raw)}": list(person_raw_to_bbox[raw])
-                        for raw in raw_to_kps.keys()
-                    }
-                slim_3d_frames.append(slim_frame_for_3d(
-                    frame_json, pose_kps=pose_for_frame, person_bboxes=bbox_for_frame))
+                # The slim 3D frame (per-person pose keypoints + bbox) used to
+                # be accumulated here for the 3D View tab. That tab is gone;
+                # the full per-frame record above is unchanged and still lands
+                # in the tracking JSON.
                 _t_json += time.perf_counter() - _t0
 
         # Capture final frame for case report
@@ -1015,44 +1169,36 @@ class TrackingEngine:
                     #                 best_bag = max(paired_bags, key=paired_bags.get)
                     #             break
 
-                    # [NEW] Abandoned cart override (grab-and-run) with temporal
-                    # ordering check. Compare first half vs second half of the
-                    # classification history. A real grab-and-run shows items in
-                    # the first half and empty in the second half. Classifier
-                    # noise is distributed evenly across both halves.
-                    # Override only if: first half had >50% items AND second
-                    # half has >70% empty — confirms a clear transition.
+                    # [NEW] Abandoned cart override (grab-and-run), gated on a
+                    # SUSTAINED RUN of loaded observations. See
+                    # peak_sustained_fill() for why the previous
+                    # first-half/second-half proportion test could not fire on
+                    # a real history: a confirmed pushout on the 2026-08-13
+                    # HANNAFORD clip reads partial(9) -> empty(24) ->
+                    # partial(12), and neither half qualified, so the finalised
+                    # score contradicted the live one (orig=75 recomp=60).
                     if best_fill == "empty" and abandoned:
-                        n = len(history)
-                        print(f"[DEBUG] Cart {cd}: history order = {[f for f, b, fc, bc in history]}")
-                        mid = max(1, n // 2)
-                        first_half = history[:mid]
-                        second_half = history[mid:]
-
-                        first_fill_count = defaultdict(int)
-                        for f, b, fc, bc in first_half:
-                            first_fill_count[f] += 1
-                        second_fill_count = defaultdict(int)
-                        for f, b, fc, bc in second_half:
-                            second_fill_count[f] += 1
-
-                        first_had_items = ((first_fill_count.get("full", 0)
-                                            + first_fill_count.get("partial", 0))
-                                           >= len(first_half) * 0.5)
-                        second_is_empty = (second_fill_count.get("empty", 0)
-                                           > len(second_half) * 0.7)
-
-                        if first_had_items and second_is_empty:
-                            for candidate in ("full", "partial"):
-                                if first_fill_count.get(candidate, 0) > 0:
-                                    best_fill = candidate
-                                    paired_bags = defaultdict(float)
-                                    for f, b, fc, bc in first_half:
-                                        if f == candidate:
-                                            paired_bags[b] += bc
-                                    if paired_bags:
-                                        best_bag = max(paired_bags, key=paired_bags.get)
-                                    break
+                        fills = [f for f, b, fc, bc in history]
+                        print(f"[DEBUG] Cart {cd}: history order = {fills}")
+                        sustained = peak_sustained_fill(fills, GRABRUN_MIN_RUN_OBS)
+                        if sustained:
+                            best_fill = sustained
+                            # best_bag is deliberately LEFT ALONE. Every "empty"
+                            # observation contributes bag_conf 1.0 to
+                            # not_applicable, so best_bag is not_applicable here
+                            # and the partial/full constraint below re-votes it
+                            # across the whole history. Voting the bag inside the
+                            # run instead lands on "bagged" whenever that run's
+                            # frames are mixed (that clip's early run: 4 unbagged
+                            # / 5 bagged, bagged winning on confidence 4.22 vs
+                            # 3.01) — and partial+bagged caps at 55, under the 71
+                            # PUSHOUT threshold. Across the whole history the
+                            # same vote gives unbagged 11.69 vs bagged 4.97,
+                            # which is the correct read. See
+                            # tests/test_grabrun_override.py.
+                            print(f"[GRAB-RUN] Cart {cd}: empty vote overridden to "
+                                  f"'{sustained}' | sustained run >= "
+                                  f"{GRABRUN_MIN_RUN_OBS} observations")
 
                     if source == "event-ctx":
                         source = "conf-vote+event-ctx"
@@ -1122,11 +1268,40 @@ class TrackingEngine:
                 snap["event"] = ev["event"]
                 self._max_pops_per_cart[cd] = ev["pops_score"]
             else:
-                # POPS → last Event (POPS has reconciled score)
-                ev["fill"] = snap["fill"]
-                ev["bag"] = snap["bag"]
-                ev["pops_score"] = snap["score"]
-                ev["event"] = snap["event"]
+                # POPS → Events (POPS has the reconciled score).
+                #
+                # EVERY row for this cart, not just the last one. Rewriting
+                # only `_last_event[cd]` left a cart's earlier rows carrying
+                # the un-reconciled score, so one incident showed up twice with
+                # two different numbers and no way to tell which was current.
+                for row in self._event_log:
+                    if row["cart_id"] != cd:
+                        continue
+                    row["fill"] = snap["fill"]
+                    row["bag"] = snap["bag"]
+                    row["pops_score"] = snap["score"]
+                    row["event"] = snap["event"]
+
+        # The rewrite above assigns whatever classify_event() returns for the
+        # reconciled score, and that is not necessarily an EVENT: a row logged
+        # live as MEDIUM PRIORITY (33) can reconcile to LOW PRIORITY (16) or
+        # MONITORING. Those names are not in LOGGABLE_EVENTS and nothing was
+        # dropping them, so the Events tab rendered non-events as events under a
+        # header reading "3 event(s) logged - no high-risk events", and they
+        # shipped in full_json["events"] to every downstream consumer.
+        #
+        # Rewriting all of a cart's rows also makes them identical, so collapse
+        # to the earliest frame — the log records when a cart FIRST reached an
+        # event, and `already_logged` in the frame loop enforces exactly that.
+        #
+        # A dropped row can orphan a FrameCapturer capture, which was keyed to
+        # the live event name during the loop and cannot be re-keyed from here.
+        # An evidence frame with no matching row is a far smaller lie than a
+        # "LOW PRIORITY" row presented as an incident.
+        self._event_log, _dropped = prune_event_log(self._event_log)
+        if _dropped:
+            print(f"[EVENTS] dropped {_dropped} row(s) that reconciliation "
+                  f"demoted out of LOGGABLE_EVENTS or duplicated")
 
         t_frames = time.perf_counter()
         print(f"[PERF] Breakdown over {frame_idx} frames:")
@@ -1137,6 +1312,13 @@ class TrackingEngine:
         print(f"  Drawing    : {_t_draw:.2f}s ({_t_draw/(t_frames-t_start)*100:.0f}%)")
         print(f"  Frame JSON : {_t_json:.2f}s ({_t_json/(t_frames-t_start)*100:.0f}%)")
 
+        # The frame loop is only part of the wait. Everything from here to the
+        # return happens with the bar already at 100%, so without these the UI
+        # reads as hung for the whole tail — which on a long clip is what the
+        # "stuck at 100%" report was. A bare float switches the readout from
+        # "N/N steps" to a plain percentage, which is what we want now that
+        # there are no frames left to count.
+        progress(1.0, desc="Encoding video")
         out_path = reencode_to_mp4(avi_path)
         t_encode = time.perf_counter()
         video_duration = total_frames / fps if fps > 0 else 0
@@ -1147,6 +1329,7 @@ class TrackingEngine:
               f"Speed: {video_duration / (t_encode - t_start):.2f}x realtime")
 
         # --- Build JSON ---
+        progress(1.0, desc="Building tracking JSON")
         t_json_start = time.perf_counter()
         full_json = {
             "video_info": {
@@ -1203,10 +1386,12 @@ class TrackingEngine:
         self._trajectory_cache.put(bundle)
 
         # --- Run analytics over the bundle ---
+        progress(1.0, desc="Computing analytics")
         analytics_result: AnalyticsResult = run_analytics(
             bundle, list(zones), out_dir=analytics_out_dir,
             heatmap_background=rep_frame,
             camera_placement=camera_placement,
+            rule_thresholds=rule_thresholds,
         )
 
         # --- Build HTML ---
@@ -1216,44 +1401,19 @@ class TrackingEngine:
             self._linker.total_links)
         config_html = ui_builder.build_config_info(
             LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, camera_placement,
-            self._classifier.quality_pt, self._classifier.fill_pt, QUALITY_THRESHOLD)
+            self._classifier.quality_pt, self._classifier.fill_pt, QUALITY_THRESHOLD,
+            enable_pose=enable_pose)
         legend_html = ui_builder.build_legend()
-        pops_html   = ui_builder.build_pops_summary(self._max_pops_per_cart, self._peak_pops_snapshot)
+        # Rule findings go into the POPS table too: it is the only per-cart
+        # surface, so it is the one place a cart can be shown carrying several
+        # operational categories at once (unattended AND blocking the exit).
+        pops_html   = ui_builder.build_pops_summary(
+            self._max_pops_per_cart, self._peak_pops_snapshot,
+            analytics_result.rule_findings)
         events_html = ui_builder.build_events_timeline(self._event_log)
-        bev3d_html  = build_3d_bev_html(
-            slim_3d_frames, w, h, fps, total_frames,
-            zones=list(zones or []), enable_pose=True,
-        )
-
-        # --- 2D BEV (velocity / orientation / proximity / impressions) ---
-        slim_2d_frames = [
-            slim_frame_for_2d(self._json_frames[k])
-            for k in sorted(self._json_frames.keys(), key=int)
-        ]
-        attach_orientations(slim_2d_frames)
-
-        fixtures = []
-        for z in zones:
-            if (getattr(z, "kind", "analytics") == "analytics"
-                    and z.applies_to in ("person", "both") and z.polygon.size):
-                xs = z.polygon[:, 0]; ys = z.polygon[:, 1]
-                fixtures.append({
-                    "id": z.zone_id, "label": z.name,
-                    "x1": int(xs.min()), "y1": int(ys.min()),
-                    "x2": int(xs.max()), "y2": int(ys.max()),
-                })
-        for i, se in enumerate(self._scene_elements):
-            fixtures.append({
-                "id": f"scene_{i}", "label": se.label,
-                "x1": int(se.x1), "y1": int(se.y1),
-                "x2": int(se.x2), "y2": int(se.y2),
-            })
-
-        impressions = compute_impressions(bundle, fixtures)
-        bev2d_html  = build_2d_bev_html(
-            slim_2d_frames, fixtures, impressions,
-            w, h, fps, total_frames,
-        )
+        # The 3D and 2D BEV documents were built here. Both embedded every
+        # frame; the zone-fixture rollup and compute_impressions() existed only
+        # to feed the 2D one, so they went with it.
 
         # --- Top-of-page alert banner (high-priority events + severe spikes) ---
         alert_banner_html = ui_builder.build_alert_banner(
@@ -1264,6 +1424,7 @@ class TrackingEngine:
         ops_alerts_html = ui_builder.build_operational_alerts(
             analytics_result.rule_findings,
             analytics_result.rules_unavailable_reason,
+            analytics_result.rule_diagnostics,
         )
 
         # Operational findings go in the JSON under their OWN key, never spliced
@@ -1273,27 +1434,56 @@ class TrackingEngine:
         # default. Keeping rules separate is what makes the Phase-2
         # child-in-cart work safe to add here later.
         full_json["rule_findings"] = [
-            {
-                "rule_id": f.rule_id, "label": f.label, "severity": f.severity,
-                "cart_id": f.cart_display_id,
-                "zone_id": f.zone_id, "zone_name": f.zone_name,
-                "start_t": f.start_t, "end_t": f.end_t,
-                "duration_s": f.duration_s, "threshold_s": f.threshold_s,
-                "ongoing_at_end_of_video": f.ongoing_at_eov,
-                "confidence": f.confidence, "n_samples": f.n_samples,
-                "reasons": list(f.reasons), "evidence": dict(f.evidence),
-            }
-            for f in analytics_result.rule_findings
+            highlights.finding_to_dict(f) for f in analytics_result.rule_findings
         ]
+        # Record the thresholds ACTUALLY used, not the config defaults — with
+        # the sidebar sliders those can differ, and a report that names the
+        # wrong fuse length is worse than one that names none. Key names are
+        # the original JSON schema's, not resolve_thresholds()' internal ones.
+        _th_used = rule_engine.resolve_thresholds(rule_thresholds)
         full_json["rule_engine"] = {
             "unavailable_reason": analytics_result.rules_unavailable_reason,
+            # Same list the UI panel and the case report render, so the three
+            # artifacts cannot disagree about what was skipped or degraded.
+            "diagnostics": highlights.ops_diagnostics(
+                analytics_result.rule_diagnostics),
             "timestamps_synthesized": bundle.timestamps_synthesized,
             "thresholds_s": {
-                "blocked_door": RULE_BLOCKED_DOOR_S,
-                "static_cart": RULE_STATIC_CART_S,
-                "abandoned_cart": RULE_ABANDONED_CART_S,
+                "blocked_door": _th_used["blocked_door_s"],
+                "static_cart": _th_used["static_cart_s"],
+                "abandoned_cart": _th_used["abandoned_cart_s"],
             },
         }
+        # Curated view of the same rule/congestion data, selected by the exact
+        # logic engine.highlights shares with the case report's Operations
+        # Highlights section — so a human reading the HTML/PDF and a machine
+        # reading this JSON never see different "top" findings for one clip.
+        _ops_state, _ops_shown, _ops_remainder = highlights.ops_findings_state(
+            analytics_result.rules_unavailable_reason, analytics_result.rule_findings)
+        _flag_idx = ui_builder.cart_flag_index(analytics_result.rule_findings)
+        _severe_spikes, _top_dwell = highlights.select_congestion(
+            analytics_result.queue_spikes, analytics_result.dwell_summary)
+        full_json["operational_highlights"] = {
+            "status": _ops_state,          # "unavailable" | "clean" | "findings"
+            "unavailable_reason": analytics_result.rules_unavailable_reason,
+            "insight_text": (analytics_result.insight_text or "").strip(),
+            "top_findings": [highlights.finding_to_dict(f) for f in _ops_shown],
+            "additional_findings_count": _ops_remainder,
+            "n_carts_flagged": len(_flag_idx),
+            "category_counts": ui_builder.category_counts_from_index(_flag_idx),
+            "congestion": {
+                "severe_spikes": [highlights.spike_to_dict(s) for s in _severe_spikes],
+                "top_dwell_zones": list(_top_dwell),
+            },
+        }
+        # Full congestion lists behind the curated view above — computed by
+        # run_analytics() every run but, until now, never reaching the JSON at
+        # all. Same "full list + curated highlights" shape as
+        # rule_findings/operational_highlights.
+        full_json["queue_spikes"] = [
+            highlights.spike_to_dict(s) for s in analytics_result.queue_spikes
+        ]
+        full_json["dwell_summary"] = list(analytics_result.dwell_summary)
         # Re-emit now that the rule keys exist (the first write happened before
         # analytics ran, since analytics consumes the bundle built from it).
         with open(json_path, 'w') as f_json:
@@ -1301,6 +1491,7 @@ class TrackingEngine:
         json_str = json.dumps(full_json, indent=2)
 
         # --- Analytics HTML ---
+        progress(1.0, desc="Rendering panels")
         analytics_summary_html = analytics_ui.build_analytics_summary(list(zones), analytics_result)
         spikes_html  = analytics_ui.build_queue_spikes_banner(analytics_result.queue_spikes)
         dwell_html   = analytics_ui.build_dwell_table(
@@ -1319,9 +1510,11 @@ class TrackingEngine:
 
         if defer_case_report and frame_capturer.captures:
             # Stash everything finalize_case_report() needs and return a
-            # placeholder. The caller (Gradio handler) yields the rest of the
-            # pipeline output immediately, then calls finalize_case_report()
-            # to fill in the report.
+            # placeholder. The caller returns the rest of the pipeline output
+            # immediately and calls finalize_case_report() from a SEPARATE
+            # Gradio event — not a later yield of the same one, which would
+            # keep a pending overlay over the whole dashboard until the VLM
+            # finished (see run_analysis in app_poc_v2.py).
             self._pending_case_report = {
                 "captures": list(frame_capturer.captures),
                 "full_json": full_json,
@@ -1339,7 +1532,7 @@ class TrackingEngine:
                 "<span style='font-weight:600;color:#1e3a5f;'>Generating case report…</span>"
                 "</div>"
                 "<div style='font-size:0.85rem;margin-top:6px;'>"
-                "Pipeline finished — the VLM is now analysing captured frames. "
+                "Pipeline finished - the VLM is now analysing captured frames. "
                 "This tab will refresh automatically when ready.</div>"
                 "<style>@keyframes pulse {0%,100%{opacity:1}50%{opacity:0.3}}</style>"
                 "</div>"
@@ -1363,14 +1556,43 @@ class TrackingEngine:
                 )
         print(f"[HEATMAP→UI] composite={None if heatmap_img_bgr is None else (heatmap_img_bgr.shape, heatmap_img_bgr.dtype)} png={heatmap_path}")
 
+        # --- Run summary -------------------------------------------------
+        # Every number here was already being computed and then thrown away
+        # into a console print.
+        run_summary_html = ui_builder.build_run_summary(
+            frames=frame_idx,
+            wall_s=t_encode - t_start,
+            encode_s=t_encode - t_frames,
+            device=self.device,
+            video_duration_s=video_duration,
+            n_people=len(self._all_people_seen),
+            n_carts=len(self._all_carts_seen),
+            n_links=self._linker.total_links,
+            timings=[("YOLO", _t_yolo), ("pose", _t_pose), ("classify", _t_cls),
+                     ("POPS", _t_other), ("draw", _t_draw)],
+        )
+        tab_counts_html = ui_builder.build_tab_counts(
+            self._tab_counts(analytics_result))
+
+        # Deliberately NOT logging a "browser payload" size here: json_str is
+        # the FULL document and only a capped preview of it reaches the browser
+        # (the caller substitutes it), so any total computed at this point would
+        # overstate the real payload by orders of magnitude. The measurement
+        # lives in app_poc_v2.run_analysis, at the seam where it is final.
+        print(f"[PERF] engine outputs: json {len(json_str) / 1048576:.2f} MB "
+              f"(full document, written to {os.path.basename(json_path)}), "
+              f"events {len(events_html) / 1024:.0f} KB, "
+              f"pops {len(pops_html) / 1024:.0f} KB")
+
         # Note: emit BOTH the composite ndarray (for gr.Image) and the path
         # (for gr.File). The caller splits them into the two output slots.
         return (out_path, json_path, json_str,
                 video_html, det_html, config_html, legend_html, pops_html, events_html,
-                bev3d_html, bev2d_html, case_report_html, case_report_file,
+                case_report_html, case_report_file,
                 analytics_summary_html, spikes_html, dwell_html, journey_html,
                 heatmap_img_bgr, heatmap_path,
-                alert_banner_html, ops_alerts_html)
+                alert_banner_html, ops_alerts_html,
+                run_summary_html, tab_counts_html)
 
     # ------------------------------------------------------------------
     # Case-report generation (extracted so it can run synchronously inside
@@ -1380,21 +1602,29 @@ class TrackingEngine:
     def _run_case_report(self, *, captures, full_json, event_log,
                          peak_snapshots, vlm_backend, vlm_api_key,
                          analytics_result) -> tuple[str, str | None]:
-        vlm = VLMAnalyzer(backend=vlm_backend, api_key=vlm_api_key,
-                          device=self.device)
-        report_data = vlm.analyze_incident(
-            captures=captures,
-            pops_data=full_json,
-            event_log=event_log,
-            peak_snapshots=peak_snapshots,
-            video_info=full_json["video_info"],
-            analytics_result=analytics_result,
-        )
-        vlm.unload_model()
+        is_local_vlm = "Claude" not in vlm_backend
+        if is_local_vlm:
+            self._release_detection_gpu_memory()
+        try:
+            vlm = VLMAnalyzer(backend=vlm_backend, api_key=vlm_api_key,
+                              device=self.device)
+            report_data = vlm.analyze_incident(
+                captures=captures,
+                pops_data=full_json,
+                event_log=event_log,
+                peak_snapshots=peak_snapshots,
+                video_info=full_json["video_info"],
+                analytics_result=analytics_result,
+            )
+            vlm.unload_model()
+        finally:
+            if is_local_vlm:
+                self._restore_detection_gpu_memory()
 
         gradio_html, standalone_html = build_case_report_html(
             report_data, captures, full_json, event_log,
             peak_snapshots, full_json["video_info"],
+            analytics_result=analytics_result,
         )
 
         report_name = f"pops_case_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"

@@ -5,6 +5,7 @@ Motion analysis — speed, direction labels, co-movement detection.
 All functions operate on raw position/timestamp history dicts to avoid
 coupling to any particular tracker class.
 """
+import bisect
 import math
 from .config import (
     SPEED_STATIC, SPEED_SLOW, SPEED_MEDIUM,
@@ -52,12 +53,51 @@ def compute_motion(positions: list, timestamps: list, speeds: list, fps: float):
     return speed, direction, status, accel
 
 
-def compute_direction_label(positions: list, camera_placement: str) -> str:
-    """Determine INBOUND / OUTBOUND / UNKNOWN from position delta."""
+def _window_start(positions: list, timestamps: list | None,
+                  window_s: float | None) -> int:
+    """Index to measure the direction delta FROM.
+
+    0 (whole history) unless a time window is requested, in which case it is
+    the first sample within `window_s` of the newest one — always leaving at
+    least two samples so the delta is never degenerate.
+
+    Callers that already hand in a pre-sliced window (rules._incoming_empty_rule
+    slices to RULE_ENTRY_WINDOW_S itself, and says so) simply omit both
+    arguments and keep the whole-list behaviour.
+    """
+    n = len(positions)
+    if not window_s or not timestamps or n < 2:
+        return 0
+    n = min(n, len(timestamps))
+    if n < 2:
+        return 0
+    cutoff = timestamps[n - 1] - window_s
+    # timestamps are appended in frame order, so bisect beats a linear scan on
+    # the long histories this exists to protect against.
+    lo = bisect.bisect_left(timestamps, cutoff, 0, n)
+    return min(lo, n - 2)
+
+
+def compute_direction_label(positions: list, camera_placement: str,
+                            timestamps: list | None = None,
+                            window_s: float | None = None) -> str:
+    """Determine INBOUND / OUTBOUND / UNKNOWN from position delta.
+
+    With `timestamps` + `window_s`, the delta is measured over the last
+    `window_s` seconds instead of the whole track. See DIRECTION_WINDOW_S in
+    config for why that matters: `_obj_positions` is never trimmed, so a
+    whole-track delta cancels out for anyone who enters and leaves through the
+    same door — the single most important case this label feeds.
+
+    DIRECTION_MIN_POSITIONS still gates on the FULL history: it exists to
+    reject a track too new to have a heading at all, which is a different
+    question from how far back to measure.
+    """
     if len(positions) < DIRECTION_MIN_POSITIONS:
         return "UNKNOWN"
-    dx = positions[-1][0] - positions[0][0]
-    dy = positions[-1][1] - positions[0][1]
+    i0 = _window_start(positions, timestamps, window_s)
+    dx = positions[-1][0] - positions[i0][0]
+    dy = positions[-1][1] - positions[i0][1]
 
     if camera_placement == "Inside (exit on right)":
         if abs(dx) < DIRECTION_MIN_DY:

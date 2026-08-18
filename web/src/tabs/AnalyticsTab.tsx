@@ -104,7 +104,7 @@ export const AnalyticsTab: React.FC = () => {
                 </div>
                 {analytics.dwell_html
                   ? <div dangerouslySetInnerHTML={{ __html: analytics.dwell_html }} className={s.htmlBlock} />
-                  : <div className={s.emptySection}>No zone data — draw zones first</div>
+                  : <div className={s.emptySection}>No zone data - draw zones first</div>
                 }
               </div>
 

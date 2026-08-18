@@ -23,7 +23,7 @@ def _load_inline_js(filename: str) -> str:
         try:
             _INLINE_JS_CACHE[filename] = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            print(f"[bev3d] {filename} not found at {path} — feature disabled.")
+            print(f"[bev3d] {filename} not found at {path} - feature disabled.")
             _INLINE_JS_CACHE[filename] = ""
     return _INLINE_JS_CACHE[filename]
 

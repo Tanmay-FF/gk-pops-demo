@@ -56,8 +56,8 @@ export const TrackedOutput: React.FC<Props> = ({ tweaks }) => {
     v.currentTime = ratio * v.duration;
   }
 
-  const fps  = vi?.fps?.toFixed(1) ?? '—';
-  const res  = vi ? `${vi.width}×${vi.height}` : '—';
+  const fps  = vi?.fps?.toFixed(1) ?? 'n/a';
+  const res  = vi ? `${vi.width}×${vi.height}` : 'n/a';
   const totalTracks = (summary?.total_people_seen ?? 0) + (summary?.total_carts_seen ?? 0);
 
   return (

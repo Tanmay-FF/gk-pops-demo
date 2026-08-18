@@ -1,0 +1,1397 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* ─────────────────────────────────────────────────────────────────────
+   DESIGN TOKENS
+   Two palettes, one variable set. Every HTML panel built in engine/*.py
+   emits var(--gk-*) rather than literals (see engine/theme.py), so the
+   toggle below actually reaches the content — not just Gradio's chrome.
+   ───────────────────────────────────────────────────────────────────── */
+:root {
+    --gk-bg: #f1f5f9;
+    --gk-card: #ffffff;
+    --gk-card-2: #f8fafc;
+    --gk-row-alt: #f8fafc;
+    --gk-sidebar: #ffffff;
+    --gk-border: #e2e8f0;
+    --gk-border-strong: #cbd5e1;
+    --gk-ink: #0f172a;
+    --gk-ink-2: #475569;
+    --gk-ink-3: #94a3b8;
+
+    --gk-accent: #2563eb;
+    --gk-accent-2: #1d4ed8;
+    --gk-accent-hi: #1d4ed8;
+    --gk-accent-bg: #eff6ff;
+
+    --gk-danger: #dc2626;
+    --gk-danger-bg: #fef2f2;
+    --gk-warn: #ea580c;
+    --gk-warn-bg: #fff7ed;
+    --gk-caution: #a16207;
+    --gk-caution-bg: #fefce8;
+    --gk-good: #059669;
+    --gk-good-bg: #ecfdf5;
+    --gk-info: #2563eb;
+    --gk-info-bg: #eff6ff;
+    --gk-purple: #7c3aed;
+    --gk-purple-bg: #f5f3ff;
+    --gk-cyan: #0891b2;
+    --gk-cyan-bg: #ecfeff;
+    --gk-neutral: #475569;
+    --gk-neutral-bg: #f1f5f9;
+
+    --gk-success: #059669;
+    --gk-success-2: #047857;
+
+    --gk-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 16px rgba(15,23,42,0.05);
+    --gk-radius: 10px;
+}
+
+/* Dark palette — shared by the OS preference and the explicit toggle.
+   Kept in a mixin-ish block applied to three selectors so both entry
+   points stay in sync (they drifted before). */
+@media (prefers-color-scheme: dark) {
+    :root:not(.gk-light) {
+        --gk-bg: #0b1220;
+        --gk-card: #161d2e;
+        --gk-card-2: #1c2437;
+        --gk-row-alt: rgba(255,255,255,0.028);
+        --gk-sidebar: #161d2e;
+        --gk-border: #233047;
+        --gk-border-strong: #334765;
+        --gk-ink: #e2e8f0;
+        --gk-ink-2: #94a3b8;
+        --gk-ink-3: #64748b;
+
+        --gk-accent: #3b82f6;
+        --gk-accent-2: #2563eb;
+        --gk-accent-hi: #93c5fd;
+        --gk-accent-bg: rgba(59,130,246,0.14);
+
+        --gk-danger: #f87171;
+        --gk-danger-bg: rgba(248,113,113,0.14);
+        --gk-warn: #fb923c;
+        --gk-warn-bg: rgba(251,146,60,0.14);
+        --gk-caution: #facc15;
+        --gk-caution-bg: rgba(250,204,21,0.13);
+        --gk-good: #34d399;
+        --gk-good-bg: rgba(52,211,153,0.14);
+        --gk-info: #60a5fa;
+        --gk-info-bg: rgba(96,165,250,0.14);
+        --gk-purple: #c4b5fd;
+        --gk-purple-bg: rgba(196,181,253,0.14);
+        --gk-cyan: #67e8f9;
+        --gk-cyan-bg: rgba(103,232,249,0.13);
+        --gk-neutral: #94a3b8;
+        --gk-neutral-bg: rgba(148,163,184,0.13);
+
+        --gk-success: #10b981;
+        --gk-success-2: #059669;
+        --gk-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.4);
+    }
+}
+html.gk-dark, html.dark, body.dark {
+    --gk-bg: #0b1220;
+    --gk-card: #161d2e;
+    --gk-card-2: #1c2437;
+    --gk-row-alt: rgba(255,255,255,0.028);
+    --gk-sidebar: #161d2e;
+    --gk-border: #233047;
+    --gk-border-strong: #334765;
+    --gk-ink: #e2e8f0;
+    --gk-ink-2: #94a3b8;
+    --gk-ink-3: #64748b;
+
+    --gk-accent: #3b82f6;
+    --gk-accent-2: #2563eb;
+    --gk-accent-hi: #93c5fd;
+    --gk-accent-bg: rgba(59,130,246,0.14);
+
+    --gk-danger: #f87171;
+    --gk-danger-bg: rgba(248,113,113,0.14);
+    --gk-warn: #fb923c;
+    --gk-warn-bg: rgba(251,146,60,0.14);
+    --gk-caution: #facc15;
+    --gk-caution-bg: rgba(250,204,21,0.13);
+    --gk-good: #34d399;
+    --gk-good-bg: rgba(52,211,153,0.14);
+    --gk-info: #60a5fa;
+    --gk-info-bg: rgba(96,165,250,0.14);
+    --gk-purple: #c4b5fd;
+    --gk-purple-bg: rgba(196,181,253,0.14);
+    --gk-cyan: #67e8f9;
+    --gk-cyan-bg: rgba(103,232,249,0.13);
+    --gk-neutral: #94a3b8;
+    --gk-neutral-bg: rgba(148,163,184,0.13);
+
+    --gk-success: #10b981;
+    --gk-success-2: #059669;
+    --gk-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.4);
+}
+/* Explicit "light" beats the OS preference. */
+html.gk-light {
+    --gk-bg: #f1f5f9;
+    --gk-card: #ffffff;
+    --gk-card-2: #f8fafc;
+    --gk-row-alt: #f8fafc;
+    --gk-sidebar: #ffffff;
+    --gk-border: #e2e8f0;
+    --gk-border-strong: #cbd5e1;
+    --gk-ink: #0f172a;
+    --gk-ink-2: #475569;
+    --gk-ink-3: #94a3b8;
+    --gk-accent: #2563eb;
+    --gk-accent-2: #1d4ed8;
+    --gk-accent-hi: #1d4ed8;
+    --gk-accent-bg: #eff6ff;
+    --gk-danger: #dc2626;
+    --gk-danger-bg: #fef2f2;
+    --gk-warn: #ea580c;
+    --gk-warn-bg: #fff7ed;
+    --gk-caution: #a16207;
+    --gk-caution-bg: #fefce8;
+    --gk-good: #059669;
+    --gk-good-bg: #ecfdf5;
+    --gk-info: #2563eb;
+    --gk-info-bg: #eff6ff;
+    --gk-purple: #7c3aed;
+    --gk-purple-bg: #f5f3ff;
+    --gk-cyan: #0891b2;
+    --gk-cyan-bg: #ecfeff;
+    --gk-neutral: #475569;
+    --gk-neutral-bg: #f1f5f9;
+    --gk-success: #059669;
+    --gk-success-2: #047857;
+    --gk-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 16px rgba(15,23,42,0.05);
+}
+
+/* Form-control re-skin for dark (auto or explicit). */
+@media (prefers-color-scheme: dark) {
+    :root:not(.gk-light) .gradio-container input[type="text"],
+    :root:not(.gk-light) .gradio-container input[type="number"],
+    :root:not(.gk-light) .gradio-container input[type="password"],
+    :root:not(.gk-light) .gradio-container input[type="search"],
+    :root:not(.gk-light) .gradio-container textarea,
+    :root:not(.gk-light) .gradio-container select,
+    :root:not(.gk-light) .gradio-container .input-text,
+    :root:not(.gk-light) .gradio-container .gradio-dropdown,
+    :root:not(.gk-light) .gradio-container .wrap > .options {
+        background: var(--gk-bg) !important;
+        color: var(--gk-ink) !important;
+        border-color: var(--gk-border) !important;
+    }
+    :root:not(.gk-light) .gradio-container button { color: var(--gk-ink) !important; }
+}
+html.gk-dark .gradio-container input[type="text"],
+html.gk-dark .gradio-container input[type="number"],
+html.gk-dark .gradio-container input[type="password"],
+html.gk-dark .gradio-container input[type="search"],
+html.gk-dark .gradio-container textarea,
+html.gk-dark .gradio-container select,
+html.gk-dark .gradio-container .input-text,
+html.gk-dark .gradio-container .gradio-dropdown,
+html.gk-dark .gradio-container .wrap > .options,
+body.dark .gradio-container input[type="text"],
+body.dark .gradio-container input[type="number"],
+body.dark .gradio-container input[type="password"],
+body.dark .gradio-container input[type="search"],
+body.dark .gradio-container textarea,
+body.dark .gradio-container select,
+body.dark .gradio-container .input-text,
+body.dark .gradio-container .gradio-dropdown,
+body.dark .gradio-container .wrap > .options {
+    background: var(--gk-bg) !important;
+    color: var(--gk-ink) !important;
+    border-color: var(--gk-border) !important;
+}
+html.gk-dark .gradio-container button,
+body.dark .gradio-container button { color: var(--gk-ink) !important; }
+
+.gk-theme-toggle {
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.2);
+    color: #fff; cursor: pointer;
+    width: 32px; height: 32px; border-radius: 8px;
+    font-size: 15px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-left: 6px; padding: 0; transition: background 0.15s;
+}
+.gk-theme-toggle:hover { background: rgba(255,255,255,0.2); }
+
+.gradio-container,
+.gradio-container * { font-family: 'Inter','Segoe UI',Tahoma,sans-serif !important; }
+.gradio-container {
+    background: var(--gk-bg) !important;
+    max-width: 100% !important; width: 100% !important; margin: 0 auto !important;
+    padding-left: 16px !important; padding-right: 16px !important;
+}
+footer { display: none !important; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   PROGRESS — the percentage/ETA is the only feedback during a multi-minute
+   GPU run, so it stays visible. Only the noisier meta rows are hidden.
+   ───────────────────────────────────────────────────────────────────── */
+.meta-text, .meta-text-center { display: none !important; }
+.progress-text {
+    display: block !important;
+    color: var(--gk-ink-2) !important;
+    font-size: 0.76rem !important; font-weight: 700 !important;
+    letter-spacing: 0.4px !important;
+}
+.eta-bar, .progress-bar {
+    background: var(--gk-accent) !important; opacity: 0.85 !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   FORM LABELS
+   ───────────────────────────────────────────────────────────────────── */
+.gradio-container label > .label-wrap,
+.gradio-container .label-wrap > span,
+.gradio-container .form .block-title {
+    background: transparent !important;
+    color: var(--gk-ink-2) !important;
+    text-transform: uppercase !important;
+    font-size: 0.66rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.6px !important;
+    padding: 0 0 4px 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+.gradio-container .label-wrap { background: transparent !important; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   INPUTS
+   ───────────────────────────────────────────────────────────────────── */
+.gradio-container input[type="text"],
+.gradio-container input[type="number"],
+.gradio-container input[type="password"],
+.gradio-container textarea,
+.gradio-container select,
+.gradio-container .input-text,
+.gradio-container .gradio-dropdown,
+.gradio-container .wrap > .options {
+    background: var(--gk-card) !important;
+    border: 1px solid var(--gk-border) !important;
+    color: var(--gk-ink) !important;
+    border-radius: 8px !important;
+    font-size: 0.85rem !important;
+    box-shadow: none !important;
+}
+.gradio-container input:focus, .gradio-container textarea:focus,
+.gradio-container select:focus, .gradio-container .input-text:focus-within {
+    border-color: var(--gk-accent) !important;
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.18) !important;
+    outline: none !important;
+}
+/* Visible keyboard focus everywhere — Gradio's default ring is easy to lose. */
+.gradio-container :focus-visible,
+.gk-table th:focus-visible, .gk-seekable:focus-visible,
+.gk-btn-mini:focus-visible {
+    outline: 2px solid var(--gk-accent) !important;
+    outline-offset: 2px !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   BUTTONS
+   ───────────────────────────────────────────────────────────────────── */
+.gradio-container button {
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 0.83rem !important;
+    transition: all 0.12s ease !important;
+}
+.gradio-container button.primary,
+.gradio-container .gradio-button.primary,
+.gradio-container button[variant="primary"] {
+    background: var(--gk-accent) !important;
+    color: #fff !important; border-color: var(--gk-accent) !important;
+}
+.gradio-container button.primary:hover { background: var(--gk-accent-2) !important; }
+.gradio-container button.stop,
+.gradio-container button[variant="stop"] {
+    background: var(--gk-danger-bg) !important; color: var(--gk-danger) !important;
+    border: 1px solid var(--gk-danger) !important;
+}
+.gradio-container button.stop:hover { filter: brightness(0.97); }
+
+/* ─────────────────────────────────────────────────────────────────────
+   TOP BAR
+   ───────────────────────────────────────────────────────────────────── */
+.gk-topbar {
+    background: linear-gradient(135deg,#0b1733 0%,#162447 60%,#1e3a8a 100%);
+    border-radius: var(--gk-radius); margin-bottom: 14px; padding: 14px 22px;
+    display: flex; align-items: center; justify-content: space-between;
+    box-shadow: 0 4px 18px rgba(15,23,42,0.18);
+    gap: 14px; flex-wrap: wrap;
+}
+.gk-topbar-left  { display: flex; align-items: center; gap: 14px; }
+.gk-logo-mark {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg,#3b82f6,#1d4ed8);
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.05rem; font-weight: 800; color: #fff; flex-shrink: 0;
+    letter-spacing: -0.5px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+}
+.gk-brand-super  { font-size: 0.6rem; font-weight: 700; letter-spacing: 2.4px; color: #93c5fd; text-transform: uppercase; }
+.gk-brand-title  { font-size: 1.05rem; font-weight: 700; color: #fff; line-height: 1.2; margin: 2px 0; }
+.gk-brand-sub    { font-size: 0.72rem; color: #bfdbfe; opacity: 0.85; }
+.gk-topbar-chips { display: flex; gap: 6px; flex-wrap: wrap; max-width: 560px; justify-content: flex-end; align-items: center; }
+.gk-chip {
+    background: rgba(255,255,255,0.07); color: #cbd5e1; padding: 3px 10px;
+    border-radius: 99px; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.3px;
+    border: 1px solid rgba(255,255,255,0.10);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   TWO-COLUMN LAYOUT
+   ───────────────────────────────────────────────────────────────────── */
+#gk-main-row { gap: 14px !important; align-items: stretch !important; }
+#gk-sidebar {
+    flex: 0 0 296px !important;
+    min-width: 296px !important;
+    max-width: 296px !important;
+    background: var(--gk-sidebar) !important;
+    border: 1px solid var(--gk-border) !important;
+    border-radius: var(--gk-radius) !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    overflow-y: auto !important;
+    max-height: calc(100vh - 90px);
+    position: sticky;
+    top: 10px;
+    align-self: flex-start;
+    box-shadow: var(--gk-shadow);
+}
+
+/* ── Why the sidebar must not wrap ────────────────────────────────────
+   Gradio renders a Column as `display:flex; flex-direction:column`, and
+   the Row it sits in sets `flex-wrap:wrap` on every direct child. Combined
+   with the bounded max-height above, content taller than the pane does not
+   scroll — it WRAPS into a second 294px column beside the first, then a
+   third, then a fourth. That is what made the whole parameter pane scroll
+   sideways (scrollWidth 1176 against a 294px pane), and it appeared as soon
+   as the controls grew taller than the viewport.
+
+   nowrap sends the overflow where it belongs: down, into overflow-y.
+   Keep these declarations in their own comment-free block — Gradio minifies
+   the stylesheet, and an inline comment inside the rule above caused these
+   two properties to be dropped on the way through.
+   ───────────────────────────────────────────────────────────────────── */
+#gk-sidebar {
+    flex-wrap: nowrap !important;
+    overflow-x: hidden !important;
+}
+/* Every flex box in the pane, at any depth. Gradio nests several wrapping
+   columns per control group, and a single missed one wraps its contents into
+   a hidden second column that overflow-x:hidden then clips away entirely. */
+#gk-sidebar div { flex-wrap: nowrap !important; min-width: 0 !important; }
+/* Direct children keep their natural height. Without this the sidebar's
+   bounded max-height flex-shrinks them, and a shrunken wrapping column is
+   exactly what starts spilling sideways. Let the pane scroll instead. */
+#gk-sidebar > div { flex-shrink: 0 !important; }
+/* Gradio gives every direct child of a Row `min-width: min(160px, 100%)`.
+   Two buttons therefore demand 320px+gap in a 262px-wide group; with wrapping
+   now off they would run past the edge and be clipped. Let them shrink and
+   wrap their labels instead — the pair still fits side by side. */
+#gk-sidebar button,
+#gk-sidebar .gradio-button {
+    min-width: 0 !important;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+#gk-sidebar .gk-zone-name {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+#gk-sidebar label,
+#gk-sidebar .file-preview,
+#gk-sidebar .gradio-file {
+    overflow-wrap: anywhere;
+    min-width: 0 !important;
+}
+#gk-sidebar > .form, #gk-sidebar > div { padding: 0 !important; gap: 0 !important; }
+#gk-main { flex: 1 !important; min-width: 0 !important; padding: 0 !important; }
+
+#gk-sidebar::-webkit-scrollbar { width: 6px; }
+#gk-sidebar::-webkit-scrollbar-track { background: transparent; }
+#gk-sidebar::-webkit-scrollbar-thumb { background: var(--gk-border-strong); border-radius: 3px; }
+
+/* ── RESPONSIVE ──────────────────────────────────────────────────────
+   The sidebar was hard-pinned at 296px with no breakpoint anywhere, so
+   under ~900px the main column got crushed and the wide tables and the
+   tab bar both overflowed the page. */
+@media (max-width: 1100px) {
+    #gk-sidebar { flex-basis: 260px !important; min-width: 260px !important; max-width: 260px !important; }
+    .gk-topbar-chips { max-width: 320px; }
+}
+@media (max-width: 900px) {
+    #gk-main-row { flex-wrap: wrap !important; }
+    #gk-sidebar {
+        flex: 1 1 100% !important;
+        min-width: 100% !important; max-width: 100% !important;
+        position: static !important;
+        max-height: none !important;
+        margin-bottom: 12px;
+    }
+    #gk-main { flex: 1 1 100% !important; }
+    .gk-topbar { padding: 12px 14px; }
+    .gk-topbar-chips { max-width: 100%; justify-content: flex-start; }
+    .gradio-container { padding-left: 8px !important; padding-right: 8px !important; }
+    .zone-toolbar-row { grid-template-columns: 1fr !important; gap: 10px !important; }
+    .zone-toolbar-row-secondary { flex-wrap: wrap !important; }
+}
+@media (max-width: 620px) {
+    .gk-brand-sub, .gk-topbar-chips .gk-chip { display: none; }
+    .gk-table-toolbar { flex-direction: column; align-items: stretch; }
+    .gk-table-actions { justify-content: flex-start; }
+    .gk-stat-chip { flex: 1 1 auto; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   MOTION — the alert dot pulsed forever on a sticky element with no
+   guard, which is exactly the thing to suppress on a screen share.
+   ───────────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+    .gk-alert-pulse { box-shadow: 0 0 0 3px rgba(255,255,255,0.45) !important; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   SIDEBAR
+   ───────────────────────────────────────────────────────────────────── */
+.sb-hdr {
+    background: transparent;
+    color: var(--gk-ink-2); padding: 14px 16px 6px;
+    font-size: 0.65rem; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px; user-select: none;
+    border-top: 1px solid var(--gk-border);
+}
+.sb-hdr:first-of-type, .sb-hdr.sb-first { border-top: none; }
+.sb-hdr-step {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px;
+    background: var(--gk-accent); color: #fff;
+    border-radius: 999px; font-size: 0.65rem; font-weight: 800; flex-shrink: 0;
+    letter-spacing: 0;
+}
+.sb-pad { padding: 4px 16px 14px; }
+.sb-div { height: 1px; background: var(--gk-border); margin: 4px 0; }
+.sb-foot {
+    text-align: center; color: var(--gk-ink-3); font-size: 0.68rem;
+    padding: 12px 16px; border-top: 1px solid var(--gk-border);
+    margin-top: 4px;
+}
+.sb-foot strong { color: var(--gk-accent); font-weight: 700; }
+.sb-hint {
+    color: var(--gk-ink-3); font-size: 0.7rem; line-height: 1.45;
+    padding: 0 16px 10px;
+}
+
+#gk-run-btn, #gk-run-btn button {
+    background: var(--gk-success) !important;
+    border-color: transparent !important;
+    color: #fff !important; font-size: 0.92rem !important; font-weight: 700 !important;
+    height: 46px !important; letter-spacing: 0.2px !important;
+    box-shadow: 0 2px 6px rgba(5,150,105,0.20) !important;
+    border-radius: 9px !important;
+}
+#gk-run-btn:hover, #gk-run-btn button:hover {
+    background: var(--gk-success-2) !important;
+    box-shadow: 0 4px 10px rgba(5,150,105,0.28) !important;
+}
+
+#gk-sidebar .gradio-button.secondary,
+#gk-sidebar button[variant="secondary"] {
+    background: var(--gk-card-2) !important; color: var(--gk-ink-2) !important;
+    border: 1px solid var(--gk-border) !important;
+    font-size: 0.74rem !important; font-weight: 600 !important;
+    padding: 6px 10px !important;
+}
+#gk-sidebar .gradio-button.secondary:hover { filter: brightness(0.97); }
+
+.sb-downloads { padding: 4px 16px 12px !important; }
+.sb-downloads .file-preview, .sb-downloads .gradio-file { padding: 6px 10px !important; }
+.sb-downloads .label-wrap span, .sb-downloads .label-wrap {
+    font-size: 0.66rem !important; font-weight: 700 !important;
+    color: var(--gk-ink-2) !important; letter-spacing: 0.6px !important;
+}
+.sb-downloads .form, .sb-downloads > div { gap: 8px !important; }
+
+/* Threshold sliders — compact enough to live in the sidebar. */
+.sb-thresholds .gradio-slider { margin-bottom: 2px !important; }
+.sb-thresholds input[type="range"] { accent-color: var(--gk-accent); }
+
+/* ─────────────────────────────────────────────────────────────────────
+   TABS — outer group nav + inner sub-nav
+   ───────────────────────────────────────────────────────────────────── */
+/* Gradio 6.12 renders tabs as
+       .tab-wrapper > .tab-container > button[role=tab]
+   plus a duplicate .tab-container.visually-hidden it measures against, and
+   its own .overflow-menu for tabs that do not fit. There is no `.tab-nav`
+   (that was Gradio 4/5) — selectors below target both so the styling
+   survives either. .tab-container is overflow:hidden, so the tab strip
+   itself can never scroll sideways. */
+#gk-tabs .tab-container, .tab-nav {
+    gap: 0 !important;
+    background: transparent !important;
+    padding: 0 4px !important;
+}
+#gk-tabs .tab-container button, .tab-nav button {
+    font-size: 0.78rem !important;
+    padding: 8px 13px !important;
+    font-weight: 600 !important;
+    color: var(--gk-ink-2) !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    opacity: 1 !important;
+    transition: color 0.12s ease, background 0.12s ease !important;
+    position: relative;
+    /* Gradio already makes these flex; pinning it is what lets the badge sit
+       inline after the label (see the ::before rule further down). */
+    display: flex !important;
+    align-items: center !important;
+    gap: 7px !important;
+    white-space: nowrap;
+}
+#gk-tabs .tab-container button:hover:not(.selected),
+.tab-nav button:hover:not(.selected) {
+    color: var(--gk-accent) !important;
+    background: var(--gk-accent-bg) !important;
+}
+#gk-tabs .tab-container button.selected, .tab-nav button.selected {
+    color: var(--gk-accent) !important;
+    background: transparent !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+}
+/* Gradio's own selected-tab indicator. It is an ABSOLUTELY POSITIONED ::after
+   spanning the button's width — which is why the badge cannot live there too
+   (see below). All we do is recolour it. */
+#gk-tabs .tab-container button.selected::after,
+.tab-nav button.selected::after {
+    background-color: var(--gk-accent) !important;
+}
+/* A rail for the indicator to sit on, so the selected tab reads as attached to
+   the panel below it rather than floating. */
+#gk-tabs > .tab-wrapper {
+    margin-bottom: 12px !important;
+    border-bottom: 1px solid var(--gk-border) !important;
+}
+/* Outer group nav reads as the primary level. */
+#gk-tabs > .tab-wrapper .tab-container button {
+    font-size: 0.85rem !important;
+    padding: 9px 15px !important;
+    letter-spacing: 0.2px !important;
+}
+/* The "⋯" overflow control Gradio adds when the tabs stop fitting. Styled to
+   match, so it reads as part of the strip and not as leftover chrome. */
+#gk-tabs .overflow-menu, #gk-tabs .overflow-menu button {
+    color: var(--gk-ink-2) !important;
+    background: transparent !important;
+    border: none !important;
+}
+#gk-tabs .overflow-menu button:hover {
+    color: var(--gk-accent) !important;
+    background: var(--gk-accent-bg) !important;
+}
+#gk-tabs .overflow-dropdown {
+    background: var(--gk-card) !important;
+    border: 1px solid var(--gk-border) !important;
+    border-radius: 10px !important;
+    box-shadow: var(--gk-shadow) !important;
+    overflow: hidden !important;
+}
+/* Count badges injected by app.js */
+/* Tab count badges are a PSEUDO-ELEMENT on the tab button, driven by the
+   data-gk-badge attribute that _syncTabBadges() stamps.
+
+   They used to be a real <span> appended into the button. That put a foreign
+   child node inside DOM that Svelte owns, so Svelte's reconciliation effect for
+   the tab bar re-ran, re-triggering the write, until Svelte 5's loop guard threw
+   `effect_update_depth_exceeded` — hundreds of times, from inside its own flush.
+   An exception mid-flush aborts the update, which is what left the page wedged
+   at 100% with pending overlays that never cleared and toasts that would not
+   dismiss.
+
+   A pseudo-element needs no node, and an ATTRIBUTE write is also invisible to
+   the childList MutationObserver in app.js, so it cannot feed that loop either.
+   Do not go back to appendChild here.
+
+   ::BEFORE, NOT ::AFTER — an element has exactly one of each, and Gradio
+   already owns ::after on a tab button for the selected-tab indicator. Putting
+   the badge there too meant the selected tab's badge inherited that
+   indicator's geometry (position:absolute, stretched to the full button width,
+   inset from the bottom) and rendered as a blue bar across the tab with the
+   label shoved out of it. The button is a flex row, so `order` puts ::before
+   after the label anyway. */
+.gk-tab-badge,
+[data-gk-badge]::before {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; padding: 0 5px;
+    border-radius: 999px; font-size: 0.63rem; font-weight: 800;
+    background: var(--gk-neutral-bg); color: var(--gk-ink-2);
+    line-height: 1; flex: 0 0 auto;
+    /* --gk-neutral-bg is within a shade of the tab strip, so an untoned count
+       reads as loose text next to the toned pills. The ring gives it an edge. */
+    box-shadow: inset 0 0 0 1px var(--gk-border-strong);
+}
+[data-gk-badge]::before {
+    content: attr(data-gk-badge);
+    order: 2;                       /* label is an anonymous flex item at 0 */
+}
+[data-gk-badge][data-gk-tone="DANGER"]::before { background: var(--gk-danger); color: #fff; box-shadow: none; }
+[data-gk-badge][data-gk-tone="WARN"]::before   { background: var(--gk-warn);   color: #fff; box-shadow: none; }
+[data-gk-badge][data-gk-tone="INFO"]::before   { background: var(--gk-accent); color: #fff; box-shadow: none; }
+/* On the selected tab the label is already accent-coloured, so an accent badge
+   next to it loses its edge. Outline it instead. */
+#gk-tabs button.selected[data-gk-tone="INFO"]::before,
+#gk-tabs button.selected[data-gk-tone="NEUTRAL"]::before {
+    background: var(--gk-card) !important;
+    color: var(--gk-accent) !important;
+    box-shadow: inset 0 0 0 1.5px currentColor;
+}
+.gk-tab-badge[data-tone="DANGER"] { background: var(--gk-danger); color: #fff; }
+.gk-tab-badge[data-tone="WARN"]   { background: var(--gk-warn);   color: #fff; }
+.gk-tab-badge[data-tone="INFO"]   { background: var(--gk-accent); color: #fff; }
+
+#gk-main > .form, #gk-main > div { gap: 14px !important; }
+#gk-main video, #gk-main .gradio-video {
+    border-radius: var(--gk-radius) !important;
+    overflow: hidden !important;
+    box-shadow: var(--gk-shadow);
+    background: #0f172a !important;
+}
+.gradio-container .gradio-group {
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border);
+    border-radius: var(--gk-radius);
+    box-shadow: var(--gk-shadow);
+}
+.gradio-container .gradio-accordion {
+    border: 1px solid var(--gk-border) !important;
+    border-radius: var(--gk-radius) !important;
+    background: var(--gk-card) !important;
+}
+.gradio-container .gradio-accordion > .label-wrap {
+    padding: 10px 14px !important;
+    font-size: 0.78rem !important; font-weight: 700 !important;
+    color: var(--gk-ink) !important;
+    background: var(--gk-card-2) !important;
+    border-bottom: 1px solid var(--gk-border) !important;
+    letter-spacing: 0.2px !important;
+    text-transform: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   SHARED PANEL COMPONENTS  (engine/theme.py emits these classes)
+   ───────────────────────────────────────────────────────────────────── */
+.gk-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 5px;
+    font-size: 0.72rem; font-weight: 800; letter-spacing: 0.4px;
+    white-space: nowrap; line-height: 1.4;
+}
+.gk-swatch {
+    display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+    vertical-align: middle; margin-right: 8px;
+    box-shadow: 0 0 0 1px var(--gk-border-strong);
+}
+
+/* Multi-label cell — every operational category one cart fell into. Wraps
+   instead of widening the table, because a cart can carry four at once. */
+.gk-flags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.gk-flag { display: inline-flex; cursor: help; }
+.gk-flags .gk-badge, .gk-flag .gk-badge {
+    font-size: 0.64rem; padding: 2px 7px; letter-spacing: 0.2px;
+    white-space: normal;
+}
+/* Read by the CSV exporter (it walks td.textContent) and by screen readers,
+   never painted: without it two adjacent chips export as one run-on string. */
+.gk-sr-only {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+/* Collapsed reference block — the category glossary. */
+.gk-details {
+    border: 1px solid var(--gk-border); border-radius: var(--gk-radius);
+    background: var(--gk-card-2); padding: 9px 14px; margin-bottom: 10px;
+}
+.gk-details > summary {
+    cursor: pointer; font-weight: 700; font-size: 0.84rem;
+    color: var(--gk-ink); list-style-position: outside;
+}
+.gk-details > summary:hover { color: var(--gk-accent); }
+.gk-details[open] > summary { margin-bottom: 4px; }
+.gk-empty {
+    text-align: center; padding: 34px 18px; border-radius: var(--gk-radius);
+    border: 1px dashed var(--gk-border-strong); background: var(--gk-card);
+}
+.gk-empty-icon { font-size: 1.6rem; margin-bottom: 6px; line-height: 1; }
+.gk-empty-head { font-size: 0.98rem; font-weight: 700; color: var(--gk-ink); }
+.gk-empty-sub  { color: var(--gk-ink-2); margin-top: 7px; font-size: 0.86rem; line-height: 1.55; }
+.gk-notice {
+    padding: 14px 18px; border-radius: var(--gk-radius);
+    border-left: 4px solid var(--gk-neutral); margin-bottom: 10px;
+}
+.gk-notice-head { font-weight: 800; font-size: 0.94rem; }
+.gk-notice-body { color: var(--gk-ink-2); font-size: 0.86rem; margin-top: 4px; line-height: 1.55; }
+.gk-section-title {
+    font-weight: 700; color: var(--gk-ink); font-size: 1rem;
+    margin: 2px 0 4px; letter-spacing: 0.01em;
+}
+.gk-section-sub {
+    font-weight: 500; color: var(--gk-ink-2); font-size: 0.76rem;
+    margin-left: 10px;
+}
+.gk-section-note {
+    color: var(--gk-ink-2); font-size: 0.74rem; margin: 0 0 10px;
+    line-height: 1.55; max-width: 90ch;
+}
+.gk-stat-chip {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    border: 1px solid var(--gk-border); padding: 8px 14px; border-radius: 999px;
+}
+.gk-stat-val { font-weight: 700; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.gk-stat-lbl {
+    color: var(--gk-ink-2); font-size: 0.68rem; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase;
+}
+.gk-stat-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.gk-meter {
+    flex: 1; background: var(--gk-neutral-bg); border-radius: 5px;
+    height: 9px; min-width: 80px; overflow: hidden;
+}
+.gk-meter-fill { height: 100%; border-radius: 5px; }
+
+/* ── Tables ─────────────────────────────────────────────────────────── */
+.gk-table-wrap {
+    background: var(--gk-card); border: 1px solid var(--gk-border);
+    border-radius: var(--gk-radius); box-shadow: var(--gk-shadow);
+    margin-bottom: 14px; overflow: hidden;
+}
+.gk-table-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 12px 14px 10px; flex-wrap: wrap;
+}
+.gk-table-toolbar .gk-section-title { margin: 0; }
+.gk-table-actions { display: flex; gap: 8px; align-items: center; }
+.gk-table-filter {
+    background: var(--gk-card) !important; color: var(--gk-ink) !important;
+    border: 1px solid var(--gk-border) !important; border-radius: 8px !important;
+    padding: 5px 10px !important; font-size: 0.76rem !important; width: 160px;
+}
+.gk-table-filter:focus {
+    outline: none; border-color: var(--gk-accent) !important;
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.16) !important;
+}
+.gk-btn-mini {
+    background: var(--gk-card-2); color: var(--gk-ink-2);
+    border: 1px solid var(--gk-border); border-radius: 8px;
+    padding: 5px 11px; font-size: 0.72rem; font-weight: 700;
+    cursor: pointer; white-space: nowrap; transition: all 0.12s;
+}
+.gk-btn-mini:hover { color: var(--gk-accent); border-color: var(--gk-accent); }
+/* Tables fit the column they are given — nothing here scrolls sideways.
+   Every header and cell may wrap (and break inside a long unbroken token),
+   so an 8-column table compresses instead of demanding a scrollbar. The
+   overflow-x below is a last-resort safety valve that, in practice, never
+   triggers; it exists so a pathological table can never push the PAGE wide. */
+.gk-table-scroll { overflow-x: auto; max-height: 640px; overflow-y: auto; }
+.gk-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 0.87rem; line-height: 1.5;
+    table-layout: auto;
+}
+.gk-table th, .gk-table td {
+    overflow-wrap: anywhere;
+    word-break: normal;
+    white-space: normal;
+}
+.gk-table th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--gk-card-2); color: var(--gk-ink);
+    padding: 10px 13px; text-align: left; font-weight: 700;
+    font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase;
+    border-bottom: 1px solid var(--gk-border-strong);
+    vertical-align: top;
+}
+/* Badges are the one nowrap island; let them wrap once space gets tight so
+   a "PUSHOUT ALERT" pill cannot set a floor on the table's width. */
+@media (max-width: 1400px) {
+    .gk-table th, .gk-table td { padding: 8px 9px; font-size: 0.82rem; }
+    .gk-table .gk-badge { white-space: normal; font-size: 0.66rem; padding: 3px 7px; }
+    .gk-th-sub { display: none; }
+}
+.gk-table th[data-sort] { cursor: pointer; user-select: none; }
+.gk-table th[data-sort]:hover { color: var(--gk-accent); }
+.gk-th-sub {
+    display: block; font-weight: 500; font-size: 0.64rem;
+    color: var(--gk-ink-3); margin-top: 3px; letter-spacing: 0;
+    text-transform: none;
+}
+.gk-sort-ind { display: inline-block; width: 10px; margin-left: 4px; opacity: 0.45; }
+.gk-sort-ind::after { content: "\2195"; }
+th[data-dir="asc"]  .gk-sort-ind { opacity: 1; }
+th[data-dir="asc"]  .gk-sort-ind::after { content: "\2191"; }
+th[data-dir="desc"] .gk-sort-ind { opacity: 1; }
+th[data-dir="desc"] .gk-sort-ind::after { content: "\2193"; }
+.gk-table td {
+    padding: 9px 13px; border-bottom: 1px solid var(--gk-border);
+    color: var(--gk-ink); vertical-align: middle;
+}
+/* Zebra striping, two layers deep on purpose.
+   Base: plain nth-child, so a freshly rendered table is striped even if
+   app.js never runs.
+   Override: once app.js has taken over (it stamps data-gk-striped on the
+   table) striping follows the *visible* row sequence instead, because
+   nth-child goes wrong the moment a table is sorted or filtered. */
+.gk-table tbody tr:nth-child(even) { background: var(--gk-row-alt); }
+.gk-table[data-gk-striped] tbody tr { background: transparent; }
+.gk-table[data-gk-striped] tbody tr.gk-stripe { background: var(--gk-row-alt); }
+.gk-table tbody tr:hover { background: var(--gk-accent-bg); }
+.gk-num { font-variant-numeric: tabular-nums; }
+.gk-dim { color: var(--gk-ink-2); }
+.gk-strong { font-weight: 800; }
+.gk-upper { text-transform: uppercase; font-weight: 600; font-size: 0.8rem; }
+.gk-row-hidden { display: none !important; }
+.gk-table-foot {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 9px 14px; border-top: 1px solid var(--gk-border);
+    background: var(--gk-card-2);
+    font-size: 0.72rem; color: var(--gk-ink-2);
+}
+.gk-table-warn { color: var(--gk-warn); font-weight: 700; }
+.gk-table-note { color: var(--gk-ink-3); }
+
+/* Clickable rows that seek the tracked video. */
+.gk-seekable { cursor: pointer; }
+.gk-seekable:hover { background: var(--gk-accent-bg) !important; }
+.gk-seekable td:first-child { position: relative; padding-left: 24px; }
+.gk-seekable td:first-child::before {
+    content: "\25B6"; position: absolute; left: 9px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.6rem; color: var(--gk-accent); opacity: 0;
+    transition: opacity 0.12s;
+}
+.gk-seekable:hover td:first-child::before,
+.gk-seekable:focus td:first-child::before { opacity: 1; }
+@keyframes gkSeekFlash {
+    from { background: var(--gk-accent); }
+    to   { background: transparent; }
+}
+.gk-seek-flash { animation: gkSeekFlash 0.9s ease-out; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   ZONE EDITOR
+   ───────────────────────────────────────────────────────────────────── */
+.zone-hdr-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: linear-gradient(135deg,#0b1733,#1e3a8a);
+    border-radius: var(--gk-radius) var(--gk-radius) 0 0;
+    padding: 9px 16px; color: #dbeafe; font-size: 0.76rem; font-weight: 600;
+    gap: 12px; flex-wrap: wrap;
+}
+.zone-hdr-bar span { opacity: 0.9; }
+/* Transient message in the header bar — the zone editor's only in-place
+   channel for telling the operator why a control declined to act. */
+.zone-hdr-bar span.gk-hint-flash {
+    opacity: 1;
+    color: var(--gk-caution);
+    font-weight: 700;
+}
+.gk-fs-btn {
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.20);
+    color: #fff; border-radius: 7px; padding: 5px 12px;
+    font-size: 0.72rem; font-weight: 600; cursor: pointer;
+    font-family: 'Inter',sans-serif; white-space: nowrap;
+    transition: all 0.12s;
+}
+.gk-fs-btn:hover  { background: rgba(255,255,255,0.18) !important; }
+.gk-fs-btn.exiting { background: rgba(220,38,38,0.85) !important; border-color: rgba(220,38,38,0.5) !important; }
+
+/* The canvas is a drawing surface — say so. */
+#zone-canvas-img img, #zone-canvas-img canvas { cursor: crosshair !important; }
+#zone-canvas-img { position: relative; }
+
+#zone-editor-fs-wrap.gk-fs-active {
+    position: fixed !important; inset: 0 !important;
+    z-index: 9990 !important; background: #020617 !important;
+    display: flex !important; flex-direction: column !important;
+    padding: 0 !important; border-radius: 0 !important; gap: 0 !important;
+}
+/* ── Making the FRAME fill the overlay ───────────────────────────────────
+   The overlay going fixed/inset-0 is only half of fullscreen. Measured in
+   Gradio 6.12 (1600x900 viewport), the frame came out 807x454 painted —
+   pixel-for-pixel the same size as in the normal view, just centred on
+   black. Three separate things held it down:
+
+     1. Gradio nests the group as
+            #zone-editor-fs-wrap            <- ours, fixed, 900 tall
+              #zone-editor-fs-wrap          <- Gradio repeats elem_id here
+                .styler
+                  [header, .zone-canvas-area, toolbar rows]
+        and every one of those wrappers is `flex: 0 1 auto`, so none of them
+        grew. The editor sat 737px tall inside a 900px overlay.
+     2. `gr.Image(height=460)` is an INLINE style on the block. Only an
+        !important rule outranks it.
+     3. The rule that was supposed to do this targeted `.gradio-image`, which
+        does not exist in Gradio 6.12 — the classes are `.image-container`
+        and `.image-frame`. It matched nothing and had never had any effect.
+
+   Stretch the chain, then let the image fill what is left. No `calc(100vh -
+   Npx)` anywhere: the toolbars wrap at narrow widths and any constant is
+   wrong the moment they do. */
+#zone-editor-fs-wrap.gk-fs-active > *,
+#zone-editor-fs-wrap.gk-fs-active > * > .styler,
+#zone-editor-fs-wrap.gk-fs-active .zone-canvas-area,
+#zone-editor-fs-wrap.gk-fs-active .zone-canvas-area > .styler,
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 1 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+}
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img .image-container {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+}
+/* A 16:9 frame in a wider box is letterboxed, and the Gradio block's own
+   background is white — so fullscreen came up with two bright panels flanking
+   the frame, which is the worst possible surround for judging a dark CCTV
+   still. Everything that can show through gets the overlay's ground. */
+#zone-editor-fs-wrap.gk-fs-active > *,
+#zone-editor-fs-wrap.gk-fs-active > * > .styler,
+#zone-editor-fs-wrap.gk-fs-active .zone-canvas-area,
+#zone-editor-fs-wrap.gk-fs-active .zone-canvas-area > .styler,
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img,
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img .image-container {
+    background: #020617 !important;
+    border-color: #0f172a !important;
+}
+/* Height only — width is deliberately left as Gradio's `auto`, which
+   shrink-wraps the frame to the painted image. Forcing width:100% here made
+   the <img> box 1592px wide around a 1093px frame, so ~250px of black either
+   side carried the crosshair cursor and absorbed clicks. Gradio drops those
+   clicks (its coordinate helper returns null outside the image and the
+   handler is `d && dispatch(...)`), so nothing broke — but a crosshair over
+   dead space invites the operator to place a vertex that never appears. */
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img .image-container > button,
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img .image-frame {
+    height: 100% !important;
+}
+/* `contain`, NOT Gradio's default `scale-down`. scale-down refuses to enlarge
+   past the natural size, which is exactly what fullscreen is for. Both keep
+   the aspect ratio and centre the image, which is what Gradio's click->pixel
+   maths assumes when it converts a click into a polygon vertex — `fill` or
+   `cover` here would silently put every vertex in the wrong place. */
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img img {
+    height: 100% !important;
+    width: auto !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    object-fit: contain !important;
+}
+/* Gradio floats Download/Share over the top-right of the canvas, in
+   `.icon-button-wrapper` — not the `.icon-buttons` the older hide rule below
+   guessed at, which is why they are still there. Outside fullscreen they are
+   harmless furniture. Inside it they sit on the drawing surface, and on a
+   frame that reaches the full width they land exactly on the top-right corner
+   an operator needs to click. Fullscreen is for drawing. */
+#zone-editor-fs-wrap.gk-fs-active #zone-canvas-img .icon-button-wrapper {
+    display: none !important;
+}
+
+#zone-editor-fs-wrap.gk-fs-active .zone-hdr-bar { border-radius: 0; }
+#zone-editor-fs-wrap.gk-fs-active .zone-toolbar-row,
+#zone-editor-fs-wrap.gk-fs-active .zone-toolbar-row-secondary {
+    background: #0f172a !important; border-top: 1px solid #1e293b !important;
+    border-radius: 0 !important; flex-shrink: 0;
+}
+#zone-editor-fs-wrap.gk-fs-active .zone-toolbar-row label,
+#zone-editor-fs-wrap.gk-fs-active .zone-toolbar-row .label-wrap span { color: #94a3b8 !important; }
+#zone-editor-fs-wrap.gk-fs-active .zone-toolbar-row input { color: #e2e8f0 !important; }
+body.gk-zone-fs { overflow: hidden !important; }
+
+.zone-toolbar-row {
+    background: var(--gk-card); border: 1px solid var(--gk-border); border-top: none;
+    border-radius: 0; padding: 10px 16px;
+    display: grid !important;
+    grid-template-columns: minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) auto;
+    align-items: center !important;
+    gap: 14px !important;
+}
+.zone-toolbar-row .zone-field-pair {
+    display: flex !important; flex-direction: row !important;
+    align-items: center !important; gap: 10px !important;
+    min-width: 0 !important;
+    background: transparent !important; border: none !important;
+    padding: 0 !important; margin: 0 !important;
+}
+.zone-toolbar-row .zone-field-pair > * { min-width: 0 !important; }
+.zone-toolbar-row .zone-field-pair .zone-field-label {
+    flex: 0 0 auto !important;
+    font-size: 0.66rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--gk-ink-2); white-space: nowrap;
+}
+.zone-toolbar-row .zone-field-pair > .gradio-textbox,
+.zone-toolbar-row .zone-field-pair > .gradio-dropdown,
+.zone-toolbar-row .zone-field-pair > .form,
+.zone-toolbar-row .zone-field-pair > div:not(:first-child) {
+    flex: 1 1 auto !important; min-width: 0 !important;
+}
+.zone-name-box, .zone-applies-dd { min-width: 0 !important; max-width: none !important; flex: none !important; }
+.zone-toolbar-row .zone-save-btn { margin-left: 0 !important; flex: none !important; }
+.zone-toolbar-row .zone-save-btn,
+.zone-toolbar-row .zone-save-btn button {
+    height: 38px !important; min-width: 120px !important;
+    padding: 0 16px !important;
+    font-size: 0.8rem !important; font-weight: 600 !important;
+    border-radius: 8px !important;
+    background: var(--gk-accent) !important;
+    color: #fff !important; border-color: var(--gk-accent) !important;
+    box-shadow: 0 1px 3px rgba(37,99,235,0.25) !important;
+}
+.zone-toolbar-row .zone-save-btn:hover,
+.zone-toolbar-row .zone-save-btn button:hover { background: var(--gk-accent-2) !important; }
+
+.zone-toolbar-row-secondary {
+    background: var(--gk-card); border: 1px solid var(--gk-border); border-top: none;
+    border-radius: 0 0 var(--gk-radius) var(--gk-radius);
+    padding: 8px 16px 12px;
+    display: flex !important; gap: 12px !important; flex-wrap: nowrap !important;
+}
+.zone-toolbar-row-secondary > * { flex: 1 1 0 !important; min-width: 0 !important; }
+.zone-toolbar-row-secondary button {
+    width: 100% !important; height: 38px !important;
+    font-size: 0.8rem !important; font-weight: 600 !important;
+    border-radius: 8px !important;
+}
+/* The saved-zone manager continues the same card, so the drawing toolbar is
+   no longer the bottom edge. */
+.zone-toolbar-row-secondary { border-radius: 0 !important; }
+
+/* ── Saved-zone manager (one editable row per zone) ───────────────────────
+   Rows are Gradio Rows, and Gradio puts `min-width: min(160px, 100%)` on every
+   direct child of one. Five children at that floor is an 800px row before any
+   styling, which is wider than the results pane at 1150px and would put the
+   horizontal scrollbar straight back. Every child is pinned to `min-width: 0`
+   and given a real minimum below, so the row shrinks and then wraps rather
+   than overflowing. */
+.gk-zone-mgr-hdr {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 16px 4px; margin: 0;
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border); border-top: none;
+}
+.gk-zone-mgr-title {
+    font-size: 0.7rem; font-weight: 800; letter-spacing: 0.7px;
+    text-transform: uppercase; color: var(--gk-ink-2);
+}
+.gk-zone-mgr-count {
+    font-size: 0.68rem; font-weight: 700; color: var(--gk-accent);
+    background: var(--gk-accent-bg); border-radius: 999px; padding: 1px 8px;
+}
+.gk-zone-mgr-hint {
+    font-size: 0.72rem; color: var(--gk-ink-3);
+    overflow-wrap: anywhere; min-width: 0;
+}
+.gk-zone-mgr-empty {
+    margin: 0; padding: 14px 16px 16px;
+    font-size: 0.8rem; color: var(--gk-ink-3); line-height: 1.55;
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border); border-top: none;
+    border-radius: 0 0 var(--gk-radius) var(--gk-radius);
+}
+.gk-zone-mgr-empty b { color: var(--gk-ink-2); }
+
+/* `display` is deliberately NOT !important here.
+   These rows are a pool that Gradio shows and hides with `visible=`, and it
+   does that by winning the display property. With `display: flex !important`
+   this rule beat it: removing a zone updated the state and the sidebar but
+   left the row on screen, emptied of its controls. Gradio already lays a Row
+   out as flex, so asserting it plainly is enough. */
+.gk-zone-mgr-row {
+    display: flex; align-items: center !important;
+    gap: 10px !important; flex-wrap: wrap !important;
+    padding: 7px 16px !important; margin: 0 !important;
+    background: var(--gk-card) !important; border: none !important;
+    border-top: 1px solid var(--gk-border) !important;
+}
+/* Slot occupancy is expressed in CONTENT, not in Gradio's `visible` flag:
+   an unused slot's meta cell carries EMPTY_SLOT and this hides the whole row.
+   Gradio ignored `visible` updates on these Rows — the `hide` class it stamped
+   at build time never came off — so a removed zone left an empty row behind.
+   An HTML value update always lands, which makes this the reliable signal.
+   (:has() is already relied on above for the row gap.) */
+.gk-zone-mgr-row:has(.gk-zone-slot-empty) { display: none !important; }
+.gk-zone-mgr-row.hide, .gk-zone-mgr-row[hidden] { display: none !important; }
+.gk-zone-mgr-row:hover { background: var(--gk-row-alt) !important; }
+.gk-zone-mgr-row > * { min-width: 0 !important; }
+
+/* Gradio's `.block` sets `width: 100%`, which beats `flex-basis: auto` and
+   made this take the whole line, wrapping the rest of the row below it. */
+.gk-zone-mgr-meta {
+    flex: 0 0 auto !important; width: auto !important;
+    display: flex !important; align-items: center; gap: 8px;
+    min-width: 76px !important;
+}
+.gk-zone-mgr-swatch {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 6px; flex: 0 0 auto;
+    font-size: 0.66rem; font-weight: 800; color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
+}
+.gk-zone-mgr-pts {
+    font-size: 0.68rem; color: var(--gk-ink-3); white-space: nowrap;
+}
+.gk-zone-mgr-name  { flex: 4 1 130px !important; }
+.gk-zone-mgr-kind  { flex: 4 1 140px !important; }
+.gk-zone-mgr-applies { flex: 3 1 110px !important; }
+.gk-zone-mgr-name textarea, .gk-zone-mgr-name input {
+    font-size: 0.82rem !important; font-weight: 600 !important;
+    padding: 6px 10px !important;
+}
+.gk-zone-mgr-kind input, .gk-zone-mgr-applies input {
+    font-size: 0.78rem !important; padding: 6px 10px !important;
+}
+/* Locked Track-type on a layout zone: reads as informational, not broken. */
+.gk-zone-mgr-applies input[disabled] {
+    opacity: 0.6 !important; cursor: not-allowed !important;
+}
+
+.gk-zone-mgr-del { flex: 0 0 auto !important; }
+.gk-zone-mgr-del, .gk-zone-mgr-del button {
+    height: 30px !important; min-width: 78px !important;
+    padding: 0 12px !important;
+    font-size: 0.74rem !important; font-weight: 600 !important;
+    border-radius: 7px !important;
+    color: var(--gk-danger) !important;
+    background: transparent !important;
+    border: 1px solid var(--gk-border) !important;
+}
+.gk-zone-mgr-del:hover, .gk-zone-mgr-del button:hover {
+    background: var(--gk-danger-bg) !important;
+    border-color: var(--gk-danger) !important;
+}
+
+.gk-zone-mgr-undo { display: none !important; }
+.gk-zone-mgr-undo:has(.gk-zone-undo-msg) {
+    display: flex !important; align-items: center !important;
+    gap: 10px !important; flex-wrap: wrap !important;
+    padding: 9px 16px !important; margin: 0 !important;
+    border: none !important; border-top: 1px solid var(--gk-border) !important;
+    background: var(--gk-warn-bg) !important;
+}
+.gk-zone-undo-msg {
+    font-size: 0.78rem; font-weight: 600; color: var(--gk-warn);
+    overflow-wrap: anywhere; min-width: 0;
+}
+.gk-zone-mgr-undo > * { min-width: 0 !important; }
+.gk-zone-restore { flex: 0 0 auto !important; }
+.gk-zone-restore, .gk-zone-restore button {
+    height: 28px !important; min-width: 78px !important;
+    font-size: 0.74rem !important; font-weight: 700 !important;
+    border-radius: 7px !important;
+}
+
+.gk-zone-mgr-foot {
+    display: flex !important; justify-content: flex-end !important;
+    flex-wrap: wrap !important;
+    padding: 10px 16px 12px !important; margin: 0 !important;
+    background: var(--gk-card) !important;
+    border: 1px solid var(--gk-border) !important; border-top: none !important;
+    border-radius: 0 0 var(--gk-radius) var(--gk-radius) !important;
+}
+.gk-zone-mgr-foot > * { min-width: 0 !important; }
+.gk-zone-recompute { flex: 0 1 auto !important; }
+.gk-zone-recompute, .gk-zone-recompute button {
+    height: 32px !important; padding: 0 14px !important;
+    font-size: 0.76rem !important; font-weight: 600 !important;
+    border-radius: 8px !important;
+    white-space: normal !important; overflow-wrap: anywhere !important;
+}
+/* The render block's own container applies Gradio's layout gap, which showed
+   the page background between every row and broke the list into floating
+   cards. Close it on the one container that holds them. */
+#zone-editor-fs-wrap div:has(> .gk-zone-mgr-row),
+#zone-editor-fs-wrap div:has(> .gk-zone-mgr-hdr),
+#zone-editor-fs-wrap div:has(> .gk-zone-mgr-empty) { gap: 0 !important; }
+
+/* Fullscreen is for drawing on the frame — the list would only crowd it. */
+#zone-editor-fs-wrap.gk-fs-active .gk-zone-mgr-row,
+#zone-editor-fs-wrap.gk-fs-active .gk-zone-mgr-undo,
+#zone-editor-fs-wrap.gk-fs-active .gk-zone-mgr-foot,
+#zone-editor-fs-wrap.gk-fs-active .gk-zone-mgr-hdr,
+#zone-editor-fs-wrap.gk-fs-active .gk-zone-mgr-empty { display: none !important; }
+
+@media (max-width: 900px) {
+    .gk-zone-mgr-hint { display: none; }
+    .gk-zone-mgr-name { flex: 1 1 100% !important; }
+}
+
+/* Zone list in the sidebar */
+.gk-zone-list {
+    border: 1px solid var(--gk-border); border-radius: 8px;
+    background: var(--gk-card); font-size: 0.85rem; overflow: hidden;
+}
+.gk-zone-list-hdr {
+    padding: 8px 12px; background: var(--gk-card-2);
+    border-bottom: 1px solid var(--gk-border);
+    font-weight: 800; color: var(--gk-ink); letter-spacing: 0.3px;
+    font-size: 0.72rem; text-transform: uppercase;
+}
+.gk-zone-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-bottom: 1px solid var(--gk-border);
+}
+.gk-zone-row:last-child { border-bottom: none; }
+.gk-zone-name { font-weight: 700; color: var(--gk-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gk-zone-tag {
+    font-size: 0.62rem; font-weight: 800; padding: 1px 7px; border-radius: 8px;
+    text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
+}
+.gk-zone-pts { color: var(--gk-ink-3); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
+.gk-zone-list-foot {
+    padding: 7px 2px 0; margin-top: 6px;
+    border-top: 1px dashed var(--gk-border);
+    font-size: 0.7rem; color: var(--gk-ink-3); line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+.gk-zone-list-foot b { color: var(--gk-ink-2); }
+
+/* ─────────────────────────────────────────────────────────────────────
+   JSON accordion
+   ───────────────────────────────────────────────────────────────────── */
+.json-scroll { max-height: 320px; overflow-y: auto; }
+.json-scroll textarea { min-height: 240px !important; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   STICKY ALERT BANNER
+   ───────────────────────────────────────────────────────────────────── */
+#gk-alert-host {
+    position: sticky !important; top: 8px !important; z-index: 40 !important;
+    padding: 0 !important; background: transparent !important; border: none !important;
+}
+#gk-alert-host > .form, #gk-alert-host > div { padding: 0 !important; }
+.gk-alert-banner {
+    color: #fff; border-radius: 10px; padding: 13px 16px; margin-bottom: 12px;
+    border: 1px solid rgba(255,255,255,0.18);
+    animation: gkAlertSlide 0.45s ease-out;
+}
+.gk-alert-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.gk-alert-lead { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.gk-alert-kicker {
+    font-size: 0.6rem; font-weight: 800; letter-spacing: 2px;
+    text-transform: uppercase; opacity: 0.9;
+}
+.gk-alert-headline { font-size: 1rem; font-weight: 800; line-height: 1.25; margin-top: 2px; }
+.gk-alert-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; justify-content: flex-end; }
+.gk-alert-chip {
+    background: rgba(255,255,255,0.13); border: 1px solid rgba(255,255,255,0.30);
+    border-radius: 8px; padding: 6px 12px; line-height: 1.25;
+    color: #fff; text-align: left; font: inherit; cursor: default;
+}
+button.gk-alert-chip { cursor: pointer; transition: background 0.12s; }
+button.gk-alert-chip:hover { background: rgba(255,255,255,0.26); }
+.gk-alert-chip-t {
+    font-size: 0.6rem; font-weight: 800; letter-spacing: 1.4px;
+    color: rgba(255,255,255,0.88); text-transform: uppercase;
+}
+.gk-alert-chip-d { font-size: 0.84rem; font-weight: 800; color: #fff; margin-top: 1px; }
+.gk-alert-more { align-self: center; font-size: 0.74rem; font-weight: 700; opacity: 0.9; }
+.gk-alert-dismiss {
+    background: rgba(255,255,255,0.16); color: #fff;
+    border: 1px solid rgba(255,255,255,0.30); border-radius: 6px;
+    width: 30px; height: 30px; font-size: 1.1rem; font-weight: 800;
+    cursor: pointer; flex-shrink: 0; line-height: 1; padding: 0;
+}
+.gk-alert-dismiss:hover { background: rgba(255,255,255,0.28); }
+.gk-alert-pulse {
+    width: 12px; height: 12px; border-radius: 50%; background: #fff; flex-shrink: 0;
+    box-shadow: 0 0 0 0 rgba(255,255,255,0.7);
+    animation: gkAlertPulse 1.6s infinite;
+}
+@keyframes gkAlertPulse {
+    0%   { box-shadow: 0 0 0 0    rgba(255,255,255,0.7); }
+    70%  { box-shadow: 0 0 0 12px rgba(255,255,255,0); }
+    100% { box-shadow: 0 0 0 0    rgba(255,255,255,0); }
+}
+@keyframes gkAlertSlide {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Compact per-tab summary strip — replaces the four full-width banners
+   that all announced the same run. */
+.gk-inline-summary {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 14px; border-radius: 8px; margin-bottom: 10px;
+    border: 1px solid var(--gk-border); background: var(--gk-card-2);
+    font-size: 0.8rem; color: var(--gk-ink-2);
+}
+.gk-inline-summary .gk-badge { font-size: 0.66rem; }
+
+/* Run summary footer */
+.gk-run-summary {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--gk-border); background: var(--gk-card-2);
+    font-size: 0.72rem; color: var(--gk-ink-2);
+}
+.gk-run-summary b { color: var(--gk-ink); font-weight: 800; }
+.gk-run-pill {
+    background: var(--gk-card); border: 1px solid var(--gk-border);
+    border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Hide Gradio 6.8+'s built-in fullscreen icons inside the zone editor and
+   the tracked-output video. They call button.onclick() on an icon that
+   never got one, throwing
+       TypeError: i.onclick is not a function
+   out of FullscreenButton-*.js and killing the click pipeline for the
+   whole page. We ship our own working toggle (#gk-zone-fs-btn).
+   ───────────────────────────────────────────────────────────────────── */
+#zone-canvas-img button[aria-label*="ull" i],
+#zone-canvas-img button[title*="ull" i],
+#zone-canvas-img [class*="fullscreen" i],
+#zone-canvas-img .icon-buttons {
+    display: none !important;
+}
+#gk-zone-fs-btn { display: inline-flex !important; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   JSON FULLSCREEN OVERLAY
+   ───────────────────────────────────────────────────────────────────── */
+#json-fullscreen-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.88); z-index: 10000; padding: 28px; box-sizing: border-box;
+}
+#json-fullscreen-overlay.active { display: flex; flex-direction: column; }
+#json-fullscreen-close {
+    align-self: flex-end; background: #ef4444; color: #fff; border: none;
+    padding: 7px 18px; border-radius: 6px; font-size: 0.88rem; font-weight: 700;
+    cursor: pointer; margin-bottom: 10px;
+}
+#json-fullscreen-close:hover { background: #dc2626; }
+#json-fullscreen-content {
+    flex: 1; background: #0d1117; color: #c9d1d9; border-radius: 8px;
+    padding: 20px; overflow: auto; font-family: monospace; font-size: 0.85rem;
+    white-space: pre; line-height: 1.5;
+}

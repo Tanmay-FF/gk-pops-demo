@@ -4,6 +4,23 @@
 tracker_type: botsort
 
 # --- Detection thresholds ---
+# Do NOT lower these to chase missed carts — measured on
+# doubt_1763996497310_B8A44FD4AAF8-medium.mp4 (409 frames), it does not work:
+#
+#   high/new     cart boxes kept   distinct track IDs
+#   0.3 / 0.4         525          4  (2, 7, 16, 25)
+#   0.3 / 0.3         529          7  (3 of them 1-2 frame junk)
+#   0.25/ 0.25        530          7  (same junk)
+#
+# +5 boxes for 3 phantom tracks. The carts that go missing (orange flatbed,
+# small basket cart) score 0.25-0.35 INTERMITTENTLY, and BYTETracker only
+# reports a track once it re-matches on a following frame, so a flickering
+# low-conf detection never activates no matter how low the gate goes. The fix
+# is detector-side: the weights need those cart types in training.
+#
+# Also note new_track_thresh < track_high_thresh is a plain no-op: only the
+# high pool reaches the init step (byte_tracker.py: `remain_inds = scores >=
+# track_high_thresh`, then `if track.score < new_track_thresh: continue`).
 track_high_thresh: 0.3     # 1st association: lower than default (0.5) to catch partially-visible carts
 track_low_thresh: 0.1      # 2nd association: picks up low-confidence detections (ByteTrack-style fallback)
 new_track_thresh: 0.4      # minimum confidence to initialize a new track

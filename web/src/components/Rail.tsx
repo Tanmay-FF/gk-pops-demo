@@ -108,7 +108,7 @@ export const Rail: React.FC = () => {
         <div className={s.head}><span><span className={s.step}>4</span>Zones</span><span className={s.zoneCnt}>{zones.length}</span></div>
         <div className={s.body}>
           {zones.length === 0
-            ? <div className={s.emptyZones}>No zones yet — draw in Zone Editor tab</div>
+            ? <div className={s.emptyZones}>No zones yet - draw in Zone Editor tab</div>
             : (
               <div className={s.zoneList}>
                 {zones.map((z) => (

@@ -51,7 +51,11 @@ RULE_LABELS = {
     "blocked_door":   "BLOCKED DOOR",
     "static_cart":    "STATIC CART",
     "abandoned_cart": "UNATTENDED CART (OPS)",
-    "incoming_empty": "INCOMING EMPTY CART",
+    # Named for what an operator reads, and matched by the POPS table's own
+    # label for the same situation (ui_builder.INCOMING_NO_ITEMS) so the app
+    # has ONE name for it. rule_id stays "incoming_empty" — that is the stable
+    # key in the JSON; only the human-facing string moved.
+    "incoming_empty": "INCOMING CART WITHOUT ITEMS",
 }
 RULE_SEVERITIES = {
     "blocked_door":   "SAFETY",
@@ -59,6 +63,36 @@ RULE_SEVERITIES = {
     "abandoned_cart": "ACTION",
     "incoming_empty": "INFO",
 }
+
+#: Duration thresholds the UI is allowed to override at recompute time.
+#: config.py supplies the defaults; the sidebar sliders pass a dict of the same
+#: shape into evaluate_rules(). Re-tuning is a post-hoc, zero-GPU operation
+#: (see the module docstring), which is what makes it a live control rather
+#: than a source edit.
+DEFAULT_THRESHOLDS = {
+    "blocked_door_s":   RULE_BLOCKED_DOOR_S,
+    "static_cart_s":    RULE_STATIC_CART_S,
+    "abandoned_cart_s": RULE_ABANDONED_CART_S,
+}
+
+
+def resolve_thresholds(overrides: dict | None = None) -> dict:
+    """Merge user overrides over the config defaults, dropping empties.
+
+    A None or missing key falls back to config so a partially-populated dict
+    from the UI can never silently zero a threshold (which would make every
+    rule fire on every cart).
+    """
+    out = dict(DEFAULT_THRESHOLDS)
+    for k, v in (overrides or {}).items():
+        if k in out and v is not None:
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv > 0:
+                out[k] = fv
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +276,7 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
 
 
 def _merge_and_qualify(mask: np.ndarray, timestamps: np.ndarray,
-                       threshold_s: float,
+                       threshold_s: float, stats: dict | None = None,
                        ) -> list[tuple[int, int, float, float, list[str]]]:
     """Turn a per-sample condition into qualified intervals.
 
@@ -254,6 +288,12 @@ def _merge_and_qualify(mask: np.ndarray, timestamps: np.ndarray,
     is DETECTED, so a cart occluded for 30s leaves two samples 30s apart that
     an RLE reads as continuous presence — "static for 30 seconds" inferred from
     two observations. Rejecting sparse intervals is what stops that.
+
+    `stats` is an optional counter dict. The density gate discards intervals
+    that were over threshold — a cart in a busy doorway is occluded by the very
+    traffic it is obstructing, so the intervals it drops are disproportionately
+    the SAFETY-severity ones. Dropping them is right; dropping them silently is
+    not, so the count is reported as a diagnostic rather than swallowed.
     """
     runs = _runs(mask)
     if not runs:
@@ -281,10 +321,14 @@ def _merge_and_qualify(mask: np.ndarray, timestamps: np.ndarray,
             continue
         reasons: list[str] = []
         if n < RULE_MIN_SAMPLES:
-            continue                        # too few observations to assert
+            if stats is not None:           # too few observations to assert
+                stats["suppressed_sparse"] = stats.get("suppressed_sparse", 0) + 1
+            continue
         mean_gap = dur / max(1, n - 1)
         if mean_gap > RULE_MAX_SAMPLE_GAP_S:
-            continue                        # observed too sparsely to assert
+            if stats is not None:           # observed too sparsely to assert
+                stats["suppressed_sparse"] = stats.get("suppressed_sparse", 0) + 1
+            continue
         reasons.append(f"{dur:.0f}s over {n} observations")
         out.append((s, e, t0, t1, reasons))
     return out
@@ -376,7 +420,7 @@ def _finding(rule_id: str, rec, zone: Zone | None, t0: float, t1: float,
 
 
 def _static_in_zone_rule(bundle, zones, kinds, threshold_s, rule_id,
-                         membership_fn, eov_t, degraded):
+                         membership_fn, eov_t, degraded, stats=None):
     """Shared implementation for blocked-door and static-cart.
 
     The two categories are the same question — "is a cart sitting still in a
@@ -399,7 +443,7 @@ def _static_in_zone_rule(bundle, zones, kinds, threshold_s, rule_id,
         for zi, zone in enumerate(zs):
             cond = still & inside[:, zi]
             for s, e, t0, t1, reasons in _merge_and_qualify(
-                    cond, rec.timestamps, threshold_s):
+                    cond, rec.timestamps, threshold_s, stats):
                 findings.append(_finding(
                     rule_id, rec, zone, t0, t1, threshold_s, e - s, reasons,
                     ongoing=bool(e >= rec.n_samples and abs(t1 - eov_t) < 1.0),
@@ -416,7 +460,8 @@ def _static_in_zone_rule(bundle, zones, kinds, threshold_s, rule_id,
     return findings
 
 
-def _abandoned_cart_rule(bundle, zones, eov_t, degraded):
+def _abandoned_cart_rule(bundle, zones, eov_t, degraded,
+                         threshold_s=RULE_ABANDONED_CART_S, stats=None):
     """Cart stationary with nobody nearby, outside any designated cart area.
 
     "Unattended" is answered by PERSON PROXIMITY, not by the live linker's
@@ -458,7 +503,7 @@ def _abandoned_cart_rule(bundle, zones, eov_t, degraded):
             cond &= ~ex.any(axis=1)
 
         for s, e, t0, t1, reasons in _merge_and_qualify(
-                cond, rec.timestamps, RULE_ABANDONED_CART_S):
+                cond, rec.timestamps, threshold_s, stats):
             corroborated = False
             samples = bundle.cart_facts.get(int(rec.display_id)) or []
             if samples:
@@ -469,7 +514,7 @@ def _abandoned_cart_rule(bundle, zones, eov_t, degraded):
             if corroborated:
                 reasons = reasons + ["linker also reports the attendant left"]
             findings.append(_finding(
-                "abandoned_cart", rec, None, t0, t1, RULE_ABANDONED_CART_S,
+                "abandoned_cart", rec, None, t0, t1, threshold_s,
                 e - s, reasons,
                 ongoing=bool(e >= rec.n_samples and abs(t1 - eov_t) < 1.0),
                 degraded=degraded,
@@ -541,6 +586,8 @@ def _incoming_empty_rule(bundle, zones, camera_placement, eov_t, degraded):
 def evaluate_rules(bundle: TrajectoryBundle,
                    zones: list[Zone],
                    *, camera_placement: str = "Outside (facing entrance)",
+                   thresholds: dict | None = None,
+                   diagnostics: list[str] | None = None,
                    ) -> tuple[list[RuleFinding], str | None]:
     """Evaluate all operational rules. Returns (findings, unavailable_reason).
 
@@ -548,19 +595,39 @@ def evaluate_rules(bundle: TrajectoryBundle,
     run. Callers must render that as an explicit "did not run" state — an empty
     findings list would otherwise read as "no issues found", which is a wrong
     answer rather than a missing one.
+
+    `thresholds` optionally overrides the config durations (see
+    DEFAULT_THRESHOLDS). Omit it and config.py wins, which keeps every existing
+    caller and the test suite on the previous behaviour.
+
+    `diagnostics`, when a list is passed, is EXTENDED with non-suppressing
+    notes: which rule families did not run, whether the clock was synthesised,
+    and how many candidate intervals the density gate discarded. An
+    out-parameter rather than a third return value on purpose - this function
+    has ~20 two-value unpacking call sites, and the alternative to arity
+    stability is a ValueError in every one of them.
+
+    These notes deliberately do NOT go into `unavailable_reason`.
+    highlights.ops_findings_state() checks that field FIRST and discards every
+    finding when it is set, so routing "the blocked-door rule had no door zone"
+    through it would blank the unattended-cart findings that did run - the
+    common case, since most runs have only analytics zones drawn.
     """
+    notes: list[str] = []
+    th = resolve_thresholds(thresholds)
     if not RULE_ENGINE_ENABLED:
         return [], "Rule engine disabled in config."
     if bundle is None or not bundle.tracks:
         return [], "No tracks in this run."
     if cv2 is None:                                        # pragma: no cover
-        return [], "OpenCV unavailable — zone rasterisation not possible."
+        return [], "OpenCV unavailable - zone rasterisation not possible."
 
     # A bundle cached by an older build has no fact timeline. Report that
     # rather than silently returning zero findings.
     if getattr(bundle, "facts_schema_version", 0) < FACTS_SCHEMA_VERSION:
-        return [], ("This result was cached before the rule engine existed — "
-                    "re-run the analysis to evaluate operational rules.")
+        return [], ("This result was cached by an earlier build whose recorded "
+                    "facts the rules can no longer trust - re-run the analysis "
+                    "to evaluate operational rules.")
 
     zones = list(zones or [])
     door_zones = _zone_subset(zones, RULE_DOOR_KINDS)
@@ -574,19 +641,21 @@ def evaluate_rules(bundle: TrajectoryBundle,
             eov_t = max(eov_t, float(rec.timestamps[-1]))
 
     findings: list[RuleFinding] = []
+    stats: dict = {}
 
     # Blocked door — bbox overlap, shortest fuse, safety severity.
     findings += _static_in_zone_rule(
-        bundle, zones, RULE_DOOR_KINDS, RULE_BLOCKED_DOOR_S, "blocked_door",
-        door_overlap_membership, eov_t, degraded)
+        bundle, zones, RULE_DOOR_KINDS, th["blocked_door_s"], "blocked_door",
+        door_overlap_membership, eov_t, degraded, stats)
 
     # Static cart in a monitored zone — same primitive, centroid membership.
     findings += _static_in_zone_rule(
-        bundle, zones, RULE_STATIC_KINDS, RULE_STATIC_CART_S, "static_cart",
-        rule_zone_membership, eov_t, degraded)
+        bundle, zones, RULE_STATIC_KINDS, th["static_cart_s"], "static_cart",
+        rule_zone_membership, eov_t, degraded, stats)
 
     # Unattended cart — zone-independent (uses fixture zones only as a carve-out).
-    findings += _abandoned_cart_rule(bundle, zones, eov_t, degraded)
+    findings += _abandoned_cart_rule(bundle, zones, eov_t, degraded,
+                                     th["abandoned_cart_s"], stats)
 
     # Incoming empty cart — zone-independent proxy.
     findings += _incoming_empty_rule(
@@ -596,10 +665,36 @@ def evaluate_rules(bundle: TrajectoryBundle,
     findings.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 0), f.duration_s),
                   reverse=True)
 
+    # Per-FAMILY reporting. `static_zones` includes kind "analytics", which is
+    # the zone editor's DEFAULT - so one dwell zone drawn anywhere used to make
+    # `reason` None and the whole run read as "rules ran clean" while the
+    # blocked-door rule had never been evaluated for want of a door zone.
+    if not door_zones:
+        notes.append("Blocked-door rule did not run: no zones of kind 'door' "
+                     "are drawn. Draw one in the Zone Editor.")
+    if not static_zones:
+        notes.append("Static-cart rule did not run: no 'aisle' or analytics "
+                     "zones are drawn.")
+    if degraded:
+        notes.append("CAP_PROP_POS_MSEC was unusable for this video, so timing "
+                     "was derived from the frame index and frame rate. "
+                     "Durations are approximate.")
+    n_sup = int(stats.get("suppressed_sparse", 0))
+    if n_sup:
+        notes.append(
+            f"{n_sup} candidate interval(s) crossed a duration threshold but "
+            f"were discarded as too sparsely observed to assert (fewer than "
+            f"{RULE_MIN_SAMPLES} observations, or averaging worse than one "
+            f"every {RULE_MAX_SAMPLE_GAP_S:g}s). A cart in a busy doorway is "
+            f"occluded by the traffic it obstructs, so re-check the video "
+            f"before reading this run as clear.")
+
     reason = None
     if not door_zones and not static_zones:
-        reason = ("No door / aisle zones drawn — the blocked-door and "
+        reason = ("No door / aisle zones drawn - the blocked-door and "
                   "static-cart rules did not run. Draw them in the Zone Editor.")
+    if diagnostics is not None:
+        diagnostics.extend(notes)
     return findings, reason
 
 
@@ -609,15 +704,26 @@ _SEV_ORDER = {"SAFETY": 4, "ACTION": 3, "WATCH": 2, "INFO": 1}
 def _dedupe(findings: list[RuleFinding]) -> list[RuleFinding]:
     """Collapse findings describing one physical situation.
 
-    Two carts side by side in the same doorway, or one cart whose track id
-    churned mid-block, otherwise produce several findings for what an operator
-    would call a single incident.
+    Keyed on (rule_id, zone_id, CART) — one cart whose interval was split by
+    track-id churn or a membership flicker collapses back into a single
+    incident, which is what this exists for.
+
+    Different carts are NEVER merged, even in the same zone at the same time.
+    The key used to omit the cart, and abandoned_cart / incoming_empty always
+    carry zone_id=None, so every zone-independent finding in a run shared one
+    key: five carts abandoned in five different aisles collapsed into ONE
+    finding attributed to whichever cart sorted first, with the rest buried in
+    evidence["also_carts"]. These findings drive a retrieval work list and the
+    tab badges, so the count IS the deliverable - merging distinct carts makes
+    it wrong rather than tidier.
     """
     kept: list[RuleFinding] = []
-    for f in sorted(findings, key=lambda x: (x.rule_id, x.zone_id or "", x.start_t)):
+    for f in sorted(findings, key=lambda x: (x.rule_id, x.zone_id or "",
+                                             x.cart_display_id, x.start_t)):
         dup = None
         for k in kept:
-            if k.rule_id != f.rule_id or k.zone_id != f.zone_id:
+            if (k.rule_id != f.rule_id or k.zone_id != f.zone_id
+                    or k.cart_display_id != f.cart_display_id):
                 continue
             # Overlapping in time, same rule, same place.
             if f.start_t <= k.end_t and k.start_t <= f.end_t:

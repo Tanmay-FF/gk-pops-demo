@@ -29,9 +29,9 @@ def _check_nvenc() -> bool:
     except Exception:
         _NVENC_AVAILABLE = False
     if _NVENC_AVAILABLE:
-        print("[INFO] NVENC GPU encoding available — using h264_nvenc")
+        print("[INFO] NVENC GPU encoding available - using h264_nvenc")
     else:
-        print("[INFO] NVENC not available — using CPU libx264")
+        print("[INFO] NVENC not available - using CPU libx264")
     return _NVENC_AVAILABLE
 
 

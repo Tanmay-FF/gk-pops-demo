@@ -610,7 +610,7 @@ def build_insight_text(bundle: TrajectoryBundle,
 
     if not zones or not dwell_summary:
         bullets.append(
-            "No zones defined — draw zones in the Zone Editor tab for dwell and journey insights."
+            "No zones defined - draw zones in the Zone Editor tab for dwell and journey insights."
         )
         return "\n".join(bullets)
 
@@ -648,7 +648,7 @@ def build_insight_text(bundle: TrajectoryBundle,
                 )
         else:
             bullets.append(
-                f"Average-dwell ranking skipped — no zone yet has "
+                f"Average-dwell ranking skipped - no zone yet has "
                 f"{MIN_SAMPLES_FOR_AVG}+ visits (sample too small)."
             )
 
@@ -828,6 +828,7 @@ def run_all(bundle: TrajectoryBundle,
             out_dir: Optional[str] = None,
             min_dwell_s: float = 1.0,
             camera_placement: str = "Outside (facing entrance)",
+            rule_thresholds: Optional[dict] = None,
             ) -> AnalyticsResult:
     """Single entry point used by the UI.  Empty zones → only the heatmap is computed.
 
@@ -891,9 +892,11 @@ def run_all(bundle: TrajectoryBundle,
     # Gets the full zone list (door / aisle / fixture), not analytics_zones.
     # Isolated behind try/except: a rule bug must never take down dwell,
     # heatmap, or the POPS dashboard alongside it.
+    rule_diagnostics: list[str] = []
     try:
         rule_findings, rules_reason = rule_engine.evaluate_rules(
-            bundle, zones, camera_placement=camera_placement)
+            bundle, zones, camera_placement=camera_placement,
+            thresholds=rule_thresholds, diagnostics=rule_diagnostics)
     except Exception as e:                                   # pragma: no cover
         import traceback
         traceback.print_exc()
@@ -913,4 +916,5 @@ def run_all(bundle: TrajectoryBundle,
         insight_text=insight,
         rule_findings=rule_findings,
         rules_unavailable_reason=rules_reason,
+        rule_diagnostics=rule_diagnostics,
     )

@@ -61,7 +61,7 @@ export const LegendTab: React.FC = () => {
           <div className={s.card}>
             <h4 className={s.h4}>Zones</h4>
             {zones.length === 0 ? (
-              <div className={s.emptyZones}>No zones drawn — use Zone Editor to add zones</div>
+              <div className={s.emptyZones}>No zones drawn - use Zone Editor to add zones</div>
             ) : (
               zones.map(z => (
                 <div key={z.zone_id} className={s.row}>

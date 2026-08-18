@@ -32,7 +32,11 @@ RuleId = Literal["blocked_door", "static_cart", "abandoned_cart",
 # (or none at all) and must be reported as "rules unavailable" rather than
 # silently yielding zero findings — an empty list reads as "no issues found",
 # which is a wrong answer rather than a missing one.
-FACTS_SCHEMA_VERSION = 1
+# v2: TrackRecord.frames became the REAL per-sample frame index (recorded in the
+#     frame loop) instead of arange(). The synthesized-timestamp fallback derives
+#     from it, so a v1 bundle replayed through recompute_analytics() would carry
+#     the old compressed clock and report durations that never happened.
+FACTS_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -54,17 +58,21 @@ class TrackRecord:
     display_id: int                # human-friendly id from TrackingEngine._display_map
     positions: np.ndarray          # shape (N, 2) float32 — pixel-space centroids
     timestamps: np.ndarray         # shape (N,) float32 — seconds (CAP_PROP_POS_MSEC / 1000)
-    frames: np.ndarray             # shape (N,) int32 — DISPLAY ONLY, see warning below
+    frames: np.ndarray             # shape (N,) int32 — REAL frame index per sample
     speeds: np.ndarray             # shape (N,) float32
     # shape (N, 4) float32 — (x1, y1, x2, y2) per sample. Needed for
     # overlap-fraction zone tests (a cart can block a doorway while its
     # centroid sits outside the polygon). Empty array when unavailable.
     bboxes: np.ndarray = field(default_factory=lambda: np.empty((0, 4), dtype=np.float32))
 
-    # WARNING on `frames`: it is synthesised as arange(first_frame, first_frame + N),
-    # which assumes the track was detected in every consecutive frame. That is
-    # false whenever detection drops out, and false after cart re-identification.
-    # Never derive durations or ordering from it — use `timestamps`.
+    # `frames` holds the ACTUAL frame index each sample was detected on, recorded
+    # in the frame loop and carried through cart re-identification. It used to be
+    # synthesised as arange(first_frame, first_frame + N), which silently assumed
+    # the track was detected on every consecutive frame — and the synthesized
+    # timestamp fallback built on that assumption compressed 240s of real time
+    # into 30s whenever detections were sparse. Prefer `timestamps` for
+    # durations; `frames` is the fallback clock's only trustworthy source when
+    # CAP_PROP_POS_MSEC is unusable.
 
     @property
     def n_samples(self) -> int:
@@ -215,6 +223,13 @@ class AnalyticsResult:
     insight_text: str = ""                                           # auto-generated narrative summary
     # --- Operational rule engine -------------------------------------------
     rule_findings: list[RuleFinding] = field(default_factory=list)
+    # Non-suppressing diagnostics: "the rules ran, and here is what was
+    # degraded or skipped". DELIBERATELY not folded into
+    # rules_unavailable_reason — highlights.ops_findings_state() checks that
+    # field first and discards every finding when it is set, so a note about
+    # one rule family not running would blank the findings of the families that
+    # did. Rendered alongside findings, never instead of them.
+    rule_diagnostics: list[str] = field(default_factory=list)
     # None  = rules ran normally.
     # str   = why they could not run (stale cached bundle, no monitored zones,
     #         video shorter than every threshold). Rendered as an explicit
