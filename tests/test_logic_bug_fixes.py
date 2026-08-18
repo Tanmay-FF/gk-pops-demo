@@ -438,6 +438,93 @@ check("the score is still clamped to 100",
 
 
 # ---------------------------------------------------------------------------
+section("11. the INBOUND kill switch reports what it suppressed")
+# ---------------------------------------------------------------------------
+# compute_pops() returns INBOUND_SCORE for an inbound cart before looking at
+# contents at all, and INBOUND_SCORE is under the 31 that logs an event. So a
+# camera_placement that inverts the axis empties the Events tab, drops the
+# banner and floors every POPS row while the detector keeps working and every
+# box is still drawn -- which reads as "the detections stopped".
+from engine.scoring import (
+    INBOUND_SCORE, direction_suppressed_carts, inbound_suppression_note,
+)
+
+check("the kill switch and the detector's constant agree",
+      compute_pops("INBOUND", "FAST", True, "full", bag_label="unbagged")
+      == INBOUND_SCORE, f"got {compute_pops('INBOUND', 'FAST', True, 'full', bag_label='unbagged')}")
+check("an inbound cart is under the event threshold by construction",
+      INBOUND_SCORE < 31)
+
+check("a clean run produces no note", inbound_suppression_note({}) is None)
+check("an outbound scored cart produces no note",
+      inbound_suppression_note(
+          {2: {"direction": "OUTBOUND", "score": 75, "fill": "full"}}) is None)
+
+_empty_only = {2: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "empty"},
+               4: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "empty"}}
+_n = inbound_suppression_note(_empty_only, "Outside (facing entrance)")
+check("inbound empty carts are reported but not alarming",
+      _n is not None and "read as empty" in _n)
+check("the note names the carts", _n is not None and "C2, C4" in _n)
+check("the note names the placement in force",
+      "Outside (facing entrance)" in (_n or ""))
+
+_loaded = {1: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "partial"},
+           2: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "empty"},
+           3: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "full"}}
+_n2 = inbound_suppression_note(_loaded, "Inside (facing exit)")
+sup, loaded = direction_suppressed_carts(_loaded)
+check("every inbound cart counts as suppressed", sup == [1, 2, 3])
+check("only the LOADED ones are called out", loaded == [1, 3])
+check("the loaded note points at the placement",
+      "placement is inverted" in (_n2 or ""))
+check("the loaded note names only the loaded carts",
+      "(C1, C3)" in (_n2 or ""), _n2 or "")
+
+# A cart that actually got scored must never be reported as suppressed.
+check("a scored inbound cart is not counted",
+      direction_suppressed_carts(
+          {2: {"direction": "INBOUND", "score": 45, "fill": "full"}}) == ([], []))
+# Long lists are capped so the notice stays readable.
+_many = {i: {"direction": "INBOUND", "score": INBOUND_SCORE, "fill": "empty"}
+         for i in range(1, 14)}
+check("a long cart list is capped", "+5 more" in inbound_suppression_note(_many))
+# Malformed snapshots must degrade, not raise.
+for _bad in ({2: None}, {2: {}}, {2: {"direction": None, "score": None}},
+             {2: {"direction": "INBOUND", "score": "n/a"}}, None):
+    try:
+        inbound_suppression_note(_bad)
+        _ok = True
+    except Exception as _e:
+        _ok = False
+    check(f"malformed snapshot {_bad!r} does not raise", _ok)
+
+# It has to reach every surface, through the one shared projection.
+_panel = ui_builder.build_operational_alerts([], None, [_n2])
+_report_src = __import__("engine.case_report_builder",
+                         fromlist=["_build_ops_findings_block"])
+
+
+class _Res:
+    rule_findings = []
+    rules_unavailable_reason = None
+    rule_diagnostics = [_n2]
+    queue_spikes = []
+    dwell_summary = []
+
+
+check("the Operational Alerts panel carries it",
+      "INBOUND kill switch" in _panel)
+check("the panel still reports the all-clear alongside it",
+      "No operational issues detected" in _panel)
+check("the standalone case report carries it",
+      "INBOUND kill switch"
+      in _report_src._build_ops_findings_block(_Res()))
+check("it de-duplicates like every other coverage note",
+      highlights.ops_diagnostics([_n2, _n2]) == [_n2])
+
+
+# ---------------------------------------------------------------------------
 print(f"\n{'=' * 62}")
 print(f"PASSED {len(_PASS)} / {len(_PASS) + len(_FAIL)}")
 if _FAIL:

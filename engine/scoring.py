@@ -40,6 +40,12 @@ from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLE
 #   Otherwise +35
 # ---------------------------------------------------------------------------
 
+#: What the INBOUND / not-valid kill switches score a cart. Named rather than
+#: repeated as a literal because inbound_suppression_note() has to recognise a
+#: suppressed cart by this exact value, and a drift between the two would make
+#: the diagnostic quietly stop reporting.
+INBOUND_SCORE = 5
+
 _FILL_SCORE_OUTBOUND = {"empty": -15}
 _FILL_SCORE_UNKNOWN  = {"partial": 8}
 _SPEED_SCORE_OUTBOUND = {"FAST": 15, "MEDIUM": 5}
@@ -63,9 +69,9 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     if not cart_detected:
         return 0
     if direction_label == "INBOUND":
-        return 5
+        return INBOUND_SCORE
     if not is_valid:
-        return 5
+        return INBOUND_SCORE
 
     score = 0
 
@@ -201,6 +207,89 @@ def classify_event(pops_score: int, linked: bool,
     if linked:
         return "MONITORING", COLOR_MONITORING
     return "LOW PRIORITY", COLOR_CLEAR
+
+
+_MAX_LISTED_CARTS = 8
+
+
+def _cart_list(ids) -> str:
+    """"C2, C4, C7" — capped, because a busy clip can suppress dozens and a
+    wall of ids in a notice is read as noise and skipped."""
+    ids = sorted(ids)
+    head = ", ".join(f"C{i}" for i in ids[:_MAX_LISTED_CARTS])
+    extra = len(ids) - _MAX_LISTED_CARTS
+    return f"{head} +{extra} more" if extra > 0 else head
+
+
+def direction_suppressed_carts(peak_snapshots) -> tuple[list[int], list[int]]:
+    """(suppressed, suppressed_while_loaded) cart display ids.
+
+    A cart is suppressed when its final direction is INBOUND and its score is
+    the kill-switch value: compute_pops() returns INBOUND_SCORE for an inbound
+    cart before looking at contents, speed, bagging or abandonment at all.
+
+    The second list is the part that matters. An inbound EMPTY cart being
+    unscored is the kill switch doing its job — that is a customer arriving.
+    An inbound cart the classifier read as holding merchandise is the reading
+    worth a second look, because the most common way to produce one is a
+    camera_placement that disagrees with the physical camera.
+    """
+    suppressed: list[int] = []
+    loaded: list[int] = []
+    for cd, snap in (peak_snapshots or {}).items():
+        snap = snap or {}
+        if str(snap.get("direction", "")).strip().upper() != "INBOUND":
+            continue
+        try:
+            score = int(snap.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if score > INBOUND_SCORE:
+            continue
+        suppressed.append(int(cd))
+        if str(snap.get("fill", "")).strip().lower() in ("partial", "full"):
+            loaded.append(int(cd))
+    return sorted(suppressed), sorted(loaded)
+
+
+def inbound_suppression_note(peak_snapshots,
+                             camera_placement: str | None = None) -> str | None:
+    """One coverage note about carts the INBOUND kill switch scored out, or None.
+
+    The kill switch is absolute and, until this existed, entirely unlogged:
+    every inbound cart returns INBOUND_SCORE regardless of what it holds, which
+    is under the 31 that logs an event. So a camera_placement that inverts the
+    axis silently empties the Events tab, drops the alert banner, floors every
+    POPS row and thins the case report's evidence frames — while the detector
+    keeps working perfectly and every box is still drawn. That combination
+    reads as "the detections stopped", which sends the reader to the model
+    instead of to a dropdown.
+
+    Measured on one clip, flipping "Outside (facing entrance)" to "Inside
+    (facing exit)": identical box and track counts, events 3 -> 0, max POPS
+    55 -> 5. Nothing anywhere said why.
+    """
+    suppressed, loaded = direction_suppressed_carts(peak_snapshots)
+    if not suppressed:
+        return None
+
+    n = len(suppressed)
+    where = f" under camera placement '{camera_placement}'" if camera_placement else ""
+    note = (f"{n} cart{'s' if n != 1 else ''} scored {INBOUND_SCORE} by the "
+            f"INBOUND kill switch{where} ({_cart_list(suppressed)}): an inbound "
+            f"cart is not assessed for theft risk at all, so it cannot log an "
+            f"event or raise an alert.")
+    if loaded:
+        m = len(loaded)
+        note += (f" {m} of them {'was' if m == 1 else 'were'} classified as "
+                 f"holding merchandise ({_cart_list(loaded)}) - if {'that cart' if m == 1 else 'those carts'} "
+                 f"{'was' if m == 1 else 'were'} in fact LEAVING, the camera "
+                 f"placement is inverted and every risk score in this run is "
+                 f"suppressed.")
+    else:
+        note += (" All of them read as empty, which is what arriving customers "
+                 "look like. Check the placement anyway if you expected exits.")
+    return note
 
 
 def prune_event_log(event_log) -> tuple[list, int]:

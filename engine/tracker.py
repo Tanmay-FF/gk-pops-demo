@@ -38,6 +38,7 @@ from .linker import PersonCartLinker
 from .motion import compute_motion, compute_direction_label
 from .scoring import (
     compute_pops, classify_event, peak_sustained_fill, prune_event_log,
+    inbound_suppression_note,
     LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS,
 )
 from .renderer import (
@@ -473,6 +474,13 @@ class TrackingEngine:
             camera_placement=camera_placement,
             rule_thresholds=rule_thresholds,
         )
+        # Same note on the zero-GPU path. The POPS state still lives on this
+        # engine, so retuning a zone or a threshold must not drop it - the panel
+        # is rebuilt from scratch here and would otherwise lose it.
+        _inbound_note = inbound_suppression_note(
+            self._peak_pops_snapshot, camera_placement)
+        if _inbound_note:
+            result.rule_diagnostics.append(_inbound_note)
         summary = analytics_ui.build_analytics_summary(zones, result)
         spikes  = analytics_ui.build_queue_spikes_banner(result.queue_spikes)
         dwell   = analytics_ui.build_dwell_table(zones, result.dwell_summary, result.dwell_rows)
@@ -1400,6 +1408,16 @@ class TrackingEngine:
             camera_placement=camera_placement,
             rule_thresholds=rule_thresholds,
         )
+        # Report carts the INBOUND kill switch scored out, on the same channel
+        # as the rule-coverage notes. Appended HERE rather than inside
+        # evaluate_rules() because this is POPS reasoning, and rules.py is
+        # deliberately independent of POPS scoring (see its module docstring) -
+        # but it belongs in the same notice box, because from the reader's side
+        # it answers the identical question: is this quiet run actually quiet?
+        _inbound_note = inbound_suppression_note(
+            self._peak_pops_snapshot, camera_placement)
+        if _inbound_note:
+            analytics_result.rule_diagnostics.append(_inbound_note)
 
         # --- Build HTML ---
         video_html  = ui_builder.build_video_info(source_path, w, h, fps, total_frames, frame_idx)
