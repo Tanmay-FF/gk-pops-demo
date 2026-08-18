@@ -5,10 +5,11 @@ POPS (Push-Out Probability Score) computation and event classification.
 from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLEAR
 
 # ---------------------------------------------------------------------------
-# Score ranges:
-#   0-30:  Low Priority  — normal shopping, inbound, employees
-#   31-70: Medium Priority — needs quick verify
-#   71-100: High Priority — likely theft / pushout
+# Score ranges (see MEDIUM_SCORE / HIGH_SCORE / PUSHOUT_SCORE):
+#   0-30:   Low Priority    — normal shopping, inbound, employees
+#   31-70:  Medium Priority — needs quick verify
+#   71-79:  High Priority   — likely theft; PUSHOUT ALERT if also abandoned
+#   80-100: PUSHOUT ALERT   — called on score alone, no abandonment needed
 #
 # A. Kill Switches:
 #   No cart detected → 0,  INBOUND → 5,  UNCLEAR → 5
@@ -46,6 +47,20 @@ from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLE
 #: the diagnostic quietly stop reporting.
 INBOUND_SCORE = 5
 
+#: Tier boundaries. Named because these are the numbers that get retuned, and a
+#: tier boundary buried as a literal inside classify_event() is the kind of
+#: thing that gets changed in one branch and not the other.
+MEDIUM_SCORE = 31       #: at/above this, the cart is worth a look
+HIGH_SCORE = 71         #: at/above this, the cart is high priority
+#: At/above this, the cart is called a PUSHOUT on score alone — no abandonment
+#: evidence required. Below it, PUSHOUT still needs the person to have left
+#: (see classify_event), which is the older and narrower route.
+#:
+#: Only reachable OUTBOUND: the INBOUND kill switch returns INBOUND_SCORE, and
+#: the UNKNOWN branch tops out at 65 even with the abandonment floor. So this
+#: cannot label an arriving cart a pushout.
+PUSHOUT_SCORE = 80
+
 _FILL_SCORE_OUTBOUND = {"empty": -15}
 _FILL_SCORE_UNKNOWN  = {"partial": 8}
 _SPEED_SCORE_OUTBOUND = {"FAST": 15, "MEDIUM": 5}
@@ -62,8 +77,9 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     """Compute Push-Out Probability Score (0-100).
 
     A linked person pushing their cart through the store is normal — the score
-    is dampened by 20 points.  Only abandonment (person disappeared) or no link
-    at all can push the score into HIGH PRIORITY territory.
+    is dampened by 20 points, but only for UNKNOWN direction (see section C
+    below); a person walking a cart out the exit is the thing being detected,
+    so OUTBOUND is never damped.
     """
     # --- Kill Switches ---
     if not cart_detected:
@@ -187,13 +203,29 @@ def peak_sustained_fill(fill_sequence, min_run: int) -> str | None:
 
 def classify_event(pops_score: int, linked: bool,
                    direction_label: str, abandoned: bool = False):
-    """Return (event_name, event_color_bgr) based on POPS score + context."""
-    if pops_score >= 71:
+    """Return (event_name, event_color_bgr) based on POPS score + context.
+
+    Two routes to PUSHOUT ALERT, and they answer different questions:
+
+      * SCORE ALONE, at/above PUSHOUT_SCORE. What the cart is doing is damning
+        enough on its own — outbound, loaded, unbagged, moving. No evidence
+        about the person is needed or waited for.
+      * ABANDONMENT, at/above HIGH_SCORE. A weaker score, but the person who
+        was with the cart left it. `abandoned` is only ever True for a cart
+        that was LINKED first (tracker.py computes it from the linked person's
+        disappearance or distance), so this route is structurally unavailable
+        to a cart that never had an owner — such a cart can only reach PUSHOUT
+        on score.
+    """
+    if pops_score >= PUSHOUT_SCORE:
+        return "PUSHOUT ALERT", COLOR_PUSHOUT
+
+    if pops_score >= HIGH_SCORE:
         if abandoned:
             return "PUSHOUT ALERT", COLOR_PUSHOUT
         return "HIGH PRIORITY", COLOR_PUSHOUT
 
-    if pops_score >= 31:
+    if pops_score >= MEDIUM_SCORE:
         if abandoned:
             return "ABANDONED CART", COLOR_SUSPICIOUS
         if not linked and direction_label == "OUTBOUND":

@@ -31,7 +31,9 @@ from engine.config import (
     DIRECTION_WINDOW_S, RULE_MAX_SAMPLE_GAP_S, SPEED_MEDIUM,
 )
 from engine.motion import compute_direction_label
-from engine.scoring import classify_event, compute_pops, prune_event_log
+from engine.scoring import (
+    LOGGABLE_EVENTS, classify_event, compute_pops, prune_event_log,
+)
 
 _PASS: list[str] = []
 _FAIL: list[str] = []
@@ -399,8 +401,11 @@ still = compute_pops("OUTBOUND", "STATIC", True, "full", bag_label="unbagged")
 run = compute_pops("OUTBOUND", "FAST", True, "full", bag_label="unbagged")
 check("full + unbagged at walking pace clears the 71 line (was 70)",
       walk >= 71, f"got {walk}")
-check("its event is HIGH PRIORITY",
-      classify_event(walk, False, "OUTBOUND")[0] == "HIGH PRIORITY")
+# At MEDIUM pace this now reaches 80, which is PUSHOUT_SCORE — see section 12.
+check("its event is at least HIGH PRIORITY",
+      classify_event(walk, False, "OUTBOUND")[0]
+      in ("HIGH PRIORITY", "PUSHOUT ALERT"),
+      classify_event(walk, False, "OUTBOUND")[0])
 slow = compute_pops("OUTBOUND", "SLOW", True, "full", bag_label="unbagged")
 check("walking pace at the SLOW end clears it too",
       slow >= 71, f"got {slow}")
@@ -522,6 +527,81 @@ check("the standalone case report carries it",
       in _report_src._build_ops_findings_block(_Res()))
 check("it de-duplicates like every other coverage note",
       highlights.ops_diagnostics([_n2, _n2]) == [_n2])
+
+
+# ---------------------------------------------------------------------------
+section("12. a high enough score IS a pushout, with no abandonment evidence")
+# ---------------------------------------------------------------------------
+from engine.scoring import HIGH_SCORE, MEDIUM_SCORE, PUSHOUT_SCORE
+
+check("the pushout line sits above the high line",
+      MEDIUM_SCORE < HIGH_SCORE < PUSHOUT_SCORE <= 100,
+      f"{MEDIUM_SCORE}/{HIGH_SCORE}/{PUSHOUT_SCORE}")
+
+# The new route: score alone.
+check("at PUSHOUT_SCORE it is a pushout without abandonment",
+      classify_event(PUSHOUT_SCORE, False, "OUTBOUND",
+                     abandoned=False)[0] == "PUSHOUT ALERT")
+check("one point below it is not",
+      classify_event(PUSHOUT_SCORE - 1, False, "OUTBOUND",
+                     abandoned=False)[0] == "HIGH PRIORITY")
+check("a linked person does not soften it",
+      classify_event(PUSHOUT_SCORE, True, "OUTBOUND",
+                     abandoned=False)[0] == "PUSHOUT ALERT")
+check("and it holds all the way to 100",
+      classify_event(100, False, "OUTBOUND",
+                     abandoned=False)[0] == "PUSHOUT ALERT")
+
+# The OLD route must be untouched: 71..79 still needs the person to have left.
+for _s in (HIGH_SCORE, PUSHOUT_SCORE - 1):
+    check(f"score {_s} + abandoned is still a pushout",
+          classify_event(_s, True, "OUTBOUND", abandoned=True)[0]
+          == "PUSHOUT ALERT")
+    check(f"score {_s} without abandonment is still HIGH PRIORITY",
+          classify_event(_s, True, "OUTBOUND", abandoned=False)[0]
+          == "HIGH PRIORITY")
+
+# Lower tiers must not have moved.
+check("the medium tier is unchanged",
+      classify_event(MEDIUM_SCORE, False, "OUTBOUND")[0] == "UNLINKED EXIT")
+check("abandonment below the high line is still ABANDONED CART",
+      classify_event(60, True, "OUTBOUND", abandoned=True)[0] == "ABANDONED CART")
+check("an abandoned EMPTY outbound cart stays one tier down",
+      classify_event(
+          compute_pops("OUTBOUND", "SLOW", True, "empty", abandoned=True,
+                       linked=True), True, "OUTBOUND",
+          abandoned=True)[0] == "ABANDONED CART")
+
+# A pushout must remain unreachable for anything not leaving the store.
+_bad = []
+for _d in ("INBOUND", "UNKNOWN"):
+    for _sp in ("STATIC", "SLOW", "MEDIUM", "FAST"):
+        for _f in ("empty", "partial", "full", "unclassified"):
+            for _b in ("bagged", "unbagged", "not_applicable"):
+                for _lk in (True, False):
+                    for _ab in (True, False):
+                        _sc = compute_pops(_d, _sp, True, _f, bag_label=_b,
+                                           abandoned=_ab, linked=_lk)
+                        if classify_event(_sc, _lk, _d,
+                                          abandoned=_ab)[0] == "PUSHOUT ALERT":
+                            _bad.append((_d, _sp, _f, _b, _lk, _ab, _sc))
+check("no INBOUND or UNKNOWN cart can be called a pushout",
+      not _bad, f"{len(_bad)} combos: {_bad[:3]}")
+
+# What it means in practice, end to end from the scorer.
+_walk_full = compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="unbagged")
+check("walking a full unbagged cart out is now a pushout",
+      classify_event(_walk_full, False, "OUTBOUND")[0] == "PUSHOUT ALERT",
+      f"score={_walk_full}")
+_bagged = compute_pops("OUTBOUND", "FAST", True, "full", bag_label="bagged")
+check("a bagged full cart is not, however fast",
+      classify_event(_bagged, False, "OUTBOUND")[0] != "PUSHOUT ALERT",
+      f"score={_bagged}")
+
+# It has to be a real event, and a high one, or nothing downstream reacts.
+check("PUSHOUT ALERT is loggable", "PUSHOUT ALERT" in LOGGABLE_EVENTS)
+from engine.scoring import HIGH_EVENTS
+check("PUSHOUT ALERT counts as high", "PUSHOUT ALERT" in HIGH_EVENTS)
 
 
 # ---------------------------------------------------------------------------
