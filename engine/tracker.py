@@ -33,6 +33,7 @@ from .config import (
     POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
     RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
 )
+from .ultralytics_compat import apply as _apply_ultralytics_compat
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
 from .motion import compute_motion, compute_direction_label
@@ -55,6 +56,14 @@ from .video_io import open_video, create_writer, reencode_to_mp4
 from .frame_capturer import FrameCapturer
 from .vlm_analyzer import VLMAnalyzer
 from .case_report_builder import build_case_report_html
+
+# Restores ByteTrack's low-confidence second association on ultralytics
+# >= 8.4.40, where fuse_score is applied to it and makes every match in
+# that pass mathematically impossible. Must run before any tracker is
+# constructed. See engine/ultralytics_compat.py for the full analysis.
+if _apply_ultralytics_compat():
+    print("[INFO] ultralytics compat: re-enabled ByteTrack's "
+          "low-confidence second association")
 from . import ui_builder
 from . import analytics_ui
 from . import highlights
