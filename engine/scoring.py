@@ -39,6 +39,14 @@ from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLE
 #   Floor at 75 if outbound + merchandise (partial/full)
 #   Floor at 60 if outbound + empty
 #   Otherwise +35
+#
+#   UNKNOWN direction floors at 65, not 75 — a shopper who parks a cart and
+#   steps to a shelf trips `abandoned` after about a second of lost person
+#   track, and that must not read as a pushout. The exception is
+#   `merch_removed`: a sustained loaded run followed by an empty tail means the
+#   goods left the cart while the owner left the frame, which is the same
+#   evidence OUTBOUND floors at 75, so it gets 75 here too. Bagged carts are
+#   excluded — see merchandise_removed().
 # ---------------------------------------------------------------------------
 
 #: What the INBOUND / not-valid kill switches score a cart. Named rather than
@@ -61,6 +69,13 @@ HIGH_SCORE = 71         #: at/above this, the cart is high priority
 #: cannot label an arriving cart a pushout.
 PUSHOUT_SCORE = 80
 
+#: Score floor for an abandoned cart that still holds merchandise on its way
+#: out. Named because the UNKNOWN-direction grab-and-run path below reuses the
+#: same number deliberately: "the person left and the goods are loose" is the
+#: same evidence whichever direction label the motion window managed to
+#: resolve, so the two paths must not drift apart.
+MERCH_REMOVED_FLOOR = 75
+
 _FILL_SCORE_OUTBOUND = {"empty": -15}
 _FILL_SCORE_UNKNOWN  = {"partial": 8}
 _SPEED_SCORE_OUTBOUND = {"FAST": 15, "MEDIUM": 5}
@@ -73,13 +88,19 @@ _LINKED_DAMPING = 20
 def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
                  fill_label: str, bag_label: str = "not_applicable",
                  cart_detected: bool = True, abandoned: bool = False,
-                 linked: bool = False) -> int:
+                 linked: bool = False, merch_removed: bool = False) -> int:
     """Compute Push-Out Probability Score (0-100).
 
     A linked person pushing their cart through the store is normal — the score
     is dampened by 20 points, but only for UNKNOWN direction (see section C
     below); a person walking a cart out the exit is the thing being detected,
     so OUTBOUND is never damped.
+
+    `merch_removed` says the cart's classification history holds a sustained
+    run of loaded observations followed by an empty tail — see
+    merchandise_removed(). It only changes the UNKNOWN-direction abandonment
+    floor, where it lifts 65 to MERCH_REMOVED_FLOOR for an unbagged cart; the
+    OUTBOUND branch already floors that case.
     """
     # --- Kill Switches ---
     if not cart_detected:
@@ -135,7 +156,7 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
         # Abandonment — overrides everything, floor the score high
         if abandoned:
             if fill_label in ("partial", "full"):
-                score = max(score, 75)
+                score = max(score, MERCH_REMOVED_FLOOR)
             elif fill_label == "empty":
                 score = max(score, 60)
             else:
@@ -151,7 +172,25 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
             score -= _LINKED_DAMPING
         if abandoned:
             if fill_label in ("partial", "full"):
-                score = max(score, 65)
+                # 65 is the deliberate cap for an abandoned loaded cart whose
+                # direction never resolved: a shopper who parks a cart and
+                # steps to a shelf trips `abandoned` after ABANDON_FRAMES,
+                # which is about a second of lost person track, and that cart
+                # must not read as a pushout.
+                #
+                # `merch_removed` is what separates the two. It means the
+                # classification history holds a sustained run of loaded
+                # observations followed by an empty tail — the goods left the
+                # cart while the owner left the frame. A parked cart never
+                # produces it, because its fill stays loaded throughout. That
+                # is the pushout the OUTBOUND branch already floors at
+                # MERCH_REMOVED_FLOOR, so it gets the same floor here and
+                # reaches PUSHOUT ALERT through the existing
+                # HIGH_SCORE + abandoned route in classify_event().
+                if merch_removed and bag_label == "unbagged":
+                    score = max(score, MERCH_REMOVED_FLOOR)
+                else:
+                    score = max(score, 65)
             else:
                 score += 25
 
@@ -199,6 +238,62 @@ def peak_sustained_fill(fill_sequence, min_run: int) -> str | None:
     if not qualified:
         return None
     return max(qualified, key=lambda f: _FILL_RANK[f])
+
+
+def merchandise_removed(fill_sequence, min_run: int) -> bool:
+    """Did the goods leave a cart that was carrying them?
+
+    True when `fill_sequence` holds a sustained run of loaded observations (the
+    same run test peak_sustained_fill() applies, so a stray noisy "partial"
+    cannot qualify) AND the last observation reads empty.
+
+    This is the evidence that separates a grab-and-run from a parked cart. Both
+    of them trip `abandoned` — that flag is only ABANDON_FRAMES of lost person
+    track — but a shopper who parks a loaded cart and steps to a shelf leaves
+    the fill loaded, while someone who lifts the items out and walks off leaves
+    it empty. Only the second one means merchandise left the premises.
+
+    The trailing observation, not a proportion of the history, is what is
+    tested: a real door-side pushout reads loaded -> empty -> loaded as the
+    cart is occluded and re-exposed, so no half of the timeline is cleanly
+    either (see peak_sustained_fill). Where the cart ENDS is the question.
+    """
+    if not fill_sequence or fill_sequence[-1] != "empty":
+        return False
+    return peak_sustained_fill(fill_sequence, min_run) is not None
+
+
+def vote_bag_for_loaded_cart(history) -> str:
+    """Confidence-weighted bag label over every LOADED observation in history.
+
+    `history` is `_cart_cls_history[cart]`: a list of
+    (fill, bag, fill_conf, bag_conf) tuples.
+
+    A cart the classifier reads as "empty" always reports bag
+    "not_applicable" with confidence 1.0, so once fill has been restored to
+    partial/full (grab-and-run) the recorded bag label for that frame is
+    meaningless and the not_applicable votes have to be discarded before any
+    bag decision is made.
+
+    Voting instead of reading ONE frame is the point. Bagging is the noisiest
+    of the three heads at door distance: on the cart this function was written
+    for the run reads bagged 7 times (conf sum 5.62) against unbagged 9 times
+    (conf sum 6.59), and any single frame can land either way. A single frame's
+    label decides a 10-point scoring difference and, through the
+    partial+bagged cap of 55, whether the cart can clear HIGH_SCORE at all.
+
+    Defaults to "unbagged" when history holds no loaded observation: a cart
+    that was carrying merchandise with no positive bagging evidence is the
+    higher-risk read, and it is also what compute_pops() has always assumed.
+    """
+    scores: dict[str, float] = {}
+    for _fill, bag, _fc, bc in history:
+        if bag == "not_applicable":
+            continue
+        scores[bag] = scores.get(bag, 0.0) + bc
+    if not scores:
+        return "unbagged"
+    return max(scores, key=scores.get)
 
 
 def classify_event(pops_score: int, linked: bool,
@@ -322,6 +417,62 @@ def inbound_suppression_note(peak_snapshots,
         note += (" All of them read as empty, which is what arriving customers "
                  "look like. Check the placement anyway if you expected exits.")
     return note
+
+
+def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]:
+    """Make the POPS snapshot and the Events rows tell ONE story. Mutates both.
+
+    Returns human-readable notes for anything overridden, so the caller can log
+    them; lives here rather than inline in TrackingEngine.process_video() so the
+    invariant is testable without decoding a video.
+
+    The snapshot has just been reconciled (confidence-weighted fill/bag vote
+    over the whole classification history, score recomputed from it), so it is
+    the source of truth and every logged row for that cart is rewritten from it.
+
+    The one exception is a score FLOOR: if the row logged live scored higher
+    than the reconciliation, the live reading wins - but as a UNIT, all four
+    fields together, never a blend. That keeps the protection the old
+    "Events is truth for abandonment" branch was really providing (a finaliser
+    re-vote must not quietly demote a confirmed pushout, orig=75 recomp=60)
+    without letting one frame's bag label overwrite a voted one, which is what
+    that branch actually did.
+    """
+    notes: list[str] = []
+    last_event: dict = {}
+    for ev in (event_log or []):
+        last_event[ev["cart_id"]] = ev
+
+    for cd, ev in last_event.items():
+        if cd not in peak_snapshots:
+            continue
+        snap = peak_snapshots[cd]
+        if ev["pops_score"] > snap.get("score", 0):
+            notes.append(
+                f"Cart {cd}: keeping live event reading "
+                f"{ev['fill']}|{ev['bag']} {ev['event']} score={ev['pops_score']} "
+                f"over reconciled {snap.get('fill')}|{snap.get('bag')} "
+                f"score={snap.get('score')}"
+            )
+            snap["fill"] = ev["fill"]
+            snap["bag"] = ev["bag"]
+            snap["score"] = ev["pops_score"]
+            snap["event"] = ev["event"]
+            max_pops[cd] = ev["pops_score"]
+
+        # EVERY row for this cart, not just the last one. Rewriting only the
+        # last row left a cart's earlier rows carrying the un-reconciled score,
+        # so one incident showed up twice with two different numbers and no way
+        # to tell which was current.
+        for row in event_log:
+            if row["cart_id"] != cd:
+                continue
+            row["fill"] = snap["fill"]
+            row["bag"] = snap["bag"]
+            row["pops_score"] = snap["score"]
+            row["event"] = snap["event"]
+
+    return notes
 
 
 def prune_event_log(event_log) -> tuple[list, int]:

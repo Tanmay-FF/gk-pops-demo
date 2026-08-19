@@ -39,8 +39,10 @@ from .classifier import CartClassifier
 from .linker import PersonCartLinker
 from .motion import compute_motion, compute_direction_label
 from .scoring import (
-    compute_pops, classify_event, peak_sustained_fill, prune_event_log,
-    inbound_suppression_note,
+    compute_pops, classify_event, peak_sustained_fill, merchandise_removed,
+    prune_event_log,
+    inbound_suppression_note, vote_bag_for_loaded_cart,
+    sync_events_with_snapshots,
     LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS,
 )
 from .renderer import (
@@ -75,6 +77,10 @@ from .analytics_models import (
     FACTS_SCHEMA_VERSION,
 )
 from .trajectory_cache import TrajectoryCache, make_video_key
+
+#: Fill severity order, shared by the live grab-and-run path in the frame loop.
+#: Module level so the frame loop is not rebuilding it per cart per frame.
+_FILL_RANK_TRACK = {"empty": 0, "partial": 1, "full": 2}
 
 
 class TrackingEngine:
@@ -1126,16 +1132,54 @@ class TrackingEngine:
                 # For abandoned carts: if currently empty but previously had
                 # items, use the peak fill from history.  A cart that went from
                 # partial/full → empty means someone grabbed items and ran.
+                #
+                # The bag label is VOTED across the whole history, not copied
+                # from the frame the peak fill came from. The previous version
+                # reassigned fill_lbl inside the loop, so the rank comparison
+                # walked a running maximum and settled on the FIRST frame to
+                # reach the peak rank — one frame decided the bag label for the
+                # event row. On the 1764099569430 OUTSIDE clip that frame read
+                # "bagged" while the history votes unbagged 6.59 to 5.62, and
+                # partial+bagged is capped at 55 by compute_pops(), so a single
+                # noisy frame held a real grab-and-run 10 points under its own
+                # abandonment floor of 65. The end-of-run finaliser already
+                # votes the bag this way (see vote_bag_for_loaded_cart and the
+                # constraint block below); this makes the live path agree.
+                # Goods gone from a cart that was carrying them, owner gone
+                # too. Read off the classification HISTORY, not off the current
+                # cached frame and not off whether the fill override below
+                # fired: classification runs every CLASSIFY_EVERY_N_FRAMES, so
+                # on frames where the stale cache still reads partial this
+                # would flicker back to False and the live tier would depend on
+                # classifier cadence. The finaliser derives it the same way
+                # from the same history, which is what keeps the two paths
+                # agreeing.
+                #
+                # Gated on GRABRUN_MIN_RUN_OBS rather than the any-frame peak
+                # used by the fill override, because this decides a tier: one
+                # noisy "partial" on a genuinely empty cart must not float it
+                # to a pushout.
+                merch_removed = bool(
+                    abandoned and cd in self._cart_cls_history
+                    and merchandise_removed(
+                        [h_fill for h_fill, _, _, _ in self._cart_cls_history[cd]],
+                        GRABRUN_MIN_RUN_OBS))
+
                 if abandoned and fill_lbl == "empty" and cd in self._cart_cls_history:
-                    _FILL_RANK = {"empty": 0, "partial": 1, "full": 2}
-                    for h_fill, h_bag, _, _ in self._cart_cls_history[cd]:
-                        if _FILL_RANK.get(h_fill, 0) > _FILL_RANK.get(fill_lbl, 0):
-                            fill_lbl = h_fill
-                            bag_lbl = h_bag
+                    history = self._cart_cls_history[cd]
+                    peak_fill = max(
+                        (h_fill for h_fill, _, _, _ in history),
+                        key=lambda f: _FILL_RANK_TRACK.get(f, 0),
+                        default=fill_lbl,
+                    )
+                    if _FILL_RANK_TRACK.get(peak_fill, 0) > _FILL_RANK_TRACK.get(fill_lbl, 0):
+                        fill_lbl = peak_fill
+                        bag_lbl = vote_bag_for_loaded_cart(history)
 
                 pops_score = compute_pops(dir_label, speed_status, is_valid, fill_lbl,
                                           bag_label=bag_lbl, cart_detected=True,
-                                          abandoned=abandoned, linked=linked)
+                                          abandoned=abandoned, linked=linked,
+                                          merch_removed=merch_removed)
                 event_name, event_color = classify_event(pops_score, linked, dir_label, abandoned=abandoned)
 
                 self._pops_cache[cd] = {
@@ -1301,6 +1345,7 @@ class TrackingEngine:
             # Defaults from peak snapshot
             best_fill = None
             best_bag = None
+            merch_removed = False
             direction = snap.get("direction", "UNKNOWN")
             speed_status = snap.get("speed_status", "STATIC")
             linked = snap.get("linked", False)
@@ -1367,8 +1412,18 @@ class TrackingEngine:
                     # HANNAFORD clip reads partial(9) -> empty(24) ->
                     # partial(12), and neither half qualified, so the finalised
                     # score contradicted the live one (orig=75 recomp=60).
+                    fills = [f for f, b, fc, bc in history]
+                    # Derived from the history rather than from whether the
+                    # override below fired: the evidence is "loaded run, then
+                    # an empty tail", and that is true whichever label the
+                    # confidence vote happens to land on. Reading it off the
+                    # override would make the finalised tier depend on the
+                    # vote, so a cart whose vote lands on 'partial' directly
+                    # would lose the escalation the live path already gave it.
+                    merch_removed = abandoned and merchandise_removed(
+                        fills, GRABRUN_MIN_RUN_OBS)
+
                     if best_fill == "empty" and abandoned:
-                        fills = [f for f, b, fc, bc in history]
                         print(f"[DEBUG] Cart {cd}: history order = {fills}")
                         sustained = peak_sustained_fill(fills, GRABRUN_MIN_RUN_OBS)
                         if sustained:
@@ -1400,20 +1455,15 @@ class TrackingEngine:
 
             # Constraint: partial/full → bag cannot be not_applicable
             if best_fill in ("partial", "full") and best_bag == "not_applicable":
-                if cd in self._cart_cls_history:
-                    bag_scores = defaultdict(float)
-                    for _, bag, _, bc in self._cart_cls_history[cd]:
-                        if bag != "not_applicable":
-                            bag_scores[bag] += bc
-                    best_bag = max(bag_scores, key=bag_scores.get) if bag_scores else "unbagged"
-                else:
-                    best_bag = "unbagged"
+                best_bag = vote_bag_for_loaded_cart(
+                    self._cart_cls_history.get(cd, ()))
 
             # RECOMPUTE score with finalized, consistent inputs
             recomputed = compute_pops(
                 direction, speed_status, True, best_fill,
                 bag_label=best_bag, cart_detected=True,
                 abandoned=abandoned, linked=linked,
+                merch_removed=merch_removed,
             )
             final_score = recomputed
             # Re-apply caps based on final fill/bag
@@ -1433,44 +1483,22 @@ class TrackingEngine:
             self._max_pops_per_cart[cd] = final_score
             print(f"[POPS] Cart {cd}: {best_fill}|{best_bag} {direction} "
                   f"score={final_score} (orig={original_score} recomp={recomputed}) "
-                  f"[{source}]")
+                  f"[{source}]"
+                  + (" merch_removed" if merch_removed else ""))
 
-        # --- Sync last event per cart with POPS table (both directions) ---
-        # For abandonment events: POPS copies from Events (Events is truth).
-        # For all other carts: the last event copies score from POPS table
-        # so the Events table shows the reconciled score.
-        _ABANDON_EVENTS = {"ABANDONED CART"}
-
-        # Find last event per cart
-        _last_event = {}
-        for ev in self._event_log:
-            _last_event[ev["cart_id"]] = ev
-
-        for cd, ev in _last_event.items():
-            if cd not in self._peak_pops_snapshot:
-                continue
-            snap = self._peak_pops_snapshot[cd]
-            if ev["event"] in _ABANDON_EVENTS:
-                # Events → POPS (Events is truth for abandonment)
-                snap["fill"] = ev["fill"]
-                snap["bag"] = ev["bag"]
-                snap["score"] = ev["pops_score"]
-                snap["event"] = ev["event"]
-                self._max_pops_per_cart[cd] = ev["pops_score"]
-            else:
-                # POPS → Events (POPS has the reconciled score).
-                #
-                # EVERY row for this cart, not just the last one. Rewriting
-                # only `_last_event[cd]` left a cart's earlier rows carrying
-                # the un-reconciled score, so one incident showed up twice with
-                # two different numbers and no way to tell which was current.
-                for row in self._event_log:
-                    if row["cart_id"] != cd:
-                        continue
-                    row["fill"] = snap["fill"]
-                    row["bag"] = snap["bag"]
-                    row["pops_score"] = snap["score"]
-                    row["event"] = snap["event"]
+        # --- Sync last event per cart with POPS table ---
+        # The reconciled POPS snapshot is the single source of truth and the
+        # Events rows are rewritten from it; a row that scored higher live keeps
+        # its own reading as a unit. See sync_events_with_snapshots() for why
+        # the old "Events is truth for abandonment" direction was wrong: it
+        # discarded the reconciliation that had just been PRINTED, so the
+        # 1764099569430 OUTSIDE clip logged `Cart 1: partial|unbagged score=65`
+        # and showed partial|bagged 55 in the UI, and no cart could ever be
+        # reconciled UP out of the partial+bagged cap of 55.
+        for _note in sync_events_with_snapshots(
+                self._event_log, self._peak_pops_snapshot,
+                self._max_pops_per_cart):
+            print(f"[POPS] {_note}")
 
         # The rewrite above assigns whatever classify_event() returns for the
         # reconciled score, and that is not necessarily an EVENT: a row logged
