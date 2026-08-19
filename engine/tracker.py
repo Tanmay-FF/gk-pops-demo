@@ -6,6 +6,7 @@ scoring, rendering, and JSON export for a single video.
 This is the only class that touches YOLO / BoTSORT.  Everything else is
 delegated to the focused modules in this package.
 """
+import gc
 import json
 import math
 import os
@@ -111,6 +112,12 @@ class TrackingEngine:
 
         # Pose model is loaded lazily on first run with pose enabled.
         self._pose_model = None
+        #: Predictor parked across a GPU offload round-trip — see
+        #: _release_detection_gpu_memory() for why losing it corrupts tracking.
+        self._held_predictor = None
+        #: True while the detection stack is deliberately parked on the CPU for
+        #: a local-VLM pass. _ensure_on_device() must not "repair" that.
+        self._offloaded = False
 
         # Build colour map once
         self._class_colors = {}
@@ -570,6 +577,31 @@ class TrackingEngine:
     def _release_detection_gpu_memory(self):
         if self.device != "cuda":
             return
+        # Hold the predictor across the move. ultralytics' Model._apply() runs on
+        # every .to() and does `self.predictor = None`, and Model.track() reacts
+        # to a missing predictor by calling register_tracker() again — which
+        # APPENDS a second on_predict_postprocess_end callback instead of
+        # replacing the first. There is still only ONE tracker instance, and
+        # every callback in that list calls its update() again on the same
+        # frame, each pass seeing only the boxes the previous one kept. So the
+        # Kalman predict and the tracker's internal frame counter advance N
+        # times per real frame while detections shrink: track confirmation and
+        # track_buffer (120) are effectively divided by N, weak detections
+        # (people at door distance) never survive to be confirmed, and the
+        # association cost is paid N times.
+        #
+        # Measured on 1764005712780 …Inside (facing exit).mp4, run 2 of the same
+        # process after one round-trip: frame 52 went from 3 people to 1, cart 2's
+        # classification history from 28 observations to 6, YOLO+track from 11.8s
+        # to 17.8s. That is the "detections are missing in the enhanced build"
+        # report — it needs a session where the VLM case report has already run
+        # once, which is why no first run and no headless run ever showed it.
+        #
+        # The AutoBackend inside the predictor wraps this same nn.Module
+        # (verified `predictor.model.model is self.model.model`), so putting the
+        # predictor back after the module returns to CUDA is sound, and it keeps
+        # `predictor.trackers` present so Model.track() has nothing to re-register.
+        self._held_predictor = getattr(self.model, "predictor", None)
         self.model.to("cpu")
         if self._pose_model is not None:
             self._pose_model.to("cpu")
@@ -577,18 +609,147 @@ class TrackingEngine:
             self._classifier._quality_model.to("cpu")
         if self._classifier._fill_model is not None:
             self._classifier._fill_model.to("cpu")
+        self._offloaded = True
         torch.cuda.empty_cache()
 
     def _restore_detection_gpu_memory(self):
         if self.device != "cuda":
             return
-        self.model.to(self.device)
-        if self._pose_model is not None:
-            self._pose_model.to(self.device)
-        if self._classifier._quality_model is not None:
-            self._classifier._quality_model.to(self.device)
-        if self._classifier._fill_model is not None:
-            self._classifier._fill_model.to(self.device)
+        # Cleared before the moves so the verification at the end of this
+        # method is not itself skipped by the guard.
+        self._offloaded = False
+        try:
+            self.model.to(self.device)
+            # See _release_detection_gpu_memory() — without this the next
+            # .track() call registers a duplicate tracking callback and
+            # silently doubles the association pass for the rest of the
+            # process.
+            if getattr(self, "_held_predictor", None) is not None:
+                self.model.predictor = self._held_predictor
+                self._held_predictor = None
+            if self._pose_model is not None:
+                self._pose_model.to(self.device)
+            if self._classifier._quality_model is not None:
+                self._classifier._quality_model.to(self.device)
+            if self._classifier._fill_model is not None:
+                self._classifier._fill_model.to(self.device)
+        except Exception as e:
+            # Typically CUDA OOM because the VLM has not finished giving its
+            # VRAM back. Never let this escape: it would propagate out of
+            # _run_case_report's finally, replacing the real error, and it
+            # leaves a module half-moved either way. Free what we can and let
+            # _ensure_on_device() below retry the move.
+            print(f"[WARN] restoring the detection stack to {self.device} failed: {e}")
+            gc.collect()
+            torch.cuda.empty_cache()
+        self._ensure_on_device(context="after the local-VLM offload")
+
+    # ------------------------------------------------------------------
+    # Device-drift guard.
+    #
+    # The GPU round-trip above is the known way a model can end up on the
+    # wrong device: torch's Module._apply moves parameters one at a time, so
+    # a CUDA OOM partway through `.to("cuda")` leaves a module with some
+    # weights on CUDA and some on CPU, and the exception is swallowed by
+    # finalize_case_report()'s handler as an inline banner. Nothing reloads
+    # them afterwards — CartClassifier.load_quality/load_fill early-return on
+    # an unchanged pt_path — so every later run raises
+    #   RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+    #   (torch.FloatTensor) should be the same
+    # until the process restarts. Checking at the top of every run turns that
+    # into a one-run problem, and names the model that drifted.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _param_device(module) -> str | None:
+        """The device type every parameter of `module` is on, or None when the
+        module is absent / has no parameters. Returns "mixed" when they
+        disagree, which is what a `.to()` that OOM'd partway through leaves
+        behind — so this walks all parameters, not just the first."""
+        if module is None:
+            return None
+        # Unwrap only an ultralytics Model (identified by `predictor`, which
+        # nn.Module never has). A bare getattr("model") would silently scan
+        # one submodule of a plain nn.Module that happens to name a child
+        # `model`, so a partially-moved sibling would read clean.
+        inner = module.model if hasattr(module, "predictor") else module
+        try:
+            devs = {p.device.type for p in inner.parameters()}
+        except Exception:
+            return None
+        if not devs:
+            return None
+        return devs.pop() if len(devs) == 1 else "mixed"
+
+    def _move_detector(self, dev: str):
+        """`.to()` the detector while preserving its predictor — see
+        _release_detection_gpu_memory() for why losing it corrupts tracking.
+
+        Falls back to the predictor parked by _release_detection_gpu_memory():
+        a `.to()` that raised has already run Model._apply(), which nulls
+        `predictor`, so on the retry path the live attribute is gone and only
+        the parked one is left."""
+        held = (getattr(self.model, "predictor", None)
+                or getattr(self, "_held_predictor", None))
+        self.model.to(dev)
+        if held is not None:
+            self.model.predictor = held
+            self._held_predictor = None
+
+    def _ensure_on_device(self, context: str = ""):
+        """Repair any model whose weights are not on self.device.
+
+        Returns the list of model names that were wrong (empty on the happy
+        path). If the repair itself fails, the whole stack is dropped to CPU
+        and self.device is rewritten so the run still produces correct output
+        — slowly, and visibly, via the device pill in the run summary.
+        """
+        # A deliberate offload for a local-VLM pass also reads as "on the wrong
+        # device". The case report is a separate .then()-chained Gradio event,
+        # so a second Run Analysis can start while it is still running; pulling
+        # the detector back onto the GPU underneath the VLM would cause exactly
+        # the OOM this guard exists to clean up after.
+        if getattr(self, "_offloaded", False):
+            return []
+
+        want = self.device
+        drifted = [name for name, dev in (
+            ("detector", self._param_device(self.model)),
+            ("pose", self._param_device(self._pose_model)),
+            ("quality", self._param_device(self._classifier._quality_model)),
+            ("fill", self._param_device(self._classifier._fill_model)),
+        ) if dev is not None and dev != want]
+        if not drifted:
+            return []
+
+        where = f" ({context})" if context else ""
+        print(f"[WARN] models not on {want}{where}: {', '.join(drifted)} — moving back")
+        try:
+            self._move_detector(want)
+            if self._pose_model is not None:
+                self._pose_model.to(want)
+            if self._classifier._quality_model is not None:
+                self._classifier._quality_model.to(want)
+            if self._classifier._fill_model is not None:
+                self._classifier._fill_model.to(want)
+        except Exception as e:
+            print(f"[ERROR] could not put the model stack back on {want}: {e}")
+            print("[ERROR] falling back to CPU for the rest of this process — "
+                  "runs will be much slower. Restart to get the GPU back.")
+            self.device = "cpu"
+            self._classifier.device = "cpu"
+            try:
+                self._move_detector("cpu")
+                if self._pose_model is not None:
+                    self._pose_model.to("cpu")
+                if self._classifier._quality_model is not None:
+                    self._classifier._quality_model.to("cpu")
+                if self._classifier._fill_model is not None:
+                    self._classifier._fill_model.to("cpu")
+            except Exception as e2:
+                print(f"[ERROR] CPU fallback also failed: {e2}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return drifted
 
     @staticmethod
     def _bbox_iou(a, b):
@@ -674,6 +835,11 @@ class TrackingEngine:
             analytics_out_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
         os.makedirs(analytics_out_dir, exist_ok=True)
+
+        # A previous run's local-VLM offload can have left a model on the
+        # wrong device; the cached-path early-return in load_quality/load_fill
+        # below will not fix that, so check first. See _ensure_on_device().
+        self._ensure_on_device(context="start of run")
 
         # Load classifiers from fixed weight paths
         self._classifier.load_quality(QUALITY_WEIGHT_PATH)
@@ -1639,6 +1805,7 @@ class TrackingEngine:
         is_local_vlm = "Claude" not in vlm_backend
         if is_local_vlm:
             self._release_detection_gpu_memory()
+        vlm = None
         try:
             vlm = VLMAnalyzer(backend=vlm_backend, api_key=vlm_api_key,
                               device=self.device)
@@ -1650,8 +1817,15 @@ class TrackingEngine:
                 video_info=full_json["video_info"],
                 analytics_result=analytics_result,
             )
-            vlm.unload_model()
         finally:
+            # unload BEFORE restore, and unconditionally. If analyze_incident
+            # raises (a VLM OOM, a load failure, a generation error), the old
+            # in-try unload was skipped, so the VLM's weights were still
+            # resident when _restore_detection_gpu_memory() asked for the
+            # detection stack's ~5-6 GB back — the restore then OOMs partway
+            # through and leaves the detector half on CUDA, half on CPU.
+            if vlm is not None:
+                vlm.unload_model()
             if is_local_vlm:
                 self._restore_detection_gpu_memory()
 

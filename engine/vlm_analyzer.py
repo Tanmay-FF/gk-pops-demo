@@ -582,6 +582,7 @@ class VLMAnalyzer:
     def unload_model(self):
         """Free local model VRAM."""
         if self._local_model is not None:
+            import gc
             import torch
             del self._local_model
             del self._local_processor
@@ -589,6 +590,14 @@ class VLMAnalyzer:
             self._local_model = None
             self._local_processor = None
             self._local_tokenizer = None
+            # gc.collect() before empty_cache(), not after. On the error path
+            # this runs while an exception is still being handled, and its
+            # traceback frames hold references to the activations inside
+            # generate(); those frames are reference cycles, so only a
+            # collection releases them. Without it empty_cache() has nothing to
+            # give back and the caller's move of the detection stack back onto
+            # the GPU OOMs.
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
