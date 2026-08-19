@@ -505,7 +505,12 @@ def on_video_upload(video_path, prev_zones_state, prev_video_key):
     """When the user picks a video, reset zones (if it's a new file) and
     extract the first frame so they can draw zones on it."""
     if not video_path:
-        return None, prev_zones_state or [], [], None, "", _zone_summary_html([])
+        # The zone canvas slot must be None, NOT "". gr.Image treats any string
+        # as a filepath, and Gradio resolves a relative one against the process
+        # cwd: "" becomes the project directory, which it then tries to open and
+        # hash. On Windows that is PermissionError [Errno 13] on a directory,
+        # raised inside postprocess, so clearing the video killed the event.
+        return None, prev_zones_state or [], [], None, None, _zone_summary_html([])
 
     new_key = make_video_key(video_path)
     if new_key != prev_video_key:
@@ -1594,9 +1599,9 @@ if __name__ == "__main__":
         print("[gk]   -> launching WITHOUT static/app.js")
     if NO_APP_CSS:
         print("[gk]   -> launching WITHOUT static/app.css")
-
-    demo.launch(
-        server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True,
+#5173
+    demo.launch( 
+        server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True, 
         allowed_paths=_allowed_paths,
         theme=_THEME,
         css=(None if NO_APP_CSS else _CSS),

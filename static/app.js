@@ -29,7 +29,18 @@
     //      delegated listeners below.
     // ─────────────────────────────────────────────────────────────────
 
-    const NOOP = function () { return false; };
+    // MUST NOT return false. This is assigned to `.onclick` on buttons that
+    // may be GRADIO'S OWN — the defensive pass below matches any button whose
+    // aria-label/title contains "ull", which is how Gradio labels the
+    // Fullscreen icon on video and image components, document-wide.
+    //
+    // Returning false from an onclick handler calls preventDefault(), so this
+    // was cancelling the click on every one of those buttons: the whole point
+    // of stamping them is to give Gradio's router something callable instead
+    // of null, NOT to suppress what they do. Measured on a live run —
+    // `dispatchEvent` came back `defaultPrevented: true` on Gradio's own
+    // Fullscreen control. Returning undefined keeps it callable and inert.
+    const NOOP = function () { /* deliberately empty — see above */ };
 
     // ── Zone editor fullscreen ────────────────────────────────────────
     // Bound by DELEGATION only (see the click listener below), never by
@@ -56,21 +67,72 @@
         }, 2600);
     }
 
+    // The panel to blow up, found WITHOUT relying on the elem_id.
+    //
+    // `getElementById('zone-editor-fs-wrap')` was the only lookup, and when it
+    // came back null the handler logged and gave up — a dead button with an
+    // explanation only visible in the console. The id is set on a gr.Group in
+    // Python, so anything that re-renders or restructures that Group (and this
+    // tab is re-rendered constantly: the zone pool alone drives 54 outputs
+    // through it) can take the id with it.
+    //
+    // The button is INSIDE the panel by construction, so climbing from the
+    // button cannot go out of date. The id stays as the first choice because
+    // it is the most precise; the rest are fallbacks in decreasing specificity,
+    // and the canvas is what fullscreen is actually for.
+    function _zoneFsWrap(fromBtn) {
+        var byId = document.getElementById('zone-editor-fs-wrap');
+        if (byId) return byId;
+        var btn = fromBtn || document.getElementById('gk-zone-fs-btn')
+                  || document.querySelector('.gk-fs-btn');
+        var canvas = document.getElementById('zone-canvas-img');
+        if (!btn) return canvas ? canvas.parentElement : null;
+        // Climb to the OUTERMOST group that still holds the canvas, not the
+        // first one. Gradio stamps elem_id on both the outer and the inner
+        // group div of a gr.Group, and getElementById returns the outer — so
+        // the overlay CSS, which is written in terms of `> *`, is calibrated
+        // against the outer one. Returning the inner div also goes fullscreen
+        // but sizes the frame differently (measured: 519px against 717px).
+        var node = btn.parentElement, outerGroup = null, firstHolder = null;
+        while (node && node !== document.body) {
+            if (!canvas || node.contains(canvas)) {
+                if (!firstHolder) firstHolder = node;
+                if (/gr-group|gradio-group/.test((node.className || '').toString())) {
+                    outerGroup = node;          // keep going: want the last one
+                }
+            }
+            node = node.parentElement;
+        }
+        return outerGroup || firstHolder
+               || (btn.closest ? btn.closest('.gr-group, .block') : null);
+    }
+
     function _toggleZoneFs(ev) {
         if (ev && ev.preventDefault) ev.preventDefault();
         if (ev && ev.stopPropagation) ev.stopPropagation();
-        var wrap = document.getElementById('zone-editor-fs-wrap');
-        var btn  = document.getElementById('gk-zone-fs-btn');
-        if (!wrap) { console.warn('[gk] zone-editor-fs-wrap not found'); return false; }
-        // Nothing to magnify: with no frame loaded the overlay is a black
-        // rectangle around Gradio's empty-image placeholder, which is
-        // indistinguishable from a button that did nothing. Say why instead.
-        if (!wrap.classList.contains('gk-fs-active') &&
-            !document.querySelector('#zone-canvas-img img')) {
-            _flashZoneHint('Upload a video first — there is no frame to enlarge.');
+        var btn  = (ev && ev.target && ev.target.closest)
+                   ? ev.target.closest('#gk-zone-fs-btn, .gk-fs-btn') : null;
+        btn = btn || document.getElementById('gk-zone-fs-btn');
+        var wrap = _zoneFsWrap(btn);
+        if (!wrap) {
+            console.warn('[gk] zone editor panel not found - cannot go fullscreen');
             return false;
         }
+        // The overlay styling keys off the id, so if we got here by climbing
+        // rather than by lookup, put the id back. Next click is a plain
+        // getElementById hit and the CSS matches as written.
+        if (!wrap.id) { wrap.id = 'zone-editor-fs-wrap'; }
+        // ALWAYS TOGGLE. An earlier version returned early here when no frame
+        // was loaded, on the reasoning that a black overlay around Gradio's
+        // empty-image placeholder is indistinguishable from a dead button.
+        // That reasoning was right about the symptom and wrong about the cure:
+        // a control that declines to act is ALSO indistinguishable from a dead
+        // button, and it fails that way even when the user did nothing wrong.
+        // The overlay opens either way; if there is nothing in it, it says so.
         var active = wrap.classList.toggle('gk-fs-active');
+        if (active && !document.querySelector('#zone-canvas-img img')) {
+            _flashZoneHint('No frame yet — upload a video to draw zones on.');
+        }
         document.body.classList.toggle('gk-zone-fs', active);
         if (btn) {
             btn.innerHTML = active
@@ -507,6 +569,34 @@
             if (table) _filterTable(table, el.value);
         }, false);
 
+        // ── Stamp on pointerdown, not only in the sweep ──────────────
+        // Gradio's router calls `element.onclick()` directly on the element
+        // that was clicked; a null there throws "i.onclick is not a function"
+        // and kills the click. The sweep in _bindAll() is supposed to prevent
+        // that, but it misses two whole categories:
+        //
+        //   * elements that are not <button>. The video player's fullscreen
+        //     control is `<div role="button" aria-label="full-screen">`, and
+        //     every selector in that sweep starts with `button`.
+        //   * controls that mount late. That same control bar is built when
+        //     the pointer enters the player and torn down when it leaves, so
+        //     a document-wide pass can plausibly never see it at all.
+        //
+        // Both were true of the player's Fullscreen button, which is why it
+        // did nothing. pointerdown fires on the exact element about to be
+        // clicked, in the capture phase, before any click handling — so this
+        // is the only stamping guaranteed to be in time, and it costs one
+        // closest() per interaction instead of a document walk per mutation.
+        document.addEventListener('pointerdown', function (ev) {
+            var t = ev.target;
+            if (!t || !t.closest) return;
+            var el = t.closest('button, [role="button"]');
+            if (el && typeof el.onclick !== 'function') {
+                el.onclick = NOOP;
+                el.setAttribute('data-gk-oc', '1');
+            }
+        }, true);
+
         window.__gkDelegated = true;
     }
 
@@ -524,7 +614,7 @@
     // real toggles — zone fullscreen and dark mode — flipped and unflipped
     // in the same tick and looked broken. Real work now happens in the
     // delegated `document` listener above; the only thing assigned to
-    // .onclick anywhere in this file is NOOP.
+    // .onclick anywhere in this file is NOOP, and NOOP cancels nothing.
 
     // Instrumentation, kept in: this function is called from a MutationObserver
     // on the whole document, and when it got expensive the symptom was a page
@@ -555,6 +645,7 @@
             'button[aria-label*="ull" i]:not([data-gk-oc]), ' +
             'button[title*="ull" i]:not([data-gk-oc]), ' +
             'button[class*="fullscreen" i]:not([data-gk-oc]), ' +
+            '[role="button"][aria-label*="ull" i]:not([data-gk-oc]), ' +
             '.gk-fs-btn:not([data-gk-oc]), ' +
             '.gk-theme-toggle:not([data-gk-oc]), ' +
             '#json-fullscreen-close:not([data-gk-oc]), ' +
