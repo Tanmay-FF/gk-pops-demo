@@ -71,6 +71,7 @@ class CartClassifier:
         print(f"[INFO] Loading quality model: {pt_path}")
         self._quality_model, self._quality_temp = load_quality_checkpoint(pt_path, self.device)
         self._quality_pt = pt_path
+        self._report_load_device("quality", self._quality_model)
 
     def load_fill(self, pt_path: str):
         if pt_path == self._fill_pt:
@@ -79,6 +80,68 @@ class CartClassifier:
         (self._fill_model, self._fill_classes, self._bag_classes,
          self._n_bag_model, self._fill_temp, self._bag_temp) = load_fill_checkpoint(pt_path, self.device)
         self._fill_pt = pt_path
+        self._report_load_device("fill/bag", self._fill_model)
+
+    def _report_load_device(self, kind: str, model) -> torch.device:
+        """Say where a freshly loaded model landed, and warn if it is not `self.device`.
+
+        The load line above prints the checkpoint path only, which makes a CPU
+        load indistinguishable from a CUDA one in the console — the detector
+        prints its own device banner, these models printed nothing. `self.device`
+        is only the request: a CPU-only torch build resolves it to "cpu" long
+        before this point, and an OOM inside .to() or a module left behind by a
+        failed offload restore can strand these weights somewhere else while the
+        request still reads "cuda".
+
+        Compared by device type, not identity: the request is a bare "cuda"
+        string while the parameters report "cuda:0", and those agree.
+
+        This is a post-load invariant check, NOT drift detection. Mid-run drift
+        (a failed local-VLM offload restore) never reaches here — load_quality()
+        and load_fill() short-circuit on an unchanged path — and is already
+        reported by TrackingEngine._ensure_on_device().
+        """
+        want = torch.device(self.device)
+        actual = self._weights_device(model, want)
+        print(f"[INFO] {kind} model weights on {actual}")
+        if actual.type != want.type:
+            print(f"[WARN] {kind} model was requested on {want} but its weights "
+                  f"are on {actual} — classification will run there")
+        return actual
+
+    @staticmethod
+    def _weights_device(model, fallback):
+        """Where `model`'s weights actually are, not where we asked them to be.
+
+        `self.device` is a request recorded at construction. It can disagree
+        with reality for the length of a run: TrackingEngine parks this stack on
+        the CPU while a local VLM generates a case report, and a restore that
+        OOMs partway through leaves a module split across both devices. Sending
+        inputs to the stale answer is:
+
+            RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                          (torch.FloatTensor) should be the same
+
+        Derived per model at each forward, deliberately: classify() runs the
+        quality model and then the fill model, and a partially-failed restore is
+        exactly the state in which those two disagree — so one answer for both
+        would fix stage 1 and raise the same error one line later in stage 2.
+
+        This is defence in depth, NOT the fix for that offload race — the stack
+        can be moved mid-loop, between this query and the forward pass below.
+        See docs/device_drift_fix_plan.md §9.4.4. It buys a slow correct run
+        instead of a hard stop with no output.
+        """
+        if model is None:
+            return fallback
+        devs = {p.device for p in model.parameters()}
+        if len(devs) != 1:
+            # Split across devices — what TrackingEngine._param_device() reports
+            # as "mixed". No single device is right for the input; CPU is the
+            # one that cannot raise, and the engine's guard repairs the module
+            # itself at the start of the next run.
+            return torch.device("cpu")
+        return devs.pop()
 
     def _crop_and_transform(self, frame_bgr, bbox):
         """Crop cart from frame and return transformed tensor, or None if too small."""
@@ -125,8 +188,10 @@ class CartClassifier:
         if not tensors:
             return results
 
-        # Single GPU transfer for entire batch
-        batch = torch.stack(tensors).to(self.device)
+        # Single GPU transfer for entire batch, to wherever the quality model
+        # actually is — see _weights_device().
+        batch = torch.stack(tensors).to(
+            self._weights_device(self._quality_model, self.device))
 
         # Stage 1: Quality (batched)
         logits_q = self._quality_model(batch)
@@ -159,7 +224,11 @@ class CartClassifier:
                 }
             return results
 
-        fill_batch = batch[fill_indices]
+        # .to() again: the fill model can be on a different device from the
+        # quality model after a partially-failed restore, and a same-device
+        # .to() is a no-op that returns the tensor itself.
+        fill_batch = batch[fill_indices].to(
+            self._weights_device(self._fill_model, self.device))
         logits_fill, logits_bag = self._fill_model(fill_batch)
         fill_probs = torch.softmax(logits_fill / self._fill_temp, dim=1)
         bag_probs = torch.softmax(logits_bag / self._bag_temp, dim=1)
@@ -202,11 +271,13 @@ class CartClassifier:
         if t is None:
             return _EMPTY_RESULT_TINY
 
-        tensor = t.unsqueeze(0).to(self.device)
-
-        # Stage 1: Quality
+        # Stage 1: Quality. The None check moved above the device transfer so
+        # the transfer can ask the model where it is — see _weights_device().
         if self._quality_model is None:
             return _EMPTY_RESULT_NO_MODEL
+
+        tensor = t.unsqueeze(0).to(
+            self._weights_device(self._quality_model, self.device))
 
         logits_q = self._quality_model(tensor)
         probs_q  = torch.softmax(logits_q / self._quality_temp, dim=1)[0]
@@ -229,7 +300,8 @@ class CartClassifier:
                 "fill_conf": 0.0, "bag_conf": 0.0,
             }
 
-        logits_fill, logits_bag = self._fill_model(tensor)
+        logits_fill, logits_bag = self._fill_model(
+            tensor.to(self._weights_device(self._fill_model, self.device)))
         fill_probs = torch.softmax(logits_fill / self._fill_temp, dim=1)[0]
         bag_probs  = torch.softmax(logits_bag  / self._bag_temp,  dim=1)[0]
         fill_idx   = int(fill_probs.argmax())

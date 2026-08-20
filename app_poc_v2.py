@@ -14,6 +14,7 @@ import cv2
 import gradio as gr
 
 from engine import TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor
+from engine.cancellation import RunCancelled
 from engine import theme as T
 from engine import ui_builder
 from engine.config import TEST_VIDEO_DIR
@@ -155,7 +156,9 @@ def _blank_panels(*, has_video: bool = True, placeholder: str | None = None) -> 
         "journey_html": "",
         "heatmap_image": None,
         "heatmap_file": None,
-        "alert_banner_html": gr.update(value="", visible=False),
+        # Empty string, not a visibility update — see the gr.HTML that
+        # hosts this slot for why the banner is never toggled.
+        "alert_banner_html": "",
         "ops_alerts_html": ph("Run Analysis to evaluate operational rules."),
         "run_summary_html": "",
         "tab_counts_html": ui_builder.build_tab_counts({}),
@@ -178,8 +181,8 @@ def _empty_run_outputs(message: str = "No video selected", detail: str = ""):
     blank = _blank_panels(
         placeholder=T.empty_state("Nothing to show - the run did not complete.",
                                   "See the banner at the top of the page."))
-    blank["alert_banner_html"] = gr.update(
-        value=ui_builder.build_error_banner(message, detail), visible=True)
+    blank["alert_banner_html"] = ui_builder.build_error_banner(
+        message, detail)
     return tuple(blank[name] for name in RUN_OUTPUT_NAMES)
 
 
@@ -288,9 +291,10 @@ def _apply_switches(out: list) -> None:
     if NO_JSON_FILE:
         out[_IDX["json_download"]] = None
     if NO_BANNER:
-        # Keep it HIDDEN rather than blanking the value: revealing it is the
-        # layout change under suspicion, not the HTML it contains.
-        out[_IDX["alert_banner_html"]] = gr.update(value="", visible=False)
+        # Blanks the value. The banner host is always mounted now, so there is
+        # no hidden -> visible reveal left to suppress; what this switch still
+        # removes is the above-the-fold DOM the banner HTML inserts.
+        out[_IDX["alert_banner_html"]] = ""
     print(f"[gk] bisection: blanked outputs for {', '.join(active)}")
 
 
@@ -411,16 +415,10 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
         heatmap_path = out[_IDX["heatmap_file"]]
         heatmap_bgr  = out[_IDX["heatmap_image"]]
         heatmap_rgb  = _bgr_ndarray_to_rgb(heatmap_bgr)
-        # The banner slot already holds a gr.update() when GK_NO_BANNER is on;
-        # otherwise build one from the HTML the engine produced.
-        _banner_slot = out[_IDX["alert_banner_html"]]
-        if isinstance(_banner_slot, dict):
-            alert_update = _banner_slot
-            alert_html = ""
-        else:
-            alert_html = _banner_slot or ""
-            alert_update = gr.update(value=alert_html,
-                                     visible=bool(alert_html.strip()))
+        # Straight through: _apply_switches has already blanked this slot if
+        # GK_NO_BANNER is on, and the banner is a plain value now rather than a
+        # visibility toggle, so there is no update dict to tell apart.
+        alert_html = out[_IDX["alert_banner_html"]] or ""
         if alert_html.strip():
             gr.Warning("Alerts detected - see the banner at the top of the page.")
 
@@ -441,8 +439,19 @@ def run_analysis(video_path, camera_placement, vlm_backend, vlm_api_key,
         # keeps working; the failure path already returned a plain gr.update()
         # here, which is why a FAILED run never froze the page.
         return (tuple(out[:_IDX["heatmap_image"]])
-                + (heatmap_rgb, heatmap_path, alert_update, ops_html,
+                + (heatmap_rgb, heatmap_path, alert_html, ops_html,
                    run_summary, tab_counts, gr.skip()))
+    except RunCancelled as e:
+        # Before the generic handler, and no traceback: a cancel is the user
+        # getting what they asked for, not an error. The banner says so rather
+        # than reading "Analysis failed", which is what a bare `except
+        # Exception` here would have produced.
+        print(f"[CANCEL] run_analysis stopped: {e}")
+        gr.Info("Run cancelled.")
+        return _empty_run_outputs(
+            "Run cancelled",
+            "The run was stopped before it finished, so there are no results "
+            "to show. Press Run Analysis to start again.")
     except Exception as e:
         gr.Warning(f"Error: {e}")
         traceback.print_exc()
@@ -465,6 +474,37 @@ _GOTO_RESULTS_JS = ("() => {}" if NO_TAB_SWITCH else
                     "catch (e) { console.warn('[gk] tab switch failed', e); } }")
 
 
+def cancel_run_handler():
+    """Stop the run (or case report) that is currently in flight.
+
+    Two mechanisms, and both are needed. `cancels=` on this button's event is
+    Gradio's own, and its docstring is explicit that it only drops jobs that
+    have "not yet run" — a function already executing "will be allowed to
+    finish". So it clears the client's spinner and any queued follow-up, and
+    nothing more. `engine.request_cancel()` is what actually stops the work: the
+    frame loop tests the flag every frame and the local VLM tests it every
+    generated token.
+
+    Deliberately outputs nothing. It must not be blocked behind the run it is
+    cancelling, so it touches no engine state beyond the cancel token — which
+    takes its own lock, never `_gpu_lock`.
+    """
+    try:
+        seq = engine.request_cancel()
+    except Exception as e:
+        # A Cancel button that raises is worse than useless: the run keeps
+        # going and the toast blames the button. Nothing in request_cancel()
+        # should be able to fail, which is exactly why a failure here needs to
+        # be visible rather than a stack trace in a terminal nobody is reading.
+        traceback.print_exc()
+        gr.Warning(f"Could not cancel: {e}")
+        return
+    if seq is None:
+        gr.Info("Nothing to cancel — no run is in progress.")
+    else:
+        gr.Info("Cancelling — the run stops at the next frame.")
+
+
 def finalize_case_report_handler():
     """Second event: run the deferred VLM and fill in the case-report tab.
 
@@ -480,6 +520,15 @@ def finalize_case_report_handler():
     t0 = time.perf_counter()
     try:
         case_html, case_file = engine.finalize_case_report()
+    except RunCancelled as e:
+        # Same reasoning as run_analysis: not a failure, so not the SAFETY
+        # notice. The engine also returns a "cancelled" panel without raising
+        # when the payload it popped was already cancelled before the VLM
+        # started; this is the path where the cancel landed mid-generation.
+        print(f"[CANCEL] case report stopped: {e}")
+        return (T.empty_state("Case report cancelled.",
+                              "The run was stopped before the report finished."),
+                None)
     except Exception as e:
         traceback.print_exc()
         return (T.notice("Case report failed", T.esc(str(e)), tone="SAFETY"),
@@ -793,9 +842,7 @@ def recompute_analytics_handler(video_path, zones_state, camera_placement,
         heatmap_rgb = _bgr_ndarray_to_rgb(heatmap_bgr)
         gr.Info("Analytics and operational rules re-evaluated.")
         return (summary, spikes, dwell, journey, heatmap_rgb, heatmap_path,
-                ops,
-                gr.update(value=alert_html, visible=bool(alert_html.strip())),
-                tab_counts,
+                ops, alert_html, tab_counts,
                 # The POPS table carries the operational categories, so it moves
                 # with the thresholds. Empty means this process has no POPS
                 # state to rebuild from — leave the tab as it is.
@@ -1000,21 +1047,30 @@ with gr.Blocks(
             # rules is a post-hoc pass over cached facts, so a slider plus
             # Recompute costs no GPU time at all.
             gr.HTML('<div class="sb-hdr"><span class="sb-hdr-step">4</span>RULE THRESHOLDS</div>')
+            # All three thresholds are in seconds and the panel says so once, as
+            # a unit suffix on the value fields (.sb-thresholds in app.css), so
+            # the labels no longer each carry a "(s)" — at sidebar width that
+            # suffix was what pushed every label onto a second line.
             with gr.Group(elem_classes=["sb-pad", "sb-thresholds"]):
+                # The unit lives in `info` as well as in the CSS suffix: if the
+                # stylesheet ever fails to load, "Blocked door / 45" with no unit
+                # anywhere is a worse panel than a slightly wordier caption.
                 blocked_door_s = gr.Slider(
                     5, 300, value=DEFAULT_THRESHOLDS["blocked_door_s"], step=5,
-                    label="Blocked door (s)",
-                    info="Cart stationary in a door zone")
+                    label="Blocked door",
+                    info="Seconds a cart is stationary in a door zone")
                 static_cart_s = gr.Slider(
                     10, 600, value=DEFAULT_THRESHOLDS["static_cart_s"], step=10,
-                    label="Static cart (s)",
-                    info="Cart stationary in an aisle / analytics zone")
+                    label="Static cart",
+                    info="Seconds a cart is stationary in an aisle / "
+                         "analytics zone")
                 abandoned_cart_s = gr.Slider(
                     10, 900, value=DEFAULT_THRESHOLDS["abandoned_cart_s"], step=10,
-                    label="Unattended cart (s)",
-                    info="Cart stationary with nobody nearby")
+                    label="Unattended cart",
+                    info="Seconds a cart is stationary with nobody nearby")
                 reset_thresholds_btn = gr.Button(
-                    "Reset to defaults", size="sm", variant="secondary")
+                    "Reset to defaults", size="sm", variant="secondary",
+                    elem_classes=["gk-sb-btn2"])
 
             # ── VLM Case Report ──────────────────────────────────────────
             gr.HTML('<div class="sb-hdr"><span class="sb-hdr-step">⚙</span>VLM CASE REPORT</div>')
@@ -1041,12 +1097,31 @@ with gr.Blocks(
                 run_btn = gr.Button(
                     "Run Analysis", variant="primary", size="lg", elem_id="gk-run-btn",
                 )
-                with gr.Row():
+                # Always mounted, never toggled. A visibility flip would be the
+                # obvious design — show it only while a run is in flight — but
+                # this build has twice been bitten by Gradio 6 failing to paint
+                # a hidden→visible reveal (the alert banner is permanently
+                # mounted for the same reason), and a Cancel button that does
+                # not appear is worse than one that is always there. Pressing it
+                # with nothing running is a logged no-op: CancelToken.request()
+                # returns None.
+                cancel_btn = gr.Button(
+                    "Cancel run", variant="stop", size="sm",
+                    elem_id="gk-cancel-btn",
+                )
+                # Both buttons carry `gk-sb-btn2` because they are a matched
+                # pair: same size, same height, same hover. `variant="secondary"`
+                # alone does not get there — see the .gk-sb-btn2 rules in
+                # static/app.css for why the sidebar's own secondary rule never
+                # lands on them.
+                with gr.Row(elem_classes=["gk-sb-btn2-row"]):
                     invalidate_btn = gr.Button(
                         "Re-run detection", size="sm", variant="secondary",
+                        elem_classes=["gk-sb-btn2"],
                     )
                     recompute_btn = gr.Button(
                         "Recompute analytics", size="sm", variant="secondary",
+                        elem_classes=["gk-sb-btn2"],
                     )
                 gr.HTML('<div class="sb-hint">“Recompute analytics” re-applies '
                         'zones and thresholds to the cached run - no GPU work, '
@@ -1067,8 +1142,18 @@ with gr.Blocks(
 
             # Sticky top-of-page alert banner — the ONE canonical alert
             # surface. Also where run failures are reported.
+            #
+            # Mounted VISIBLE with an empty value, never toggled. It used to
+            # start `visible=False` and be revealed by a gr.update, and on
+            # gradio 6.8.0 (the conda `all` env) that reveal never painted:
+            # the server sent value + visible:true, the toast fired, every
+            # other panel filled, and the banner stayed hidden. 6.12.0 (the
+            # venv) painted it fine. An empty value renders nothing — the host
+            # is zero-height with `container=False` and the padding/background/
+            # border reset in static/app.css — so "no alerts" looks identical
+            # without depending on which gradio the env resolved.
             alert_banner_html = gr.HTML(
-                value="", visible=False, elem_id="gk-alert-host",
+                value="", elem_id="gk-alert-host",
             )
 
             video_output = gr.Video(
@@ -1543,7 +1628,7 @@ with gr.Blocks(
         outputs=None,
         js=_GOTO_RESULTS_JS,
     )
-    _run_event.then(
+    _finalize_event = _run_event.then(
         # Deliberately a CHAINED event, not a second yield inside run_analysis.
         # An event holds a pending overlay over each of its output components
         # until it returns; with the VLM inside the run event, that overlay sat
@@ -1552,6 +1637,23 @@ with gr.Blocks(
         fn=finalize_case_report_handler,
         inputs=[],
         outputs=[case_report_html, case_report_download],
+    )
+
+    # Declared HERE, after both events exist: `cancels=` takes the event objects
+    # themselves, so this cannot move up next to the button.
+    #
+    # Both events are listed. Cancelling only the run would leave its chained
+    # finalize to fire anyway and start a VLM pass on a run the user just
+    # stopped; cancelling only the finalize would leave a frame loop running.
+    # And `cancels=` alone stops neither once started — see cancel_run_handler.
+    cancel_btn.click(
+        fn=cancel_run_handler,
+        inputs=None,
+        outputs=None,
+        cancels=[_run_event, _finalize_event],
+        # A flag flip is instant, and the default would paint a progress tracker
+        # over every component to say so.
+        show_progress="hidden",
     )
 
     # Loading a different clip clears the results too, for the same reason the

@@ -8,6 +8,14 @@ L1: in-memory LRU on the TrackingEngine instance.
 L2: pickle on disk under %TEMP%/pops_traj_cache/.
 
 Pickle is fine here — local-only, single-user demo.
+
+The key also covers the ENVIRONMENT that produced the trajectories, not just
+the video. L2 lives in a shared %TEMP% directory, so two interpreters on the
+same machine — a venv and a conda env, say — hit the same directory. Keying on
+the video alone meant whichever ran first served its trajectories to the other,
+which silently masked exactly the kind of cross-environment divergence that
+engine/ultralytics_compat.py documents. A spurious MISS only costs a re-run; a
+spurious HIT corrupts the answer, so the fingerprint deliberately errs wide.
 """
 from __future__ import annotations
 
@@ -26,15 +34,77 @@ CACHE_DIR_NAME = "pops_traj_cache"
 DEFAULT_L1_CAPACITY = 4
 
 
+#: Cached so the fingerprint is computed once per process, not per call.
+_ENV_FINGERPRINT: Optional[str] = None
+
+
+def _file_stamp(path: str) -> str:
+    """`size:mtime_ns` for a file, or a marker when it cannot be read. Never
+    raises — a fingerprint that throws would take the whole run with it."""
+    try:
+        st = os.stat(path)
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return "missing"
+
+
+def environment_fingerprint(refresh: bool = False) -> str:
+    """Everything outside the video file that can change the trajectories.
+
+    Deliberately wide: the tracker library version, the resolved tracker config
+    (its CONTENTS, so editing thresholds in place invalidates), and the identity
+    of the detection weights. Anything that turns out to matter and is missing
+    here shows up as a stale cache hit, so prefer over-invalidating.
+    """
+    global _ENV_FINGERPRINT
+    if _ENV_FINGERPRINT is not None and not refresh:
+        return _ENV_FINGERPRINT
+
+    try:
+        import ultralytics
+        version = ultralytics.__version__
+    except Exception:
+        version = "unknown"
+
+    # Imported lazily: config pulls in torchvision, and this module is imported
+    # by tooling that has no reason to pay for that.
+    try:
+        from .config import MODEL_PATH, TRACKER_CONFIG
+    except Exception:
+        MODEL_PATH = TRACKER_CONFIG = ""
+
+    try:
+        with open(TRACKER_CONFIG, "rb") as f:
+            tracker_cfg = hashlib.sha1(f.read()).hexdigest()[:12]
+    except OSError:
+        tracker_cfg = f"unreadable:{TRACKER_CONFIG}"
+
+    parts = (
+        f"ultralytics={version}",
+        f"tracker_cfg={tracker_cfg}",
+        f"weights={_file_stamp(MODEL_PATH)}",
+    )
+    _ENV_FINGERPRINT = "|".join(parts)
+    return _ENV_FINGERPRINT
+
+
 def make_video_key(path: str) -> str:
-    """sha1(abs_path + mtime_ns + size). 16 hex chars → cheap collision-safe key."""
+    """sha1(abs_path + mtime_ns + size + environment fingerprint).
+    16 hex chars → cheap collision-safe key.
+
+    Changing the ultralytics version, the tracker yaml or the detection weights
+    changes the key, so cached trajectories are never reused across a change
+    that would have produced different ones. Entries keyed under a previous
+    fingerprint simply stop being found; `clear()` still reaps them.
+    """
     p = os.path.abspath(path)
     try:
         st = os.stat(p)
-        payload = f"{p}|{st.st_mtime_ns}|{st.st_size}".encode("utf-8")
+        payload = f"{p}|{st.st_mtime_ns}|{st.st_size}"
     except OSError:
-        payload = p.encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:16]
+        payload = p
+    payload = f"{payload}|{environment_fingerprint()}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 class TrajectoryCache:

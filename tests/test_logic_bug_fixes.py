@@ -371,12 +371,18 @@ check("a reconciled score really can produce a non-event",
       demoted < 31 and demoted_ev == "LOW PRIORITY",
       f"{demoted} -> {demoted_ev!r}")
 
+# Scores are part of the contract now: prune_event_log() also drops a row below
+# MEDIUM_SCORE, because "UNLINKED EXIT" is returned from two tiers and so the
+# name alone stopped guaranteeing one. Each row here carries the score its own
+# event name implies, so this section keeps testing what it was written to test —
+# name filtering and duplicate collapse — rather than the new tier rule, which
+# tests/test_event_row_coherence.py covers.
 log = [
-    {"cart_id": 2, "event": "MEDIUM PRIORITY", "frame": 10},
-    {"cart_id": 2, "event": "LOW PRIORITY", "frame": 50},     # demoted
-    {"cart_id": 3, "event": "UNLINKED EXIT", "frame": 20},
-    {"cart_id": 3, "event": "UNLINKED EXIT", "frame": 90},    # duplicate
-    {"cart_id": 4, "event": "MONITORING", "frame": 30},       # never an event
+    {"cart_id": 2, "event": "MEDIUM PRIORITY", "frame": 10, "pops_score": 45},
+    {"cart_id": 2, "event": "LOW PRIORITY", "frame": 50, "pops_score": 16},   # demoted
+    {"cart_id": 3, "event": "UNLINKED EXIT", "frame": 20, "pops_score": 35},
+    {"cart_id": 3, "event": "UNLINKED EXIT", "frame": 90, "pops_score": 35},  # duplicate
+    {"cart_id": 4, "event": "MONITORING", "frame": 30, "pops_score": 8},      # never an event
 ]
 kept, dropped = prune_event_log(log)
 check("non-events are dropped", dropped == 3, f"dropped {dropped}")

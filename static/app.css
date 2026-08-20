@@ -244,9 +244,16 @@ footer { display: none !important; }
 /* ─────────────────────────────────────────────────────────────────────
    FORM LABELS
    ───────────────────────────────────────────────────────────────────── */
+/* `.label-wrap` and `.block-title` are Gradio 4/5 names. 6.12 renders every
+   component label as `<span data-testid="block-info">` inside the label (see
+   BlockTitle in gradio/templates/frontend/assets), so all three selectors below
+   used to miss and the labels fell back to Gradio Soft's own block-title fill —
+   the blue pills the sidebar was covered in. The old names stay for the day a
+   component still emits them. */
 .gradio-container label > .label-wrap,
 .gradio-container .label-wrap > span,
-.gradio-container .form .block-title {
+.gradio-container .form .block-title,
+.gradio-container span[data-testid="block-info"] {
     background: transparent !important;
     color: var(--gk-ink-2) !important;
     text-transform: uppercase !important;
@@ -507,6 +514,32 @@ footer { display: none !important; }
     box-shadow: 0 4px 10px rgba(5,150,105,0.28) !important;
 }
 
+/* Cancel run. Deliberately quieter than Run Analysis — an outline, not a filled
+   red slab: it is mounted permanently (a visibility toggle does not reliably
+   paint in this Gradio build), so for most of the session it sits next to Run
+   doing nothing, and a full-strength red there reads as an error state. Gradio's
+   own variant="stop" fill is what this overrides. */
+#gk-cancel-btn, #gk-cancel-btn button {
+    background: transparent !important;
+    color: var(--gk-danger, #ef4444) !important;
+    border: 1px solid var(--gk-danger, #ef4444) !important;
+    font-size: 0.74rem !important;
+    font-weight: 600 !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    margin-top: 8px !important;
+}
+#gk-cancel-btn:hover, #gk-cancel-btn button:hover {
+    background: var(--gk-danger, #ef4444) !important;
+    color: #fff !important;
+}
+#gk-cancel-btn button:focus-visible {
+    outline: 2px solid var(--gk-danger, #ef4444) !important;
+    outline-offset: 1px !important;
+}
+
 #gk-sidebar .gradio-button.secondary,
 #gk-sidebar button[variant="secondary"] {
     background: var(--gk-card-2) !important; color: var(--gk-ink-2) !important;
@@ -516,6 +549,68 @@ footer { display: none !important; }
 }
 #gk-sidebar .gradio-button.secondary:hover { filter: brightness(0.97); }
 
+/* The "Re-run detection" / "Recompute analytics" pair under Run Analysis.
+   The .gradio-button.secondary rule above never reaches them: this Gradio
+   build puts no `.gradio-button` class on the element and `variant` is a
+   Python kwarg, not an HTML attribute, so BOTH selectors above are dead. The
+   visible symptom was the hovered button flipping to Gradio Soft's own
+   secondary-hover fill — a near-white slate in dark mode — while its
+   unhovered sibling stayed dark. Hence the explicit :hover/:focus/:active
+   states here, not just a background.
+   Styling goes on this pair only, by elem_classes, mirroring #gk-run-btn —
+   the pattern every working button rule in this file uses. Repairing the dead
+   selector globally instead would silently restyle every other sidebar
+   secondary (Reset to defaults, the zone toolbar). */
+#gk-sidebar .gk-sb-btn2, #gk-sidebar .gk-sb-btn2 button {
+    background: var(--gk-card-2) !important;
+    color: var(--gk-ink-2) !important;
+    border: 1px solid var(--gk-border) !important;
+    border-radius: 8px !important;
+    font-size: 0.74rem !important;
+    font-weight: 600 !important;
+    padding: 6px 10px !important;
+    /* The two labels are different lengths and #gk-sidebar allows wrapping, so
+       "Recompute analytics" takes two lines and "Re-run detection" one. A
+       min-height alone only equalises them while both fit their own content:
+       the taller one still grows past it. The row stretches its children and
+       the buttons take the full height of the tallest, so the pair matches
+       whatever the labels do at any sidebar width. */
+    min-height: 44px !important;
+    line-height: 1.2 !important;
+    box-shadow: none !important;
+}
+#gk-sidebar .gk-sb-btn2:hover, #gk-sidebar .gk-sb-btn2 button:hover {
+    background: var(--gk-accent-bg) !important;
+    color: var(--gk-accent) !important;
+    border-color: var(--gk-accent) !important;
+}
+#gk-sidebar .gk-sb-btn2:active, #gk-sidebar .gk-sb-btn2 button:active {
+    background: var(--gk-card-2) !important;
+    transform: translateY(1px);
+}
+#gk-sidebar .gk-sb-btn2 button:focus-visible {
+    outline: 2px solid var(--gk-accent) !important;
+    outline-offset: 1px !important;
+}
+/* Equal widths, so neither button claims more of the row than the other, and
+   equal heights via stretch (Gradio wraps each button in its own div, so the
+   stretch has to reach through that wrapper — hence height:100% above). */
+.gk-sb-btn2-row {
+    gap: 8px !important;
+    align-items: stretch !important;
+}
+.gk-sb-btn2-row > * {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    display: flex !important;
+    align-self: stretch !important;
+}
+/* Scoped to the row on purpose: "Reset to defaults" carries the same class but
+   sits in a Group, where a percentage height resolves against a content-sized
+   parent and browsers disagree about what that means. It keeps min-height. */
+#gk-sidebar .gk-sb-btn2-row .gk-sb-btn2,
+#gk-sidebar .gk-sb-btn2-row .gk-sb-btn2 button { height: 100% !important; }
+
 .sb-downloads { padding: 4px 16px 12px !important; }
 .sb-downloads .file-preview, .sb-downloads .gradio-file { padding: 6px 10px !important; }
 .sb-downloads .label-wrap span, .sb-downloads .label-wrap {
@@ -524,9 +619,173 @@ footer { display: none !important; }
 }
 .sb-downloads .form, .sb-downloads > div { gap: 8px !important; }
 
-/* Threshold sliders — compact enough to live in the sidebar. */
-.sb-thresholds .gradio-slider { margin-bottom: 2px !important; }
-.sb-thresholds input[type="range"] { accent-color: var(--gk-accent); }
+/* ─────────────────────────────────────────────────────────────────────
+   THRESHOLD SLIDERS
+   Gradio 6.12 renders a slider as
+       .wrap > .head > label + .tab-like-container(input[number] + .reset-button)
+             > .slider_input_container > .min_value + input[range] + .max_value
+   and sets --range_progress on the range input itself, in percent. That last
+   part is what lets the fill below be themed rather than left on Gradio's
+   --neutral-200, which is a light grey and reads as a white bar in dark mode.
+   Selectors are scoped to .sb-thresholds because `.wrap` is one of Gradio's
+   most-reused class names — dropdowns and file pickers have one too.
+   ───────────────────────────────────────────────────────────────────── */
+.sb-thresholds { padding-bottom: 10px !important; }
+.sb-thresholds .gradio-slider { margin-bottom: 8px !important; }
+
+/* One card per threshold, so three sliders read as three settings rather than
+   a stack of loose controls. focus-within is the point of the accent border:
+   while dragging or arrowing a slider you can see which one you are editing. */
+.sb-thresholds .wrap {
+    background: var(--gk-card) !important;
+    border: 1px solid var(--gk-border);
+    border-radius: 10px;
+    padding: 10px 12px 12px;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.sb-thresholds .wrap:hover { border-color: var(--gk-border-strong); }
+.sb-thresholds .wrap:focus-within {
+    border-color: var(--gk-accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.14);
+}
+
+/* Label and value on ONE row. Gradio's own .head is flex-wrap:wrap with
+   align-items:flex-start, which is what let the label wrap under the number
+   field and made every card a different height. */
+.sb-thresholds .head {
+    display: flex !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+    margin-bottom: 9px !important;
+}
+.sb-thresholds .head label {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+}
+.sb-thresholds .head span[data-testid="block-info"] {
+    padding: 0 !important;
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+    font-size: 0.78rem !important;
+    line-height: 1.25 !important;
+    color: var(--gk-ink) !important;
+}
+/* The description under the label — Gradio's own <div class="info-text">. */
+.sb-thresholds .info-text {
+    color: var(--gk-ink-3) !important;
+    font-size: 0.68rem !important;
+    line-height: 1.35 !important;
+    margin: 2px 0 0 !important;
+}
+
+/* Value field + reset, right-aligned. Every threshold in this panel is in
+   seconds, so the unit is a suffix on the field rather than "(s)" repeated in
+   all three labels. */
+.sb-thresholds .tab-like-container {
+    flex: none !important;
+    gap: 4px !important;
+    align-items: center !important;
+}
+.sb-thresholds input[data-testid="number-input"] {
+    width: 58px !important;
+    min-width: 0 !important;
+    height: 30px !important;
+    padding: 2px 6px !important;
+    text-align: center !important;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700 !important;
+    font-size: 0.8rem !important;
+}
+.sb-thresholds .tab-like-container::after {
+    content: "s";
+    color: var(--gk-ink-3);
+    font-size: 0.68rem;
+    font-weight: 700;
+    margin-left: 1px;
+}
+/* Gradio's reset glyph is a bare ↺ with no affordance. Give it a target big
+   enough to hit and let it announce itself on hover. */
+.sb-thresholds .reset-button {
+    order: 2;
+    width: 22px !important; height: 22px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center; justify-content: center;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    color: var(--gk-ink-3) !important;
+    font-size: 0.9rem !important;
+    line-height: 1 !important;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease;
+}
+.sb-thresholds .reset-button:hover {
+    color: var(--gk-accent) !important;
+    background: var(--gk-accent-bg) !important;
+    border-color: var(--gk-accent) !important;
+}
+
+/* Track. --range_progress is Gradio's, in percent, updated as you drag. */
+.sb-thresholds .slider_input_container {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+.sb-thresholds input[type="range"] {
+    accent-color: var(--gk-accent);
+    /* A 20px-tall control around a 6px track: the thumb is far easier to grab
+       than on Gradio's default, without the bar looking any heavier. */
+    height: 20px !important;
+    cursor: pointer;
+}
+.sb-thresholds input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px !important;
+    border-radius: 999px !important;
+    background: linear-gradient(to right,
+        var(--gk-accent) var(--range_progress, 0%),
+        var(--gk-border-strong) var(--range_progress, 0%)) !important;
+}
+.sb-thresholds input[type="range"]::-moz-range-track {
+    height: 6px !important;
+    border-radius: 999px !important;
+    background: var(--gk-border-strong) !important;
+}
+.sb-thresholds input[type="range"]::-moz-range-progress {
+    height: 6px !important;
+    border-radius: 999px !important;
+    background: var(--gk-accent) !important;
+}
+.sb-thresholds input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 15px !important; height: 15px !important;
+    margin-top: -4.5px !important;
+    border-radius: 50% !important;
+    background: #fff !important;
+    box-shadow: 0 0 0 2px var(--gk-accent), 0 1px 4px rgba(0,0,0,0.28) !important;
+    transition: transform 0.1s ease;
+}
+.sb-thresholds input[type="range"]::-moz-range-thumb {
+    width: 15px !important; height: 15px !important;
+    border: none !important;
+    border-radius: 50% !important;
+    background: #fff !important;
+    box-shadow: 0 0 0 2px var(--gk-accent), 0 1px 4px rgba(0,0,0,0.28) !important;
+}
+.sb-thresholds input[type="range"]:hover::-webkit-slider-thumb,
+.sb-thresholds input[type="range"]:focus-visible::-webkit-slider-thumb {
+    transform: scale(1.15);
+}
+.sb-thresholds input[type="range"]:active { cursor: grabbing; }
+.sb-thresholds .min_value, .sb-thresholds .max_value {
+    font-size: 0.64rem !important;
+    font-weight: 700 !important;
+    color: var(--gk-ink-3) !important;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
 
 /* ─────────────────────────────────────────────────────────────────────
    TABS — outer group nav + inner sub-nav
@@ -1283,10 +1542,16 @@ body.gk-zone-fs { overflow: hidden !important; }
 /* ─────────────────────────────────────────────────────────────────────
    STICKY ALERT BANNER
    ───────────────────────────────────────────────────────────────────── */
+/* The host is ALWAYS mounted, empty when there is nothing to flag — the
+   hidden -> visible reveal it used to do never painted on gradio 6.8.0. So
+   margin goes too: an empty host has to occupy zero height and catch no
+   clicks, or "no alerts" leaves a gap and a dead sticky strip above the fold. */
 #gk-alert-host {
     position: sticky !important; top: 8px !important; z-index: 40 !important;
-    padding: 0 !important; background: transparent !important; border: none !important;
+    padding: 0 !important; margin: 0 !important;
+    background: transparent !important; border: none !important;
 }
+#gk-alert-host:not(:has(.gk-alert-banner)) { pointer-events: none; }
 #gk-alert-host > .form, #gk-alert-host > div { padding: 0 !important; }
 .gk-alert-banner {
     color: #fff; border-radius: 10px; padding: 13px 16px; margin-bottom: 12px;

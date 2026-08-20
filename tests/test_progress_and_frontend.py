@@ -20,6 +20,7 @@ Run with:  python tests/test_progress_and_frontend.py
 Deliberately stdlib + gradio only, no pytest — matches the other suites.
 """
 import inspect
+import pathlib
 import os
 import re
 import sys
@@ -47,14 +48,18 @@ def test_no_shared_progress_default():
     section("The frame loop's progress tracker cannot outlive its run")
     from engine.tracker import TrackingEngine
 
-    sig = inspect.signature(TrackingEngine.process_video)
-    default = sig.parameters["progress"].default
-    check("process_video has no gr.Progress() default argument",
-          default is None,
-          f"default={type(default).__name__}")
+    # Both the public wrapper and the pipeline it guards: process_video is a
+    # thin serialisation wrapper (Phase 9.4.1) that forwards `progress`, so the
+    # default has to be None on each of them or the shared-instance bug is back.
+    for fn in (TrackingEngine.process_video, TrackingEngine._process_video):
+        default = inspect.signature(fn).parameters["progress"].default
+        check(f"{fn.__name__} has no gr.Progress() default argument",
+              default is None,
+              f"default={type(default).__name__}")
 
+    # The frame loop lives in _process_video, not in the wrapper.
     # Comments explain why tqdm is avoided, so match against code lines only.
-    src = inspect.getsource(TrackingEngine.process_video)
+    src = inspect.getsource(TrackingEngine._process_video)
     code = "\n".join(ln for ln in src.splitlines()
                      if not ln.strip().startswith("#"))
     check("the frame loop does not iterate progress.tqdm(...)",
@@ -329,6 +334,74 @@ def test_bisection_switches():
           len(stub) == app.N_RUN_OUTPUTS - 1, f"{len(stub)} slots")
 
 
+def test_banner_is_never_toggled_visible():
+    section("The alert banner is driven by value, never by a visibility toggle")
+    import app_poc_v2 as app
+
+    # gradio 6.8.0 (the conda `all` env) never painted the hidden -> visible
+    # reveal this slot used to do: the server sent value + visible:true, the
+    # "Alerts detected" toast fired, every other panel filled, and the banner
+    # stayed hidden. 6.12.0 (the venv) painted it. Nothing in the app can tell
+    # the two apart, so the reveal is gone: the host is mounted visible with an
+    # empty value and only ever receives a string.
+    #
+    # Every write to the slot is checked, not just the success path — one
+    # `visible=False` anywhere re-hides the host, and the next value lands in a
+    # component the browser is no longer showing.
+    # Sliced to the MATCHING paren, not the first one: a nested call in an
+    # argument (`value=ph("...")`) would cut the slice short and let the one
+    # check whose whole job is catching a reintroduced `visible=False` pass on
+    # a decl it never actually read.
+    src = inspect.getsource(app)
+    idx = src.index("alert_banner_html = gr.HTML(")
+    depth, end = 0, None
+    for i in range(src.index("(", idx), len(src)):
+        depth += (src[i] == "(") - (src[i] == ")")
+        if depth == 0:
+            end = i + 1
+            break
+    decl = src[idx:end]
+    check("the whole constructor call was read", decl.rstrip().endswith(")"), decl)
+    check("the host is not constructed hidden", "visible" not in decl, decl)
+
+    for label, value in (
+        ("the blank/flush state", app._blank_panels()["alert_banner_html"]),
+        ("a failed run", app._empty_run_outputs("boom", "why")[
+            app._IDX["alert_banner_html"]]),
+    ):
+        check(f"{label} writes a plain string",
+              isinstance(value, str) and not isinstance(value, dict),
+              type(value).__name__)
+
+    # GK_NO_BANNER blanks the value now; it must not reintroduce the toggle.
+    stub = [""] * app.N_RUN_OUTPUTS
+    app._apply_switches(stub)
+    check("GK_NO_BANNER does not write a visibility update",
+          not isinstance(stub[app._IDX["alert_banner_html"]], dict))
+
+    # The two handlers that publish a banner mid-session.
+    for fn in (app.run_analysis if hasattr(app, "run_analysis") else None,
+               app.recompute_analytics_handler):
+        if fn is None:
+            continue
+        body = inspect.getsource(fn)
+        check(f"{fn.__name__} passes the banner HTML straight through",
+              "visible=bool(alert_html" not in body
+              and "visible=True" not in body.split("alert_html")[-1][:120])
+
+    # An empty host has to be inert: zero height and no click target, or "no
+    # alerts" leaves a sticky dead strip across the top of the page.
+    css = (pathlib.Path(app.__file__).parent / "static" / "app.css").read_text(
+        encoding="utf-8")
+    host = css[css.index("#gk-alert-host {"):]
+    host = host[:host.index("}") + 1]
+    for prop in ("padding: 0", "margin: 0"):
+        check(f"the empty host zeroes its {prop.split(':')[0]}", prop in host)
+    check("the empty host swallows no clicks",
+          "#gk-alert-host:not(:has(.gk-alert-banner))" in css
+          and "pointer-events: none" in css)
+
+
 def test_new_run_flushes_the_previous_one():
     section("A new run cannot render on top of the last run's findings")
     import gradio as gr
@@ -358,8 +431,10 @@ def test_new_run_flushes_the_previous_one():
     for name in ("video_output", "json_download", "case_report_download",
                  "heatmap_image", "heatmap_file"):
         check(f"{name} is dropped", by_name[name] is None)
-    check("the sticky alert banner is emptied AND hidden",
-          by_name["alert_banner_html"] == gr.update(value="", visible=False))
+    # Emptied, NOT hidden: the host is mounted visible for the life of the
+    # page because gradio 6.8.0 never painted the hidden -> visible reveal.
+    check("the sticky alert banner is emptied",
+          by_name["alert_banner_html"] == "")
     check("tab badges go back to no counts",
           "data-counts='{}'" in by_name["tab_counts_html"])
     check("the run summary strip is cleared", by_name["run_summary_html"] == "")
@@ -418,6 +493,7 @@ def main():
     test_fullscreen_actually_enlarges_the_frame()
     test_bisection_switches()
     test_new_run_flushes_the_previous_one()
+    test_banner_is_never_toggled_visible()
     test_json_preview_is_small()
     test_no_shared_progress_default()
     test_progress_call_never_accumulates()

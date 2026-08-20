@@ -13,13 +13,14 @@ of them raises when it is wrong — the report just reads confidently and lies.
 Deliberately stdlib only, no pytest — matches tests/test_vlm_parse.py.
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.analytics_models import AnalyticsResult, QueueSpike, RuleFinding
 from engine.case_report_builder import build_case_report_html
-from engine.vlm_analyzer import CaseReportData
+from engine.vlm_analyzer import CaseReportData, FrameAnalysis
 
 _PASS: list[str] = []
 _FAIL: list[str] = []
@@ -59,13 +60,19 @@ def spike(**kw):
     return QueueSpike(**base)
 
 
-def build(analytics_result, report=None):
+def build(analytics_result, report=None, event_log=None):
     gradio_html, standalone = build_case_report_html(
         report or CaseReportData(risk_level="HIGH", executive_summary="x"),
-        [], POPS_DATA, [], {}, VIDEO_INFO,
+        [], POPS_DATA, event_log or [], {}, VIDEO_INFO,
         analytics_result=analytics_result,
     )
     return gradio_html, standalone
+
+
+#: One timeline event, in the shape _build_timeline reads off the event log.
+EVENT = {"timestamp": 14.2, "cart_id": 1, "event": "OUTBOUND", "pops_score": 75,
+         "fill": "full", "bag": "no_bag", "direction": "OUTBOUND",
+         "speed_status": "normal"}
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +211,66 @@ html_full, _ = build(AnalyticsResult(rule_findings=[finding()]))
 check("ops sits after POPS analysis, before actionable insights",
       html_full.index("POPS Analysis") < html_full.index("Operations Highlights")
       < html_full.index("Actionable Insights"))
+
+
+# ---------------------------------------------------------------------------
+section("every text element carries its own colour")
+
+# The Gradio tab renders this report inside the app's own stylesheet, whose
+# dark-theme rules colour bare <li>, <strong>, <em>, <p>, <th> and <td>
+# DIRECTLY. A tag that only inherits its colour from an ancestor loses to those
+# rules and comes out near-white on this report's white and cream panels — the
+# coverage notes under "Operations Highlights" were invisible for exactly that
+# reason. Inline colours beat any non-!important rule, so this pins the shape
+# rather than the palette: no emitted text tag may go out without its own.
+#
+# Deliberately BROADER than the defect: a <td> whose whole content is a
+# fully-coloured <span> can never render invisibly, and two of those were given
+# a colour to satisfy this rule rather than because they were broken. Holding
+# "every text tag carries its own colour" is cheaper than parsing each tag's
+# children to decide whether its colour matters.
+_COLOURLESS = re.compile(r"<(?:li|strong|em|p|th|td)\b(?![^>]*\bcolor:)[^>]*>",
+                         re.I)
+
+# A POPULATED timeline and suspect profile: with empty inputs those sections
+# render one-line placeholders and prove nothing. The timeline sits directly
+# above Operations Highlights and emits the same shape of markup, so it is the
+# likeliest place for this defect to recur.
+REPORT_COLOUR = CaseReportData(
+    risk_level="HIGH", executive_summary="Cart 1 left through the entrance.",
+    risk_assessment="Push-out consistent with a grab-and-run.",
+    suspect_profile="Male, dark jacket.",
+    actionable_insights_lp="- Pull the till log for 14:02.",
+    actionable_insights_leo="- Report as retail theft.",
+    frame_analyses=[FrameAnalysis(frame_idx=270, timestamp=14.2,
+                                  trigger="POPS_PEAK",
+                                  description="Cart pushed past the lane.")])
+
+html_colour, standalone_colour = build(
+    AnalyticsResult(
+        rule_findings=[finding()],
+        rules_unavailable_reason="No door zones drawn.",
+        rule_diagnostics=["Timing derived from frame rate.",
+                          "4 intervals discarded as too sparse."],
+        queue_spikes=[spike()],
+        dwell_summary=[{"zone_name": "Checkout 1", "avg_dwell_s": 42.0,
+                        "p95_s": 61.0, "n_visits": 12}],
+        insight_text="Checkout 1 saw the longest dwell."),
+    report=REPORT_COLOUR, event_log=[EVENT])
+
+for _label, _doc in (("gradio tab", html_colour),
+                     ("download", standalone_colour)):
+    _offenders = _COLOURLESS.findall(_doc)
+    check(f"no colourless text tag in the {_label} report",
+          not _offenders, f"offenders: {_offenders[:3]}")
+
+check("coverage notes are rendered, so the check above covered them",
+      "Coverage notes for this run" in html_colour
+      and "4 intervals discarded as too sparse." in html_colour)
+check("the populated timeline is in that report too",
+      "Incident Timeline" in html_colour
+      and "Cart pushed past the lane." in html_colour
+      and "No events recorded." not in html_colour)
 
 
 print(f"\n{len(_PASS)} passed, {len(_FAIL)} failed")

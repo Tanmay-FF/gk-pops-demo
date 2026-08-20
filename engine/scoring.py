@@ -220,6 +220,14 @@ def peak_sustained_fill(fill_sequence, min_run: int) -> str | None:
     cart that really held items produces a long one wherever it sits in the
     timeline.
 
+    Contiguity gates the RETURNED LABEL as well as the decision to override,
+    and that is on purpose. gk-pops-code selects the highest-severity label
+    with a count of 1 or more, which on the 1764120540680 OUTSIDE clip turns a
+    single "full" observation at confidence 0.667 into a FULL cart against 24
+    "partial" observations at aggregate 471.08. Same detections, same
+    per-frame classifications, different POPS label. See
+    tests/test_stray_full_observation.py.
+
     Returns None when no non-empty label sustains a long enough run, i.e. the
     "empty" verdict stands.
     """
@@ -240,6 +248,37 @@ def peak_sustained_fill(fill_sequence, min_run: int) -> str | None:
     return max(qualified, key=lambda f: _FILL_RANK[f])
 
 
+def _strip_trailing_noise(fill_sequence, min_run: int):
+    """`fill_sequence` with a trailing NON-EMPTY run too short to be real removed.
+
+    Same contiguity principle peak_sustained_fill() is built on, applied to the
+    other end of the history: a classifier that misreads one observation cannot
+    misread `min_run` of them in a row, so a loaded run shorter than min_run
+    sitting at the very end is noise and does not describe what the cart ended
+    up holding.
+
+    This is not hypothetical tuning. On the 1764092528600 OUTSIDE clip Cart 1
+    reads 27 x partial, empty x4, partial x4, empty x4, and then ONE partial at
+    fill confidence 0.502 on the final observation. The goods plainly left that
+    cart, and merchandise_removed() said False on the strength of that single
+    frame — which on an UNKNOWN heading is the difference between 65 /
+    ABANDONED CART and MERCH_REMOVED_FLOOR / PUSHOUT ALERT.
+
+    Only ONE run is ever stripped, and only when the sequence does not already
+    end empty, so a cart that genuinely finishes loaded still reads that way:
+    the parked-cart case pinned in tests/test_grabrun_pushout.py ends on a
+    loaded run of exactly min_run and is left untouched.
+    """
+    n = len(fill_sequence)
+    if not n or fill_sequence[-1] == "empty":
+        return fill_sequence
+    label = fill_sequence[-1]
+    start = n - 1
+    while start > 0 and fill_sequence[start - 1] == label:
+        start -= 1
+    return fill_sequence[:start] if (n - start) < min_run else fill_sequence
+
+
 def merchandise_removed(fill_sequence, min_run: int) -> bool:
     """Did the goods leave a cart that was carrying them?
 
@@ -257,10 +296,66 @@ def merchandise_removed(fill_sequence, min_run: int) -> bool:
     tested: a real door-side pushout reads loaded -> empty -> loaded as the
     cart is occluded and re-exposed, so no half of the timeline is cleanly
     either (see peak_sustained_fill). Where the cart ENDS is the question.
+
+    "Ends" tolerates one short burst of trailing noise — see
+    _strip_trailing_noise(). A single low-confidence loaded re-read on the final
+    observation is the classifier, not the merchandise coming back.
     """
-    if not fill_sequence or fill_sequence[-1] != "empty":
+    trimmed = _strip_trailing_noise(fill_sequence, min_run)
+    if not trimmed or trimmed[-1] != "empty":
         return False
+    # The loaded evidence is read off the FULL sequence: trimming only decides
+    # how the history ENDS, and a stripped burst is still a real observation of
+    # a cart that held something.
     return peak_sustained_fill(fill_sequence, min_run) is not None
+
+
+def vote_classification(history):
+    """Confidence-weighted fill and bag vote over a cart's whole history.
+
+    `history` is `_cart_cls_history[cart]`: a list of
+    (fill, bag, fill_conf, bag_conf) tuples, one per classified observation.
+
+    Returns `(fill, bag, detail)`, or `(None, None, {})` for an empty history.
+    `detail` carries the per-label sums the caller logs, so the arithmetic
+    behind a verdict stays visible in the run output.
+
+    The score for a label is confidence_sum x observation_count, which rewards
+    both confidence and consistency: one 0.68-confidence read cannot outweigh
+    twenty-eight agreeing ones, whichever order they arrive in.
+
+    Lives here, and is called from BOTH the live frame loop and the end-of-run
+    finaliser, because the two used to answer this question differently — the
+    frame loop scored whatever the latest classification said and the finaliser
+    voted. That is how the FF1763940475070 INSIDE clip put Cart 3 in HIGH
+    PRIORITY: one fresh observation read full|unbagged (bag confidence 0.679)
+    against 28 bagged observations totalling 23.21, the live path scored it 75,
+    and the peak-as-floor rules then held that reading against a vote that said
+    partial|bagged / 30. A tier must not turn on a single frame, and the only
+    durable way to guarantee that is for one function to decide the labels.
+    """
+    if not history:
+        return None, None, {}
+    fill_conf: dict[str, float] = {}
+    fill_count: dict[str, int] = {}
+    bag_conf: dict[str, float] = {}
+    bag_count: dict[str, int] = {}
+    for fill, bag, fc, bc in history:
+        fill_conf[fill] = fill_conf.get(fill, 0.0) + fc
+        fill_count[fill] = fill_count.get(fill, 0) + 1
+        bag_conf[bag] = bag_conf.get(bag, 0.0) + bc
+        bag_count[bag] = bag_count.get(bag, 0) + 1
+    fill_scores = {f: fill_conf[f] * fill_count[f] for f in fill_count}
+    bag_scores = {b: bag_conf[b] * bag_count[b] for b in bag_count}
+    best_fill = max(fill_scores, key=fill_scores.get)
+    best_bag = max(bag_scores, key=bag_scores.get)
+    detail = {
+        "fill_conf": fill_conf, "fill_count": fill_count,
+        "fill_scores": fill_scores,
+        "bag_conf": bag_conf, "bag_count": bag_count,
+        "bag_scores": bag_scores,
+    }
+    return best_fill, best_bag, detail
 
 
 def vote_bag_for_loaded_cart(history) -> str:
@@ -360,12 +455,22 @@ def direction_suppressed_carts(peak_snapshots) -> tuple[list[int], list[int]]:
     An inbound cart the classifier read as holding merchandise is the reading
     worth a second look, because the most common way to produce one is a
     camera_placement that disagrees with the physical camera.
+
+    A cart whose quality read `unclear` is NOT counted, whatever its direction.
+    compute_pops() returns INBOUND_SCORE for an unclassified cart too, on a
+    separate kill switch, so an unclear inbound cart looks identical here while
+    the placement had nothing to do with its score. Reporting it anyway is what
+    made this note misleading on the 1764099569430 clip: it blamed the placement
+    for two carts that the classifier had already declined to read, sending the
+    reader to a dropdown that would not have changed anything.
     """
     suppressed: list[int] = []
     loaded: list[int] = []
     for cd, snap in (peak_snapshots or {}).items():
         snap = snap or {}
         if str(snap.get("direction", "")).strip().upper() != "INBOUND":
+            continue
+        if str(snap.get("quality", "")).strip().lower() in ("unclear", "unclassified"):
             continue
         try:
             score = int(snap.get("score", 0) or 0)
@@ -419,6 +524,47 @@ def inbound_suppression_note(peak_snapshots,
     return note
 
 
+#: Below this share of unreadable cart-frames, the run is not worth a note — some
+#: unclear frames are normal at door distance and in doorway glare. At or above
+#: it, "no events" starts to mean "could not tell" rather than "nothing happened",
+#: and the reader has to be told which.
+UNASSESSED_NOTE_MIN_SHARE = 0.20
+
+
+def unassessed_cart_note(total_cart_frames: int, unassessed_cart_frames: int,
+                         unassessed_carts=None) -> str | None:
+    """One coverage note about cart-frames the classifier could not read, or None.
+
+    A cart whose quality reads `unclear` returns INBOUND_SCORE from
+    compute_pops() before contents, direction, speed or abandonment are looked at
+    — the same value as the INBOUND kill switch, and under the 31 that logs an
+    event. So a run can be 30% unreadable and still present as clean: every box
+    is drawn, every count is right, and the Events tab is empty.
+
+    On the 1764099569430 clip that was 348 of 1280 cart-frames, 6 of 9 carts, and
+    nothing anywhere said so. This is the same reasoning as
+    inbound_suppression_note() and goes on the same channel: it tells the reader
+    whether a quiet run was actually quiet.
+    """
+    if total_cart_frames <= 0 or unassessed_cart_frames <= 0:
+        return None
+    share = unassessed_cart_frames / total_cart_frames
+    if share < UNASSESSED_NOTE_MIN_SHARE:
+        return None
+    note = (f"{unassessed_cart_frames} of {total_cart_frames} cart observations "
+            f"({share:.0%}) could not be classified - the quality head read "
+            f"'unclear'. An unreadable cart is scored {INBOUND_SCORE} without "
+            f"being assessed at all, so it cannot log an event or raise an "
+            f"alert.")
+    if unassessed_carts:
+        n = len(unassessed_carts)
+        note += (f" {n} cart{'s' if n != 1 else ''} finished the run unreadable "
+                 f"({_cart_list(unassessed_carts)}).")
+    note += (" Treat the absence of findings for those carts as missing evidence, "
+             "not as a clean result.")
+    return note
+
+
 def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]:
     """Make the POPS snapshot and the Events rows tell ONE story. Mutates both.
 
@@ -454,16 +600,35 @@ def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]
                 f"over reconciled {snap.get('fill')}|{snap.get('bag')} "
                 f"score={snap.get('score')}"
             )
+            # ALL of the row's fields, not just the four the score is printed
+            # with. "As a unit" has to include the inputs: copying score, fill and
+            # bag while leaving the snapshot's direction, speed and abandonment
+            # means the rewrite loop below then stamps THOSE onto the row, and the
+            # result is a score from the live frame beside a context from the
+            # reconciliation — the exact incoherence this function exists to
+            # prevent, manufactured by the branch meant to prevent it.
             snap["fill"] = ev["fill"]
             snap["bag"] = ev["bag"]
             snap["score"] = ev["pops_score"]
             snap["event"] = ev["event"]
+            snap["direction"] = ev.get("direction", snap.get("direction"))
+            snap["speed_status"] = ev.get("speed_status", snap.get("speed_status"))
+            snap["linked"] = ev.get("linked", snap.get("linked"))
+            snap["abandoned"] = ev.get("abandoned", snap.get("abandoned"))
             max_pops[cd] = ev["pops_score"]
 
         # EVERY row for this cart, not just the last one. Rewriting only the
         # last row left a cart's earlier rows carrying the un-reconciled score,
         # so one incident showed up twice with two different numbers and no way
         # to tell which was current.
+        #
+        # `direction`, `speed_status` and `abandoned` are rewritten too, and that
+        # is not cosmetic: they are INPUTS to the score being written beside them.
+        # Leaving them at the live row's values produced rows that cannot be
+        # reproduced from their own fields — a PUSHOUT ALERT at 75 carrying
+        # `abandoned: false` (75 requires it) on one golden clip, and
+        # `MEDIUM | 45` where 45 requires STATIC on the other. See
+        # tests/test_event_row_coherence.py, which recomputes every row.
         for row in event_log:
             if row["cart_id"] != cd:
                 continue
@@ -471,6 +636,18 @@ def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]
             row["bag"] = snap["bag"]
             row["pops_score"] = snap["score"]
             row["event"] = snap["event"]
+            row["direction"] = snap.get("direction", row.get("direction"))
+            row["speed_status"] = snap.get("speed_status", row.get("speed_status"))
+            row["linked"] = snap.get("linked", row.get("linked"))
+            row["abandoned"] = snap.get("abandoned", row.get("abandoned"))
+            # `frame`/`timestamp` stay put: the log records when the cart FIRST
+            # reached the event, which is what prune_event_log() collapses to and
+            # what an operator scrubbing the timeline is looking for. The peak is
+            # a different moment and gets its own fields rather than overwriting
+            # them, so a row whose numbers come from the peak can still be seeked
+            # to at the peak.
+            row["peak_frame"] = snap.get("frame")
+            row["peak_timestamp"] = snap.get("timestamp")
 
     return notes
 
@@ -500,6 +677,17 @@ def prune_event_log(event_log) -> tuple[list, int]:
     dropped = 0
     for ev in (event_log or []):
         if ev.get("event") not in LOGGABLE_EVENTS:
+            dropped += 1
+            continue
+        # An event needs the medium tier, not just a loggable NAME.
+        # "UNLINKED EXIT" is returned from two branches of classify_event() — at
+        # MEDIUM_SCORE and above, and again below every threshold for any
+        # unlinked outbound cart — so the name alone guarantees nothing about the
+        # score. It is in LOGGABLE_EVENTS, so an empty cart drifting toward the
+        # door at POPS 0 shipped as an incident. Checking the score is what the
+        # tiers already mean; checking the name was a proxy that stopped holding
+        # the moment one name spanned two tiers.
+        if (ev.get("pops_score") or 0) < MEDIUM_SCORE:
             dropped += 1
             continue
         key = (ev.get("cart_id"), ev.get("event"))

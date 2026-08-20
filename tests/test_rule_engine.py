@@ -254,6 +254,106 @@ def test_unattended_suppressed_by_nearby_person():
           len([x for x in f if x.rule_id == "abandoned_cart"]) == 0)
 
 
+def test_attendance_bar_scales_with_cart_size():
+    section("Attendance bar scales with the cart's own box, not a flat radius")
+    # Same person-to-cart centroid distance (170px), two cart sizes. The bar is
+    # RULE_ATTENDED_GAP_FRAC * cart diagonal, so the far/small cart is
+    # unattended at that distance and the near/large one is not. Under the old
+    # flat 220px radius BOTH read attended, which is what kept Cart 2 of the
+    # 1764197283870 clip silent for the whole run.
+    n = int(200 * FPS)
+    small = make_track(30, (350, 350), n, bbox_wh=(96, 72), raw=1)      # diag 120
+    near_person = make_track(1, (350, 520), n, label="person", raw=2)   # 170px away
+    f, _ = rules.evaluate_rules(
+        make_bundle([small, near_person], {30: make_facts(n)}), [])
+    small_fires = len([x for x in f if x.rule_id == "abandoned_cart"]) == 1
+    check("small/far cart at 170px is unattended", small_fires,
+          f"bar {rules._attendance_bar(small)[0]:.0f}px")
+
+    big = make_track(31, (350, 350), n, bbox_wh=(320, 240), raw=1)      # diag 400
+    person2 = make_track(1, (350, 520), n, label="person", raw=2)
+    f2, _ = rules.evaluate_rules(
+        make_bundle([big, person2], {31: make_facts(n)}), [])
+    check("large/near cart at the SAME 170px is attended",
+          len([x for x in f2 if x.rule_id == "abandoned_cart"]) == 0,
+          f"bar {rules._attendance_bar(big)[0]:.0f}px")
+
+    if small_fires:
+        ab = [x for x in f if x.rule_id == "abandoned_cart"][0]
+        # The bar is per-cart now, so quoting the config constant in the
+        # evidence would no longer describe the decision that was made.
+        check("evidence reports the bar actually used",
+              abs(ab.evidence.get("attended_bar_px", 0) - 84.0) < 1.0,
+              str(ab.evidence))
+        check("evidence names the basis",
+              ab.evidence.get("attended_basis") == "cart_diagonal_fraction",
+              str(ab.evidence))
+
+
+def test_attendance_bar_falls_back_without_boxes():
+    section("A track with no boxes falls back to the flat radius, not to zero")
+    # has_bboxes False must not yield a bar of 0 — that would mark every such
+    # cart unattended and invent findings out of missing data.
+    n = int(200 * FPS)
+    rec = make_track(32, (350, 350), n)
+    rec.bboxes = np.empty((0, 4), dtype=np.float32)
+    bar = rules._attendance_bar(rec)
+    check("bar is the flat radius", bar.size == n and abs(bar[0] - 220.0) < 1e-6,
+          f"{bar[:1]}")
+
+
+def test_short_clip_reports_unreachable_thresholds():
+    section("Threshold longer than the clip must say so, not read as all-clear")
+    # Clip length varies run to run, so this is measured against the bundle's
+    # own observed span rather than any assumed duration.
+    n = int(25 * FPS)
+    b = make_bundle([make_track(33, (350, 350), n)], {33: make_facts(n)})
+    diag: list[str] = []
+    f, _ = rules.evaluate_rules(b, [], diagnostics=diag)
+    joined = " ".join(diag)
+    check("no findings at the 180s default",
+          len([x for x in f if x.rule_id == "abandoned_cart"]) == 0)
+    check("diagnostics say the clip is shorter than the threshold",
+          "shorter than the threshold" in joined, joined)
+    check("names the observed length", "25.0s" in joined or "24.9s" in joined,
+          joined)
+    # A clip LONGER than every threshold must not carry the note.
+    n2 = int(200 * FPS)
+    b2 = make_bundle([make_track(34, (350, 350), n2)], {34: make_facts(n2)})
+    diag2: list[str] = []
+    rules.evaluate_rules(b2, [], diagnostics=diag2)
+    check("not reported when the clip is long enough",
+          "shorter than the threshold" not in " ".join(diag2), str(diag2))
+
+
+def test_attendance_suppression_is_reported():
+    section("A cart held silent by attendance must be distinguishable from quiet")
+    # Still for the whole clip, but somebody stands beside it the whole time.
+    # Without this note the output is identical to "no cart sat still", which
+    # sends the next person to the duration slider for a problem that is not
+    # about duration.
+    n = int(200 * FPS)
+    cart = make_track(35, (350, 350), n, raw=1)
+    person = make_track(1, (360, 360), n, label="person", raw=2)
+    diag: list[str] = []
+    f, _ = rules.evaluate_rules(make_bundle([cart, person], {35: make_facts(n)}),
+                                [], diagnostics=diag)
+    joined = " ".join(diag)
+    check("still does not fire",
+          len([x for x in f if x.rule_id == "abandoned_cart"]) == 0)
+    check("reports the attendance suppression", "read as ATTENDED" in joined,
+          joined)
+    check("names the cart", "Cart 35" in joined, joined)
+    # The corral carve-out must NOT be reported as an attendance suppression —
+    # that would be the wrong explanation for the right silence.
+    diag2: list[str] = []
+    rules.evaluate_rules(
+        make_bundle([make_track(36, (1000, 200), n)], {36: make_facts(n)}),
+        [CORRAL], diagnostics=diag2)
+    check("a corral cart is not blamed on attendance",
+          "read as ATTENDED" not in " ".join(diag2), str(diag2))
+
+
 def test_unattended_suppressed_in_corral():
     section("Unattended must be suppressed inside a fixture zone (cart corral)")
     n = int(200 * FPS)
@@ -454,6 +554,10 @@ def main():
     test_static_cart()
     test_unattended_cart()
     test_unattended_suppressed_by_nearby_person()
+    test_attendance_bar_scales_with_cart_size()
+    test_attendance_bar_falls_back_without_boxes()
+    test_short_clip_reports_unreachable_thresholds()
+    test_attendance_suppression_is_reported()
     test_unattended_suppressed_in_corral()
     test_incoming_empty()
     test_incoming_full_does_not_fire()

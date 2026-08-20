@@ -30,10 +30,41 @@ engine.zip
 temp/
 tmp/
 
-# Top-level video dumps (recordings, demo outputs, scratch clips)
-/1763*.mp4
-/try.mp4
-/pops_demo_output*.mp4
+# ---------------------------------------------------------------------------
+# Video. No clip belongs in this repo, at any path.
+#
+# Every video here is either a store recording (identifiable people, so it is
+# not ours to publish) or a render the demo produced and can produce again.
+# The pattern is deliberately unanchored: the previous /1763*.mp4 only caught
+# one timestamp prefix at the repo root, and the next batch of exports will not
+# share it.
+# ---------------------------------------------------------------------------
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# The golden-regression clip. tests/test_golden_clip.py LOOKS for a clip here,
+# so without this line the next person to put one where the test tells them to
+# would commit real store CCTV with identifiable people in it. Only the
+# baseline JSON (frame counts, no imagery) belongs in git. Redundant with the
+# blanket video rules above, kept because this directory is the one place a
+# clip is actively invited.
+tests/fixtures/golden/*.mp4
+tests/fixtures/golden/*.avi
+tests/fixtures/golden/*.mov
+
+# ---------------------------------------------------------------------------
+# Run output. tracker.py writes "<input video basename>_tracking.json" next to
+# the working directory (engine/tracker.py:2158), so the name changes with
+# every clip and cannot be listed. These are regenerable, several MB each, and
+# carry the per-frame contents of a real store recording.
+# ---------------------------------------------------------------------------
+*_tracking.json
+outputs/
+runs/
+*.log
 
 # Loose HTML/JS/CSS scratch files at repo root (web/ is the real frontend)
 /*.html
@@ -55,6 +86,26 @@ tmp/
 /test_cli_img.py
 /mobile_sam.pt
 /yolov8n-pose.pt
+
+# ---------------------------------------------------------------------------
+# Model weights.
+#
+# The four weights the demo actually loads STAY IN GIT (via LFS, see
+# .gitattributes) -- a clone that cannot load them cannot run:
+#   weights/detection/weights/best.pt          engine/config.py:14
+#   weights/pose_estimation/yolo26l-pose.pt    engine/config.py:135
+#   weights/cart_quality/weights/best.pt       engine/config.py:485
+#   weights/fill_and_bag_classifier/.../best.pt engine/config.py:486
+#
+# The two below are referenced by nothing in engine/, tests/, api/ or web/ --
+# an older 3-class detector and the nano pose model we did not end up using.
+# 48 MB of LFS bandwidth on every clone for weights no code path opens.
+# ---------------------------------------------------------------------------
+weights/detection_3_class_dillion/
+weights/pose_estimation/yolo26n-pose.pt
+
+# Superseded pip manifest. requirements.txt is the real one; nothing reads this.
+/requirements2.txt
 
 # OS
 .DS_Store

@@ -93,7 +93,8 @@ def _build_header(video_info):
 
 
 def _build_executive_summary(report_data):
-    text = report_data.executive_summary or "<em>VLM analysis not available.</em>"
+    text = (report_data.executive_summary
+            or '<em style="color:#64748b;">VLM analysis not available.</em>')
     return _section("Executive Summary", f'<p style="font-family:{_FONT};line-height:1.6;font-size:0.9rem;color:#1f2937;">{text}</p>', "&#128196;")
 
 
@@ -324,8 +325,8 @@ def _build_pops_analysis(peak_snapshots, pops_data):
         rows += (
             f'<tr style="border-bottom:1px solid #e2e8f0;background:#fff;color:#1f2937;">'
             f'<td style="padding:8px;font-weight:700;color:#1e3a5f;">{cd}</td>'
-            f'<td style="padding:8px;"><span style="color:{score_color};font-weight:800;font-size:1.0rem;">{score}</span></td>'
-            f'<td style="padding:8px;">{_badge(event)}</td>'
+            f'<td style="padding:8px;color:#1f2937;"><span style="color:{score_color};font-weight:800;font-size:1.0rem;">{score}</span></td>'
+            f'<td style="padding:8px;color:#1f2937;">{_badge(event)}</td>'
             f'<td style="padding:8px;color:#1f2937;">{fill}</td>'
             f'<td style="padding:8px;color:#1f2937;">{bag}</td>'
             f'<td style="padding:8px;color:#1f2937;">{direction}</td>'
@@ -335,12 +336,12 @@ def _build_pops_analysis(peak_snapshots, pops_data):
     table = (
         f'<table style="width:100%;border-collapse:collapse;font-family:{_FONT};font-size:0.85rem;background:#fff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">'
         f'<tr style="background:linear-gradient(135deg,#1e3a5f,#2563eb);color:#fff;">'
-        f'<th style="padding:8px;text-align:left;">Cart</th>'
-        f'<th style="padding:8px;text-align:left;">Peak POPS</th>'
-        f'<th style="padding:8px;text-align:left;">Event</th>'
-        f'<th style="padding:8px;text-align:left;">Fill</th>'
-        f'<th style="padding:8px;text-align:left;">Bag</th>'
-        f'<th style="padding:8px;text-align:left;">Direction</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Cart</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Peak POPS</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Event</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Fill</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Bag</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Direction</th>'
         f'</tr>{rows}</table>'
     )
     return _section("POPS Analysis", table, "&#128202;")
@@ -379,10 +380,19 @@ def _build_ops_findings_block(analytics_result):
         getattr(analytics_result, "rule_diagnostics", None))
     notes_block = ""
     if notes:
-        items = "".join(f"<li>{_esc(n)}</li>" for n in notes)
+        # Every colour in this document is inline ON THE ELEMENT, never
+        # inherited: the Gradio tab renders this report inside the app's own
+        # stylesheet, whose dark-theme rules colour bare <li>/<strong>/<th>
+        # directly. A tag that only inherits its colour loses to those rules and
+        # comes out near-white on this cream panel — which is exactly how these
+        # coverage notes went invisible. Inline styles beat any non-!important
+        # rule, so they hold in the tab and in the downloaded file alike.
+        items = "".join(
+            f'<li style="color:#475569;margin-bottom:4px;">{_esc(n)}</li>'
+            for n in notes)
         notes_block = _ops_notice(
             "Coverage notes for this run",
-            f'<ul style="margin:6px 0 0 18px;padding:0;">{items}</ul>',
+            f'<ul style="margin:6px 0 0 18px;padding:0;color:#475569;">{items}</ul>',
             "#a16207", "#fefce8")
 
     if state == "unavailable":
@@ -416,7 +426,7 @@ def _build_ops_findings_block(analytics_result):
 
         rows += (
             f'<tr style="border-bottom:1px solid #e2e8f0;background:#fff;">'
-            f'<td style="padding:8px;"><span style="background:{fg};color:#fff;'
+            f'<td style="padding:8px;color:#1f2937;"><span style="background:{fg};color:#fff;'
             f'padding:2px 8px;border-radius:4px;font-size:0.72rem;'
             f'font-weight:800;letter-spacing:0.04em;">{_esc(sev)}</span></td>'
             f'<td style="padding:8px;font-weight:700;color:#1e3a5f;">'
@@ -436,13 +446,13 @@ def _build_ops_findings_block(analytics_result):
         f'font-size:0.85rem;background:#fff;border:1px solid #e2e8f0;'
         f'border-radius:6px;overflow:hidden;">'
         f'<tr style="background:linear-gradient(135deg,#1e3a5f,#2563eb);color:#fff;">'
-        f'<th style="padding:8px;text-align:left;">Severity</th>'
-        f'<th style="padding:8px;text-align:left;">Issue</th>'
-        f'<th style="padding:8px;text-align:left;">Cart</th>'
-        f'<th style="padding:8px;text-align:left;">Zone</th>'
-        f'<th style="padding:8px;text-align:left;">Start</th>'
-        f'<th style="padding:8px;text-align:left;">Duration</th>'
-        f'<th style="padding:8px;text-align:left;">Why</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Severity</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Issue</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Cart</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Zone</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Start</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Duration</th>'
+        f'<th style="padding:8px;text-align:left;color:#fff;">Why</th>'
         f'</tr>{rows}</table>'
     )
     if remainder > 0:
@@ -483,7 +493,8 @@ def _build_congestion_block(analytics_result):
                 f'<span style="background:{fg};color:#fff;padding:1px 7px;'
                 f'border-radius:4px;font-size:0.7rem;font-weight:800;">'
                 f'{_esc(sev.replace("_", " "))}</span> '
-                f'<strong>{_esc(getattr(s, "zone_name", "?"))}</strong> '
+                f'<strong style="color:#1f2937;">'
+                f'{_esc(getattr(s, "zone_name", "?"))}</strong> '
                 f'- avg dwell {getattr(s, "avg_dwell_s", 0.0):.1f}s, '
                 f'peak occupancy {getattr(s, "peak_occupancy", 0)}'
                 + (f' <span style="color:#64748b;">({reasons})</span>' if reasons else "")
@@ -526,10 +537,10 @@ def _build_congestion_block(analytics_result):
             f'font-family:{_FONT};font-size:0.82rem;background:#fff;'
             f'border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">'
             f'<tr style="background:#f1f5f9;color:#1e3a5f;">'
-            f'<th style="padding:6px 10px;text-align:left;">Zone</th>'
-            f'<th style="padding:6px 10px;text-align:left;">Avg dwell</th>'
-            f'<th style="padding:6px 10px;text-align:left;">p95</th>'
-            f'<th style="padding:6px 10px;text-align:left;">Visits</th>'
+            f'<th style="padding:6px 10px;text-align:left;color:#1e3a5f;">Zone</th>'
+            f'<th style="padding:6px 10px;text-align:left;color:#1e3a5f;">Avg dwell</th>'
+            f'<th style="padding:6px 10px;text-align:left;color:#1e3a5f;">p95</th>'
+            f'<th style="padding:6px 10px;text-align:left;color:#1e3a5f;">Visits</th>'
             f'</tr>{rows}</table>'
         )
     return blocks
@@ -556,7 +567,8 @@ def _build_ops_highlights(analytics_result):
             f'<div style="background:#eff6ff;border:1px solid #bfdbfe;'
             f'border-radius:6px;padding:10px 14px;margin-bottom:12px;'
             f'font-size:0.85rem;color:#1e3a5f;line-height:1.55;">'
-            f'<strong>Auto-insight:</strong> {_esc(insight)}</div>'
+            f'<strong style="color:#1e3a5f;">Auto-insight:</strong> '
+            f'{_esc(insight)}</div>'
         )
 
     body = (
@@ -578,7 +590,7 @@ def _build_insights(report_data):
     def to_list(text):
         lines = [l.strip().lstrip("- ").lstrip("* ") for l in text.strip().split("\n") if l.strip()]
         if not lines:
-            return f"<p>{text}</p>"
+            return f'<p style="color:#1f2937;">{text}</p>'
         items = "".join(f"<li style='margin-bottom:6px;color:#1f2937;'>{l}</li>" for l in lines)
         return f"<ul style='margin:0;padding-left:20px;line-height:1.7;color:#1f2937;'>{items}</ul>"
 
@@ -627,7 +639,8 @@ def _vlm_unavailable_banner(report_data):
     return (
         f'<div style="background:#fff3e0;border-left:5px solid #e65100;padding:12px 16px;'
         f'border-radius:6px;margin-bottom:16px;font-family:{_FONT};font-size:0.85rem;">'
-        f'&#9888; <strong>VLM Analysis Unavailable</strong> - '
+        f'&#9888; <strong style="color:#e65100;">VLM Analysis Unavailable</strong>'
+        f' - '
         f'This is a data-only report. {report_data.error_message or ""}</div>'
     )
 
@@ -670,7 +683,8 @@ def build_case_report_html(report_data, captures, pops_data,
         _build_technical(report_data, video_info),
         (f'<div style="text-align:center;color:#94a3b8;font-size:0.7rem;'
          f'font-family:{_FONT};padding:8px 0;border-top:1px solid #e2e8f0;margin-top:12px;">'
-         f'<strong>GATEKEEPER AI</strong> &bull; POPS Case Report &bull; '
+         f'<strong style="color:#94a3b8;">GATEKEEPER AI</strong> &bull; '
+         f'POPS Case Report &bull; '
          f'Generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>'),
     ]
     body_html = "\n".join(body_parts)

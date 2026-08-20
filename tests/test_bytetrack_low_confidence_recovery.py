@@ -30,8 +30,16 @@ import numpy as np
 # tracker exactly as a real run configures it, not a hand-built variant.
 import engine.tracker  # noqa: F401
 
-from ultralytics.trackers import bot_sort
+from ultralytics.trackers import bot_sort  # noqa: F401  (reloaded by the negative control)
+from ultralytics.trackers.track import TRACKER_MAP
 from ultralytics.trackers.utils import matching
+
+
+def _tracker_cls():
+    """The tracker class a real run actually gets — resolved through
+    ultralytics' registry, exactly as trackers/track.py:on_predict_start does,
+    so these tests follow the fix wherever it is injected."""
+    return TRACKER_MAP["botsort"]
 
 
 #: Index of track_id inside STrack.result -> [x1, y1, x2, y2, track_id, ...]
@@ -93,7 +101,7 @@ def _ids(rows):
 def _run(confidences, args=None):
     """Drive one synthetic object through the tracker, one confidence per
     frame. Returns the list of track IDs reported on each frame."""
-    trk = bot_sort.BOTSORT(args=args or Args(), frame_rate=30)
+    trk = _tracker_cls()(args=args or Args(), frame_rate=30)
     seen = []
     for step, conf in enumerate(confidences):
         rows = trk.update(_one_box(step, conf))
@@ -174,7 +182,7 @@ def test_fuse_score_still_applies_to_the_first_association():
     """The fix must not be 'turn fusion off everywhere'. Score fusion in the
     FIRST association is what the thresholds in botsort_retail.yaml were tuned
     against; dropping it cost 197 of 351 linked frames when measured."""
-    trk = bot_sort.BOTSORT(args=Args(fuse_score=True), frame_rate=30)
+    trk = _tracker_cls()(args=Args(fuse_score=True), frame_rate=30)
     trk.update(_one_box(0, 0.9))        # one confident track to match against
 
     seen = {}
@@ -200,7 +208,7 @@ def test_fuse_score_never_applies_to_the_second_association():
     """The exact regression, asserted directly: whatever runs for the low pool
     must not multiply cost by detection score, because that pool's scores are
     capped at track_high_thresh and can never clear the 0.5 gate."""
-    trk = bot_sort.BOTSORT(args=Args(fuse_score=True), frame_rate=30)
+    trk = _tracker_cls()(args=Args(fuse_score=True), frame_rate=30)
     for step in range(6):
         trk.update(_one_box(step, 0.9))
 
@@ -228,7 +236,7 @@ def test_fuse_score_never_applies_to_the_second_association():
 def test_yaml_can_still_turn_fusion_off_entirely():
     """A deliberate `fuse_score: false` must still mean no fusion anywhere.
     The fix restores upstream's old split; it must not take the switch away."""
-    trk = bot_sort.BOTSORT(args=Args(fuse_score=False), frame_rate=30)
+    trk = _tracker_cls()(args=Args(fuse_score=False), frame_rate=30)
     trk.update(_one_box(0, 0.9))
 
     called = []
@@ -252,14 +260,30 @@ def test_two_trackers_sharing_one_config_both_behave():
     A fix that mutates that shared object must not leave the second tracker
     behaving differently from the first."""
     shared = Args(fuse_score=True)
-    a = bot_sort.BOTSORT(args=shared, frame_rate=30)
-    b = bot_sort.BOTSORT(args=shared, frame_rate=30)
+    cls = _tracker_cls()
+    a = cls(args=shared, frame_rate=30)
+    b = cls(args=shared, frame_rate=30)
     seen_a, seen_b = [], []
     for step, conf in enumerate([0.9] * 6 + [0.2] * 4):
         seen_a.append(_ids(a.update(_one_box(step, conf))))
         seen_b.append(_ids(b.update(_one_box(step, conf))))
     assert seen_a[-1], f"first tracker lost the track: {seen_a}"
     assert seen_b[-1], f"second tracker lost the track: {seen_b}"
+
+
+def test_plain_bytetrack_gets_the_same_guarantee():
+    """botsort_retail.yaml selects botsort, so the bytetrack path is not what
+    this project runs — but the registry patches both, and a fix that only
+    half-applied would be a trap for whoever switches tracker_type later."""
+    trk = TRACKER_MAP["bytetrack"](args=Args(tracker_type="bytetrack"), frame_rate=30)
+    seen = []
+    for step, conf in enumerate([0.9] * 6 + [0.2] * 4):
+        rows = trk.update(_one_box(step, conf))
+        seen.append(_ids(rows) if len(rows) else [])
+    assert seen[5], "track never activated on confident detections"
+    assert seen[-1] == seen[5], (
+        f"plain ByteTrack lost the track across the low-confidence dip: {seen}"
+    )
 
 
 if __name__ == "__main__":

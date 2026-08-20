@@ -32,7 +32,8 @@ from .config import (
     RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
     RULE_STATIC_POS_SPREAD_PX, RULE_STATIC_WINDOW_S,
     RULE_DOOR_OVERLAP_FRAC,
-    RULE_ATTENDED_RADIUS_PX, RULE_TIME_GRID_HZ, RULE_GRID_STALENESS_S,
+    RULE_ATTENDED_GAP_FRAC, RULE_ATTENDED_MIN_PX, RULE_ATTENDED_RADIUS_PX,
+    RULE_TIME_GRID_HZ, RULE_GRID_STALENESS_S,
     RULE_INTERVAL_MERGE_S, RULE_MAX_SAMPLE_GAP_S, RULE_MIN_SAMPLES,
     RULE_EMPTY_CONFIRM_OBS, RULE_ENTRY_WINDOW_S,
     RULE_DOOR_KINDS, RULE_STATIC_KINDS, RULE_DESIGNATED_AREA_KINDS,
@@ -460,6 +461,29 @@ def _static_in_zone_rule(bundle, zones, kinds, threshold_s, rule_id,
     return findings
 
 
+def _attendance_bar(rec) -> np.ndarray:
+    """Per-sample distance at which a person counts as attending this cart.
+
+    `RULE_ATTENDED_GAP_FRAC * cart_box_diagonal`, floored at
+    RULE_ATTENDED_MIN_PX. Scaling by the cart's own apparent size is the
+    cheapest available proxy for depth: the same pixel count is arm's reach at
+    the front of frame and half the room at the far door, so a flat radius
+    answers "is anyone near this cart" differently depending only on where the
+    cart happens to be standing.
+
+    Falls back to the flat RULE_ATTENDED_RADIUS_PX for a track with no recorded
+    boxes. Defensive only — every cart track in the trajectory cache carries
+    them — but a silent bar of zero would mark every such cart unattended.
+    """
+    n = rec.n_samples
+    if not rec.has_bboxes:
+        return np.full(n, float(RULE_ATTENDED_RADIUS_PX), dtype=np.float32)
+    bb = rec.bboxes
+    diag = np.hypot(bb[:, 2] - bb[:, 0], bb[:, 3] - bb[:, 1])
+    return np.maximum(RULE_ATTENDED_GAP_FRAC * diag,
+                      RULE_ATTENDED_MIN_PX).astype(np.float32)
+
+
 def _abandoned_cart_rule(bundle, zones, eov_t, degraded,
                          threshold_s=RULE_ABANDONED_CART_S, stats=None):
     """Cart stationary with nobody nearby, outside any designated cart area.
@@ -481,8 +505,13 @@ def _abandoned_cart_rule(bundle, zones, eov_t, degraded,
         if not still.any():
             continue
 
-        # Nobody within RULE_ATTENDED_RADIUS_PX, evaluated on the shared grid
-        # then mapped back onto this cart's own samples.
+        # Nobody within the attendance bar, evaluated on the shared grid then
+        # mapped back onto this cart's own samples. The bar scales with the
+        # CART'S OWN apparent size rather than being a flat pixel count, because
+        # a pixel count means a different floor distance at every depth — see
+        # RULE_ATTENDED_GAP_FRAC for the clip that documents it.
+        near = np.full(rec.n_samples, np.inf, dtype=np.float32)
+        bar = _attendance_bar(rec)
         if grid_t.size and ppos.shape[1]:
             gi = join_on_time(grid_t, rec.timestamps, 1.0 / max(RULE_TIME_GRID_HZ, 1e-6) * 2)
             unattended = np.ones(rec.n_samples, dtype=bool)
@@ -491,19 +520,33 @@ def _abandoned_cart_rule(bundle, zones, eov_t, degraded,
                 d = np.linalg.norm(
                     ppos[gi[ok]] - rec.positions[ok][:, None, :], axis=2)
                 with np.errstate(invalid="ignore"):
-                    near = np.nanmin(np.where(np.isnan(d), np.inf, d), axis=1)
-                unattended[ok] = near > RULE_ATTENDED_RADIUS_PX
+                    near[ok] = np.nanmin(np.where(np.isnan(d), np.inf, d), axis=1)
+                unattended[ok] = near[ok] > bar[ok]
         else:
             unattended = np.ones(rec.n_samples, dtype=bool)
 
-        cond = still & unattended
         # Carts parked in a corral / bay are where carts belong.
+        outside_corral = np.ones(rec.n_samples, dtype=bool)
         ex = exempt.get(raw)
         if ex is not None and ex.size:
-            cond &= ~ex.any(axis=1)
+            outside_corral = ~ex.any(axis=1)
+        cond = still & unattended & outside_corral
 
-        for s, e, t0, t1, reasons in _merge_and_qualify(
-                cond, rec.timestamps, threshold_s, stats):
+        # Diagnostic, not a rule: a cart that was still long enough on its own
+        # but lost the interval to the ATTENDANCE test specifically. That
+        # distinction is invisible in the output — every reason for not firing
+        # looks the same from outside — and it is the question asked every time
+        # someone re-checks why a parked cart was not flagged, so it is counted
+        # rather than re-derived by hand. The corral carve-out is held in the
+        # baseline so a cart sitting where carts belong is not reported as an
+        # attendance suppression, which would be the wrong explanation.
+        qualified = _merge_and_qualify(cond, rec.timestamps, threshold_s, stats)
+        if not qualified and stats is not None:
+            if _merge_and_qualify(still & outside_corral, rec.timestamps,
+                                  threshold_s, None):
+                stats.setdefault("suppressed_attended", []).append(int(rec.display_id))
+
+        for s, e, t0, t1, reasons in qualified:
             corroborated = False
             samples = bundle.cart_facts.get(int(rec.display_id)) or []
             if samples:
@@ -519,7 +562,16 @@ def _abandoned_cart_rule(bundle, zones, eov_t, degraded,
                 ongoing=bool(e >= rec.n_samples and abs(t1 - eov_t) < 1.0),
                 degraded=degraded,
                 evidence={"linker_corroborated": corroborated,
-                          "attended_radius_px": RULE_ATTENDED_RADIUS_PX},
+                          # The bar this cart was actually judged against, and
+                          # how close anyone got. Reported per finding because
+                          # the bar is now per-cart, so quoting the constant
+                          # would no longer describe the decision.
+                          "attended_bar_px": round(float(np.median(bar[s:e])), 1),
+                          "nearest_person_px": (
+                              round(float(np.min(near[s:e])), 1)
+                              if np.isfinite(near[s:e]).any() else None),
+                          "attended_basis": ("cart_diagonal_fraction"
+                                             if rec.has_bboxes else "flat_radius")},
             ))
     return findings
 
@@ -636,9 +688,13 @@ def evaluate_rules(bundle: TrajectoryBundle,
     degraded = bool(getattr(bundle, "timestamps_synthesized", False))
 
     eov_t = 0.0
+    sov_t = None
     for rec in bundle.tracks.values():
         if rec.n_samples:
             eov_t = max(eov_t, float(rec.timestamps[-1]))
+            first = float(rec.timestamps[0])
+            sov_t = first if sov_t is None else min(sov_t, first)
+    observed_s = max(0.0, eov_t - (sov_t or 0.0))
 
     findings: list[RuleFinding] = []
     stats: dict = {}
@@ -679,6 +735,37 @@ def evaluate_rules(bundle: TrajectoryBundle,
         notes.append("CAP_PROP_POS_MSEC was unusable for this video, so timing "
                      "was derived from the frame index and frame rate. "
                      "Durations are approximate.")
+    # Durations are compared against the clip, not against an assumed length:
+    # the clips this runs on vary, and a threshold longer than the footage can
+    # never be met by any cart. _merge_and_qualify drops those intervals on
+    # `dur < threshold_s` and ongoing_at_eov is only set AFTER that gate, so a
+    # clip that ends mid-interval gets no partial credit either. Silence from a
+    # rule that could not possibly fire reads as "nothing happened", which is
+    # the wrong answer rather than a missing one.
+    unreachable = [(RULE_LABELS[rid], th[key]) for rid, key in
+                   (("blocked_door", "blocked_door_s"),
+                    ("static_cart", "static_cart_s"),
+                    ("abandoned_cart", "abandoned_cart_s"))
+                   if th[key] > observed_s]
+    if unreachable and observed_s > 0:
+        detail = ", ".join(f"{name} ({thr:g}s)" for name, thr in unreachable)
+        notes.append(
+            f"This clip is only {observed_s:.1f}s of observed time, shorter "
+            f"than the threshold for: {detail}. Those rules cannot fire at any "
+            f"cart's behaviour - lower the thresholds in the sidebar and "
+            f"Recompute analytics (no GPU work) to evaluate them on a clip "
+            f"this short.")
+
+    attended = stats.get("suppressed_attended") or []
+    if attended:
+        ids = ", ".join(f"Cart {c}" for c in sorted(set(attended)))
+        notes.append(
+            f"{ids} stood still long enough to cross the unattended-cart "
+            f"threshold but read as ATTENDED - somebody was within "
+            f"{RULE_ATTENDED_GAP_FRAC:g}x the cart's own box diagonal for "
+            f"enough of the time to break the interval up. Not a duration "
+            f"problem, so lowering the threshold will not surface it.")
+
     n_sup = int(stats.get("suppressed_sparse", 0))
     if n_sup:
         notes.append(

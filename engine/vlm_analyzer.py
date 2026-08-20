@@ -16,6 +16,7 @@ from io import BytesIO
 
 from PIL import Image
 
+from .cancellation import RunCancelled
 from .config import (
     MOONDREAM2_MODEL_ID, QWEN3_VL_MODEL_ID, INTERNVL2_MODEL_ID,
     VLM_MAX_TOKENS_PER_FRAME, VLM_MAX_TOKENS_SUMMARY,
@@ -447,10 +448,17 @@ class VLMAnalyzer:
     """Multi-backend VLM analyzer for POPS case reports."""
 
     def __init__(self, backend: str = "Claude (API)",
-                 api_key: str = "", device: str = "cuda"):
+                 api_key: str = "", device: str = "cuda",
+                 should_cancel=None):
         self._backend = backend
         self._api_key = api_key
         self._device = device
+        #: Polled between model calls, and per generated token on the local
+        #: backends. A plain callable rather than the engine's cancel token: the
+        #: analyzer has no business knowing about run sequences, and this is the
+        #: shape a transformers StoppingCriteria wants. Defaults to "never
+        #: cancelled" so every existing caller keeps working unchanged.
+        self._should_cancel = should_cancel or (lambda: False)
         self._local_model = None
         self._local_processor = None
         self._local_tokenizer = None
@@ -497,6 +505,14 @@ class VLMAnalyzer:
 
             result.vlm_available = True
 
+        except RunCancelled:
+            # Deliberately NOT folded into the result. Every other failure here
+            # becomes an inline "the VLM could not run" report, which is right —
+            # a case report is worth degrading rather than losing. A cancel is
+            # not a failure: the user asked for the work to stop, so it has to
+            # reach the caller and clear the panel instead of rendering as an
+            # error nobody caused.
+            raise
         except Exception as e:
             traceback.print_exc()
             result.vlm_available = False
@@ -613,6 +629,15 @@ class VLMAnalyzer:
     # Dispatch
     # ------------------------------------------------------------------
     def _call_vlm(self, image_bytes, prompt, max_tokens):
+        # The one chokepoint every backend and every call goes through — the
+        # per-frame descriptions and the final summary alike — so one check here
+        # covers all of them, including the Claude API path where an in-flight
+        # HTTPS request cannot be interrupted at all. Granularity is therefore
+        # "one model call": a cancel lands between frames rather than mid-frame,
+        # except on the local backends, which also stop per token (see
+        # _cancel_criteria).
+        if self._should_cancel():
+            raise RunCancelled("cancelled before a VLM call")
         if "Claude" in self._backend:
             return self._call_claude(image_bytes, prompt, max_tokens)
         elif "Moondream" in self._backend:
@@ -727,6 +752,23 @@ class VLMAnalyzer:
         self._local_model.eval()
         print("[VLM] Moondream2 loaded.")
 
+    def _cancel_criteria(self):
+        """A transformers StoppingCriteriaList that ends generation when the
+        run is cancelled, or None when there is nothing to cancel.
+
+        Imported here rather than at module scope: transformers is a heavy
+        import and the Claude API backend never needs it.
+        """
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        should_cancel = self._should_cancel
+
+        class _Cancelled(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):
+                return should_cancel()
+
+        return StoppingCriteriaList([_Cancelled()])
+
     def _call_moondream(self, image_bytes, prompt, max_tokens):
         self._load_moondream()
         if image_bytes:
@@ -796,7 +838,17 @@ class VLMAnalyzer:
                 repetition_penalty=1.15,
                 no_repeat_ngram_size=4,
                 pad_token_id=self._local_processor.tokenizer.eos_token_id,
+                # Cancellation, checked per generated token. Without it a Cancel
+                # pressed during a summary pass waits out up to
+                # VLM_MAX_TOKENS_SUMMARY tokens on a 2B model — tens of seconds
+                # — because generate() is one uninterruptible call.
+                stopping_criteria=self._cancel_criteria(),
             )
+        if self._should_cancel():
+            # The criteria stopped generation, so `out` is a truncated
+            # half-sentence. Raising rather than returning it keeps a cancelled
+            # report from being parsed and rendered as a real finding.
+            raise RunCancelled("cancelled mid-generation")
         return self._local_processor.batch_decode(
             out[:, inputs.input_ids.shape[1]:],
             skip_special_tokens=True)[0]

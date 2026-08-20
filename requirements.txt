@@ -1,3 +1,29 @@
+# ---------------------------------------------------------------------------
+# PINNED ON PURPOSE — these three decide what the tracker actually does.
+#
+# ultralytics, numpy and opencv-python were unpinned (ultralytics was not
+# listed at all), so every install resolved whatever was newest that day. That
+# is how the conda `all` env and venv_gk-pops-enhanced drifted onto ultralytics
+# 8.4.19 vs 8.4.40 and produced materially different POPS output from the same
+# video — see engine/ultralytics_compat.py for what changed between them.
+#
+# The compat shim makes those two versions agree again, and
+# tests/test_bytetrack_low_confidence_recovery.py fails loudly if a future
+# version breaks the same guarantee. Pinning is the other half: it stops the
+# drift happening silently in the first place. Raise a pin deliberately, then
+# re-run tests/ before committing the bump.
+#
+# torch/torchvision are NOT pinned here on purpose: the CUDA builds come from
+# https://download.pytorch.org/whl/cu128, which needs an --index-url that a
+# plain `pip install -r requirements.txt` does not pass. Those pins live in
+# create_virtual_env.py, which installs them before this file.
+#
+# Note this file is a generated kitchen-sink dump and is NOT installable as-is
+# anyway — it carries pre-existing lines like `torchaudio==2.6.0+cu124` and
+# `torch_tpu==0.0.0` that plain PyPI cannot resolve. create_virtual_env.py is
+# the supported path. The three pins above are the ones that matter for output
+# reproducibility; the rest of the file was not audited.
+# ---------------------------------------------------------------------------
 a2wsgi==1.10.10
 adbc_driver_manager==1.11.0
 adbc_driver_postgresql==1.11.0
@@ -148,9 +174,11 @@ nltk==3.9.4
 nncf==3.1.0
 num2words==0.5.14
 numexpr==2.14.1
+numpy==1.26.4
 objgraph==3.6.2
 odfpy==1.4.1
 olefile==0.47
+opencv-python==4.11.0.86
 onnx2tf==2.4.0
 onnx_graphsurgeon==0.6.1
 onnx_ir==0.2.1
@@ -304,6 +332,7 @@ transformers_js_py==0.19.10
 tritonclient==2.68.0
 trove_classifiers==2026.4.28.13
 twine==6.2.0
+ultralytics==8.4.40
 ufoLib2==0.18.1
 uharfbuzz==0.54.0
 ujson==5.12.0

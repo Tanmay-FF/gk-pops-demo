@@ -63,6 +63,11 @@ VLM_DEFAULT_BACKEND = "Qwen3-VL-2B (local)"
 FRAME_CAPTURE_POPS_MEDIUM = 30
 FRAME_CAPTURE_POPS_HIGH   = 70
 FRAME_CAPTURE_MAX         = 8
+#: How many deferred case-report payloads may sit unconsumed before the oldest
+#: is dropped. One finalize event is chained per run, so the queue normally
+#: holds one; it only grows if a chained event never fires (a browser reload
+#: mid-run), and each entry pins a full JSON document plus captured frames.
+PENDING_CASE_REPORTS_MAX  = 3
 MOONDREAM2_MODEL_ID  = "vikhyatk/moondream2"
 QWEN3_VL_MODEL_ID   = "Qwen/Qwen3-VL-2B-Instruct"
 INTERNVL2_MODEL_ID   = "OpenGVLab/InternVL2-2B"
@@ -141,13 +146,134 @@ LINK_CONTESTED_FRAMES = 20    # frames to wait when multiple candidates overlap 
 LINK_GRACE_FRAMES   = 15      # wait N frames before linking a new cart
 LINK_CANDIDATE_PATIENCE = 4   # frames a candidate survives being outscored before replaced
 LINK_DRIFT_FRAMES   = 6       # if linked person IoU < 0.05 with cart for N frames, release link
+
+#: IoU below which a person counts as not engaged with a cart. Used by the
+#: linker's drift/takeover rule and by the tracker's abandonment test, which have
+#: to agree: "someone is with this cart" and "this cart is unattended" are the
+#: same question, and answering it with two different numbers would let a cart be
+#: both taken over and abandoned in the same frame.
+LINK_DRIFT_IOU = 0.05
 STALE_CART_FRAMES   = 30      # purge link after cart absent this many frames
+
+#: Minimum IoU for a person to be considered a candidate owner at all. Only
+#: rejects grazing contact — a foreground body clipping the corner of a
+#: background cart's box scored 0.05 and won a link on the 1764099569430 clip.
+#: Deliberately NOT raised to 0.10: that cart's REAL handler dipped to 0.098, so
+#: a 0.10 bar sits on top of the signal. The discrimination is done by
+#: LINK_GROUND_BAND below, not by IoU.
+LINK_MIN_IOU = 0.02
+
+#: Ground-plane sanity for candidate owners, as a multiple of the CART's own
+#: bbox height:
+#:
+#:     foot_ratio = (person_y2 - cart_y2) / cart_height
+#:
+#: Positive means the person's feet land in front of the cart's base — nearer the
+#: camera. A person standing with a cart shares its ground plane, so the ratio
+#: stays small; a body in the extreme foreground that merely overlaps a distant
+#: cart in 2D does not.
+#:
+#: Compared against the MEAN over a candidate's whole window, never per frame.
+#: Per-frame the pusher is legitimately nearer the camera than their own cart
+#: whenever the cart is being pushed away from it: on the primary golden clip the
+#: correct P1->C1 link exceeds this bar on 39% of its frames while averaging
+#: +0.19. Measured with tests/sweep_link_geometry.py over every link both golden
+#: clips make, the mean separates cleanly — worst legitimate +0.36, best mislink
+#: +0.64 — and 0.45 sits in that gap at 0.80x the worst legitimate reading and
+#: 1.42x the best mislink.
+LINK_GROUND_BAND = 0.45
+
+#: The other end of the same test: a mean below this means the person's box ends
+#: above the CART'S TOP across the whole window, i.e. they are behind it in depth.
+#: Weaker than the foreground bound — the legitimate P2->C1 pair on the primary
+#: clip means -0.87, only 1.15x clear — so it exists to catch the gross case, and
+#: a candidate near it should be treated as unproven rather than wrong.
+LINK_BEHIND_BAND = -1.0
+
+#: How far a cart's centroid must have wandered — measured as the diagonal of
+#: the box its positions have swept, not net displacement — before it counts as
+#: having MOVED. Below this it is parked: store furniture, a staging corral, a
+#: cart nobody has touched.
+#:
+#: 12px matches RULE_STATIC_POS_SPREAD_PX, which answers the same question for
+#: the rule engine. Named separately because the two are free to be retuned
+#: apart: this one gates linking, that one gates dwell reporting.
+LINK_STATIC_SPREAD_PX = 12.0
+
+#: Frames of observation before "it has not moved" is allowed to mean anything.
+#:
+#: A cart that has only just appeared has not moved either, and treating that as
+#: parked would apply the parked-cart rules to every cart in its first second —
+#: including a shopper pulling one out of the corral, whose cart is genuinely
+#: motionless right up to the moment they take it. 40 frames is 2s at 20fps.
+#:
+#: Read from the point the measurement window opens (first sighting, or the frame
+#: the cart's current link was established), not from the cart's first frame.
+LINK_STATIC_MIN_FRAMES = 40
+
+#: IoU a person must reach before a PARKED cart's co-movement exemption applies
+#: to them.
+#:
+#: are_co_moving(static_a_ok=True) exists so that "cart standing still, person
+#: moving around it" reads as loading or unloading rather than as evidence
+#: against ownership. That case is a person AT the cart: on the 1764099569430
+#: clip the handler it was written for held IoU 0.24-0.42. Granting the same
+#: exemption to grazing contact is what let a shopper walking past a parked cart
+#: on the 1764200318790 clip take ownership of it with 6 frames of corner overlap
+#: at IoU 0.039-0.064 — and, the cart never having moved since, keep it for the
+#: remaining 279 frames of the run.
+#:
+#: Below this bar a moving person and a parked cart are simply not co-moving, and
+#: the candidate is rejected as it was before the exemption existed. Both-static
+#: is a separate branch of are_co_moving() and is unaffected: a person standing
+#: at a parked cart still accumulates, and LINK_STATIC_MIN_FRAMES/
+#: LINK_STATIC_SPREAD_PX raise their bar to LINK_CONTESTED_FRAMES instead.
+LINK_STATIC_MIN_IOU = 0.15
+
 ABANDON_FRAMES      = 30      # person gone N frames → abandonment
-WALKAWAY_DIST_THRESH = 200    # px — if linked person is farther than this from cart, treat as abandoned
+
+#: How far the owner has to be from their cart before the walkaway branch of
+#: abandonment starts counting, measured as the shortest distance between the
+#: two BOUNDING BOXES (zero when they touch or overlap) as a fraction of the
+#: cart box's diagonal.
+#:
+#: This replaced a flat `WALKAWAY_DIST_THRESH = 200` px measured centroid to
+#: centroid, which called a cart abandoned while its owner was standing against
+#: it. On the 1764173272870 static-cart clip Cart 1 was scored 65 ABANDONED CART
+#: with Person 4 in contact with the cart for the whole run: the two boxes
+#: touched (edge gap 0.0 px, IoU 0.035) but the cart is large and seen from
+#: above, so their centroids sat 232 px apart — past the 200 px bar on every
+#: frame. Two properties of a centroid distance caused that and neither is
+#: fixable by moving the bar: it grows with the size of the box, so a big cart
+#: reads as "far" from anyone standing beside it rather than in front of it, and
+#: it is an absolute pixel count, so the same physical distance means different
+#: things at the top and bottom of a perspective view.
+#:
+#: An edge gap is zero for anyone in contact with the cart at any cart size, and
+#: dividing by the cart's own diagonal makes the bar scale with the cart's
+#: apparent size, which is the cheapest available proxy for depth.
+WALKAWAY_GAP_FRAC   = 0.5     # gap > this * cart box diagonal → owner has walked away
+
+#: Floor under the bar above, in pixels, so a cart detected small at the far end
+#: of the view cannot trip the counter on a gap of a few pixels — which at that
+#: scale is a detection jitter, not a person leaving.
+WALKAWAY_MIN_GAP_PX = 40
 
 # Re-identification
 REID_DIST_THRESH     = 200    # max pixel distance for cart re-ID
 REID_MAX_GONE_FRAMES = 15     # max frames a cart can be gone and still re-ID
+
+# Nested duplicate detections
+# The detector emits a tight box and a loose box for the same cart. IoU-based
+# NMS cannot suppress that pair: nested boxes measured IoU 0.32-0.51 against the
+# 0.7 gate, while their containment (intersection / smaller area) was 0.96-1.00.
+# One physical cart therefore became Cart 1 AND Cart 3, scored twice. Boxes at
+# or above this containment, of the SAME class, are collapsed to the most
+# confident one before the tracker sees them. See engine/detection_dedup.py.
+#
+# Raise it toward 1.0 if two carts queueing nose-to-tail ever get merged; the
+# duplicate pair this exists for sits at 0.96+, so there is little room below.
+NESTED_DUP_CONTAIN_MIN = 0.90
 
 # Motion thresholds (px/s)
 SPEED_STATIC  = 10
@@ -212,6 +338,43 @@ RULE_DOOR_OVERLAP_FRAC       = 0.15    # (cart bbox ∩ door polygon) / bbox are
 
 # Attendance (abandoned-cart rule). Per-track samples have their own
 # timestamps, so "was anyone near this cart at time t" needs a shared time grid.
+#
+#: How close a person has to be for the cart to read as ATTENDED, measured
+#: centroid to centroid as a fraction of the cart box's diagonal.
+#:
+#: This replaced a flat RULE_ATTENDED_RADIUS_PX = 220 px. A pixel count means a
+#: different floor distance at every depth: across the trajectory cache the
+#: median cart box diagonal is ~237 px (p10 120, p90 316), so 220 px is roughly
+#: arm's reach for a cart at the front of frame and most of the room for one at
+#: the far door. On the 1764197283870 static-cart clip that is what kept Cart 2
+#: silent — parked alone in the entrance vestibule for the whole clip, box
+#: diagonal 202 px, with the nearest person's centroid a median 156 px away, so
+#: 76% of its samples read as attended and the longest unattended window was
+#: 3.5s. Scaling by the cart's own apparent size is the same depth proxy
+#: WALKAWAY_GAP_FRAC uses, and it leaves a large near cart at roughly the old
+#: behaviour (implied bar p90 221 px) while tightening small far ones (p10 84).
+#:
+#: NOT the same quantity as WALKAWAY_GAP_FRAC, which scales an EDGE GAP — the
+#: fractions are not interchangeable. An edge gap was measured here and is
+#: strictly worse for this camera: it looks down the entry lane, so a cart's box
+#: touches or overlaps everyone who walks past it (Cart 2's median edge gap to
+#: the nearest person is 15 px against a 101 px bar), which collapses its
+#: longest window to 0.6s. Box contact in image space is not floor proximity
+#: when the view is along the traffic direction, so this rule keeps centroid
+#: distance where the linker's walkaway test needs edge gap. Both are
+#: image-space proxies; a ground-plane homography is the principled answer and
+#: is out of scope for a single-video demo.
+#:
+#: 0.7 is calibrated, not derived: Cart 2's 202 px diagonal puts the bar at
+#: 141 px, and the cart falls back under the bar at 1.0. One calibration point,
+#: narrow working range — re-measure before trusting it on a new camera.
+RULE_ATTENDED_GAP_FRAC       = 0.7
+#: Floor under the bar above, in pixels. A guard against a degenerate box, not
+#: a tuned value — it does not engage anywhere in the current cache, where the
+#: smallest cart diagonal at p10 is 120 px.
+RULE_ATTENDED_MIN_PX         = 60.0
+#: Fallback for a track with no recorded boxes (TrackRecord.has_bboxes False).
+#: Defensive only: boxes are present on every cart track in the cache.
 RULE_ATTENDED_RADIUS_PX      = 220.0
 RULE_TIME_GRID_HZ            = 2.0
 RULE_GRID_STALENESS_S        = 1.5     # a person seen longer ago than this is not "present"
@@ -262,6 +425,25 @@ CROWD_CLUSTER_BACKED_UP        = (6, 8.0)
 COMOVEMENT_MIN_POSITIONS = 4
 COMOVEMENT_WINDOW        = 6
 COMOVEMENT_STATIC_PX     = 5
+
+#: Displacement a track already judged STATIC has to exceed before it counts as
+#: moving. Together with COMOVEMENT_STATIC_PX this makes the static/moving call
+#: a latch rather than a bare threshold: static below 5 px, moving above 7.5,
+#: and inside the band a track keeps whatever it was.
+#:
+#: Without the band a single frame decided a link. On
+#: 1764099569430_B8A44F3CB0B9-medium-OUTSIDE.mp4 Cart 21 hovered at 2-4 px of
+#: window displacement and touched the bar once, at frame 162, measuring
+#: 5.001559 px under one torch/CUDA build and 4.999244 px under another - the
+#: same footage, the same track, the same detections to within 0.005 px. Above
+#: the bar the cart reads "moving" against a static person, which is the
+#: bystander branch of are_co_moving(), so that frame contributed no evidence;
+#: the candidate then reached 19 frames against the contested bar of 20, ran
+#: into a barren gap, and lost 19 frames of accumulated evidence to
+#: LINK_CANDIDATE_PATIENCE. The link landed 14 frames late and the two builds
+#: disagreed on 14 frames of output. Nothing about that was version-specific:
+#: any run-to-run float wobble can straddle a bar a track is sitting on.
+COMOVEMENT_STATIC_EXIT_PX = 7.5
 COMOVEMENT_COS_THRESH    = 0.3
 
 # Direction
@@ -282,6 +464,18 @@ DIRECTION_MIN_DY         = 20
 # for a sparsely detected one. Same index-as-time confusion the rule engine's
 # timestamp handling exists to avoid.
 DIRECTION_WINDOW_S       = 4.0
+
+# Consecutive frames a cart must resolve OUTBOUND before its heading is LATCHED
+# and held through the UNKNOWN frames that follow. See motion.DirectionLatch:
+# a cart that reaches the door and stops loses its heading as soon as the
+# DIRECTION_WINDOW_S window empties of the approach, and the UNKNOWN branch of
+# compute_pops() then caps an abandoned loaded cart at 65 instead of 75.
+#
+# ~1s at the 19-20 fps these clips run at. Not a formality: DIRECTION_MIN_DY is
+# 20px, so one twitch of the trailing window can resolve OUTBOUND on a cart
+# parked inside the store, and latching that would promote a shopper who parks
+# at a shelf and steps away from ABANDONED CART to PUSHOUT ALERT.
+DIRECTION_LATCH_FRAMES   = 20
 
 # ---------------------------------------------------------------------------
 # Fixed classifier weights

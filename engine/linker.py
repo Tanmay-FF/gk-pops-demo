@@ -10,8 +10,11 @@ import math
 from .config import (
     LINK_CONFIRM_FRAMES, LINK_CONTESTED_FRAMES, LINK_GRACE_FRAMES,
     LINK_DRIFT_FRAMES, STALE_CART_FRAMES, REID_DIST_THRESH, REID_MAX_GONE_FRAMES,
+    LINK_CANDIDATE_PATIENCE, LINK_MIN_IOU, LINK_GROUND_BAND, LINK_BEHIND_BAND,
+    LINK_DRIFT_IOU, LINK_STATIC_SPREAD_PX, LINK_STATIC_MIN_FRAMES,
+    LINK_STATIC_MIN_IOU,
 )
-from .motion import are_co_moving
+from .motion import are_co_moving, StaticLatch
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +33,34 @@ def _iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def foot_ratio(person_bbox, cart_bbox) -> float:
+    """How far a person's feet fall in front of a cart's base, in cart heights.
+
+    Positive: the person's box ends BELOW the cart's — nearer the camera.
+    Negative: above it — further away, or their legs are hidden by the cart.
+
+    Scaled by the cart's own bbox height so the number means the same thing at
+    the door and at the back of the frame, which raw pixels do not.
+
+    This is the measure that distinguishes an owner from a body that merely
+    overlaps a cart in a scene with depth. IoU cannot: on the 1764099569430
+    clip a person in the extreme foreground overlapped a cart 6 m behind them at
+    IoU 0.05 and held the link for 41 frames, while the cart's real handler
+    overlapped it at 0.098. Their foot ratios were +0.64 and +0.04.
+
+    Read the MEAN over a window, not one frame — see LINK_GROUND_BAND.
+    """
+    height = cart_bbox[3] - cart_bbox[1]
+    if height <= 0:
+        return 0.0
+    return (person_bbox[3] - cart_bbox[3]) / height
+
+
+def _shares_ground_plane(mean_ratio: float) -> bool:
+    """Is a candidate's mean foot ratio consistent with owning the cart?"""
+    return LINK_BEHIND_BAND <= mean_ratio <= LINK_GROUND_BAND
+
+
 # ---------------------------------------------------------------------------
 # Linker
 # ---------------------------------------------------------------------------
@@ -38,8 +69,8 @@ class PersonCartLinker:
         "_links", "_link_start_frames", "_link_candidates",
         "_perm_persons", "_perm_carts",
         "_person_for_cart", "_person_raw_for_cart",
-        "_drift_counter", "_get_display_id",
-        "_total_links",
+        "_drift_counter", "_candidate_misses", "_get_display_id",
+        "_total_links", "_pos_extent", "_disowned", "_static_latch",
     )
 
     def __init__(self, get_display_id_fn):
@@ -50,13 +81,41 @@ class PersonCartLinker:
     def reset(self):
         self._links = {}                    # cart_raw -> person_raw
         self._link_start_frames = {}        # cart_raw -> frame_idx
-        self._link_candidates = {}          # cart_raw -> (person_raw, count, miss)
+        # cart_raw -> {person_raw: (cum_iou, frames, foot_ratio_sum)}
+        self._link_candidates = {}
+        # cart_raw -> consecutive frames with no qualifying candidate at all.
+        # The accumulator above used to be discarded on the first such frame,
+        # which meant confirmation needed CONSECUTIVE frames and a busy doorway
+        # could keep a cart ownerless indefinitely.
+        self._candidate_misses = {}
         self._perm_persons = set()          # display IDs
         self._perm_carts = set()            # display IDs
         self._person_for_cart = {}          # cart_disp -> person_disp
         self._person_raw_for_cart = {}      # cart_disp -> person_raw
         self._drift_counter = {}            # cart_raw -> frames with zero overlap
         self._total_links = set()           # unique (person_disp, cart_disp) pairs ever linked
+        # cart_raw -> [window_start_frame, min_x, min_y, max_x, max_y] over the
+        # cart's centroids since the window opened. Folded in incrementally: the
+        # alternative, re-scanning obj_positions every frame, is O(history) per
+        # cart per frame and obj_positions is never trimmed.
+        #
+        # The window opens at first sighting and re-opens when a link is
+        # ESTABLISHED, so the same numbers answer both questions asked of them:
+        # "has this ownerless cart ever moved" and "has this cart moved since the
+        # person who supposedly owns it took it". It deliberately does NOT re-open
+        # on a release — a cart that arrived under its own owner has moved, and a
+        # taker inheriting it should not have to prove that again.
+        self._pos_extent = {}
+        # Cart DISPLAY ids whose link was released this frame because it was
+        # never real — see the parked-cart branch of Step 0.5. Consumed by the
+        # tracker, which also has to forget the remembered owner; a release alone
+        # does not stop abandonment scoring.
+        self._disowned = set()
+        # Hysteresis for the co-movement test's static/moving call, keyed by raw
+        # track id. Held here rather than inside are_co_moving() because the
+        # state belongs to a run: a fresh linker must start with no opinion
+        # about any track. See StaticLatch.
+        self._static_latch = StaticLatch()
 
     # --- Public properties ---
     @property
@@ -86,6 +145,51 @@ class PersonCartLinker:
     @property
     def person_raw_for_cart(self):
         return self._person_raw_for_cart
+
+    @property
+    def disowned_carts(self):
+        """Cart display IDs whose link was released this frame as never-real.
+
+        Valid only until the next update() call, which clears it.
+        """
+        return self._disowned
+
+    # --- Parked-cart measurement ---
+    def _note_position(self, cart_id, positions, frame_idx):
+        """Fold the cart's newest centroid into its extent window."""
+        if not positions:
+            return
+        x, y = positions[-1]
+        ext = self._pos_extent.get(cart_id)
+        if ext is None:
+            self._pos_extent[cart_id] = [frame_idx, x, y, x, y]
+            return
+        if x < ext[1]: ext[1] = x
+        if y < ext[2]: ext[2] = y
+        if x > ext[3]: ext[3] = x
+        if y > ext[4]: ext[4] = y
+
+    def _open_extent_window(self, cart_id, positions, frame_idx):
+        """Restart the extent measurement from this frame."""
+        if not positions:
+            self._pos_extent.pop(cart_id, None)
+            return
+        x, y = positions[-1]
+        self._pos_extent[cart_id] = [frame_idx, x, y, x, y]
+
+    def _is_parked(self, cart_id, frame_idx) -> bool:
+        """Has this cart been watched long enough to say it has not moved?
+
+        Both halves are load-bearing. Extent alone calls every newly appeared
+        cart parked, including the one a shopper is about to pull out of the
+        corral; the frame count alone says nothing about motion.
+        """
+        ext = self._pos_extent.get(cart_id)
+        if ext is None:
+            return False
+        if frame_idx - ext[0] < LINK_STATIC_MIN_FRAMES:
+            return False
+        return math.hypot(ext[3] - ext[1], ext[4] - ext[2]) < LINK_STATIC_SPREAD_PX
 
     # --- Cart re-identification ---
     def try_reidentify_cart(self, new_raw_id, bbox, current_cart_raws,
@@ -126,6 +230,18 @@ class PersonCartLinker:
             self._link_start_frames[new_raw_id] = self._link_start_frames.pop(best_old, 0)
         if best_old in self._link_candidates:
             self._link_candidates[new_raw_id] = self._link_candidates.pop(best_old)
+        # Moves with the accumulator it counts against, or a re-identified cart
+        # keeps candidate evidence while its miss count restarts at zero.
+        if best_old in self._candidate_misses:
+            self._candidate_misses[new_raw_id] = self._candidate_misses.pop(best_old)
+        # Same physical cart, so its movement record is the same record. Losing
+        # it here would restart the window at the re-ID frame and call a cart
+        # that has been rolling around the store parked 40 frames later.
+        if best_old in self._pos_extent:
+            self._pos_extent[new_raw_id] = self._pos_extent.pop(best_old)
+        # The static/moving latch is about the physical cart, not the tracker's
+        # id for it, and it moves with the position history that feeds it.
+        self._static_latch.rename(best_old, new_raw_id)
         # Transfer history
         if best_old in obj_positions:
             obj_positions[new_raw_id] = obj_positions.pop(best_old)
@@ -159,6 +275,12 @@ class PersonCartLinker:
             obj_first_frame: {raw_id: first_frame_idx}
         """
         gdi = self._get_display_id
+        self._disowned = set()
+
+        # Step 0a: Movement record. Folded in before anything reads it, for every
+        # cart in the frame, linked or not.
+        for cart_id in cart_bboxes:
+            self._note_position(cart_id, obj_positions.get(cart_id), frame_idx)
 
         # Step 0: Purge stale links
         stale = [cid for cid in self._links
@@ -167,6 +289,13 @@ class PersonCartLinker:
             cd = gdi('cart', cid)
             self._links.pop(cid, None)
             self._link_start_frames.pop(cid, None)
+            self._link_candidates.pop(cid, None)
+            self._candidate_misses.pop(cid, None)
+            # Gone longer than REID_MAX_GONE_FRAMES, so try_reidentify_cart can
+            # no longer carry this record forward to a new raw id and holding it
+            # only leaks.
+            self._pos_extent.pop(cid, None)
+            self._static_latch.forget(cid)
             pd = self._person_for_cart.pop(cd, None)
             self._person_raw_for_cart.pop(cd, None)
             self._perm_carts.discard(cd)
@@ -178,7 +307,7 @@ class PersonCartLinker:
         # (IoU < 0.05) while someone else is overlapping it.
         # If the linked person has LEFT the frame entirely, that's abandonment
         # — keep the link so POPS abandonment scoring can fire.
-        DRIFT_IOU_THRESH = 0.05
+        DRIFT_IOU_THRESH = LINK_DRIFT_IOU
         for cart_id, cart_bbox in cart_bboxes.items():
             if cart_id not in self._links:
                 self._drift_counter.pop(cart_id, None)
@@ -197,11 +326,23 @@ class PersonCartLinker:
             else:
                 # Person is visible but not overlapping the cart.
                 # Only count as drift if someone ELSE is overlapping (takeover).
-                someone_else = any(
-                    _iou(cart_bbox, ob) >= DRIFT_IOU_THRESH
-                    for op, ob in person_bboxes.items() if op != pid
-                )
-                if someone_else:
+                #
+                # The taker must share the cart's ground plane, on the same test
+                # Step 2 applies to candidates. Bare IoU here accepts exactly the
+                # foreground body the candidate gate rejects, and the release
+                # below then SEEDS it as the next owner — so without this the
+                # gate is bypassed by the code that acts on the release.
+                #
+                # Per-frame rather than a mean, unlike Step 2: a false negative
+                # here only means the link survives another frame, while a false
+                # positive hands the cart to the wrong person.
+                takers = [
+                    op for op, ob in person_bboxes.items()
+                    if op != pid
+                    and _iou(cart_bbox, ob) >= DRIFT_IOU_THRESH
+                    and _shares_ground_plane(foot_ratio(ob, cart_bbox))
+                ]
+                if takers:
                     self._drift_counter[cart_id] = self._drift_counter.get(cart_id, 0) + 1
                     if self._drift_counter[cart_id] >= LINK_DRIFT_FRAMES:
                         cd = gdi('cart', cart_id)
@@ -213,6 +354,58 @@ class PersonCartLinker:
                         self._links.pop(cart_id, None)
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
+                        # Hand the cart to the taker rather than to nobody. The
+                        # release already names the person who IS engaged with
+                        # it, and dropping that on the floor is what left the
+                        # 1764099569430 cart ownerless for 312 frames: Step 2
+                        # then had to rediscover an owner from zero in a doorway
+                        # busy enough to keep resetting the accumulator, and
+                        # never did. An unowned cart cannot be abandoned, so the
+                        # whole abandonment route went with it.
+                        seeded = self._link_candidates.setdefault(cart_id, {})
+                        for op in takers:
+                            ob = person_bboxes[op]
+                            cum, n, fsum = seeded.get(op, (0.0, 0, 0.0))
+                            seeded[op] = (cum + _iou(cart_bbox, ob), n + 1,
+                                          fsum + foot_ratio(ob, cart_bbox))
+                        self._candidate_misses.pop(cart_id, None)
+                elif self._is_parked(cart_id, frame_idx):
+                    # Nobody is taking the cart over, and the cart has not moved
+                    # one bbox-width since this link was established. Whatever
+                    # the overlap that formed it was, it was not a person taking
+                    # possession of a cart: possession shows up as motion, or at
+                    # minimum as continued contact, and there has been neither
+                    # for LINK_STATIC_MIN_FRAMES.
+                    #
+                    # The no-taker case used to be unreleasable, which is how a
+                    # shopper on the 1764200318790 clip who walked past a parked
+                    # cart kept it for 279 frames on 6 frames of corner overlap —
+                    # and then, on leaving the frame, made it an ABANDONED CART
+                    # at 65. Nobody else ever touched that cart, so the takeover
+                    # route could not fire, and drift with no taker did nothing.
+                    #
+                    # Released as never-real rather than handed on: `_disowned`
+                    # tells the tracker to forget the remembered owner too, or
+                    # `_last_owner_raw` keeps answering the abandonment question
+                    # with this person for the rest of the run and the release
+                    # changes no score.
+                    self._drift_counter[cart_id] = self._drift_counter.get(cart_id, 0) + 1
+                    if self._drift_counter[cart_id] >= LINK_DRIFT_FRAMES:
+                        cd = gdi('cart', cart_id)
+                        pd_disp = self._person_for_cart.pop(cd, None)
+                        self._person_raw_for_cart.pop(cd, None)
+                        self._perm_carts.discard(cd)
+                        if pd_disp:
+                            self._perm_persons.discard(pd_disp)
+                        self._links.pop(cart_id, None)
+                        self._link_start_frames.pop(cart_id, None)
+                        self._drift_counter.pop(cart_id, None)
+                        # No seeding: there is no candidate to seed. The cart
+                        # goes back to Step 2, where a parked cart's bar is
+                        # LINK_CONTESTED_FRAMES.
+                        self._link_candidates.pop(cart_id, None)
+                        self._candidate_misses.pop(cart_id, None)
+                        self._disowned.add(cd)
                 else:
                     self._drift_counter.pop(cart_id, None)
 
@@ -224,11 +417,15 @@ class PersonCartLinker:
         PERSON_SWAP_MAX_GONE = 15  # frames — covers ~0.75s at 20fps
         PERSON_SWAP_MIN_IOU  = 0.3 # must overlap old person's last bbox
 
-        claimed = set()
+        # Pre-computed over ALL of _links before the search below, not built as
+        # the search walks. Building it inside the same pass meant a cart whose
+        # owner had left could steal a person still linked to a cart appearing
+        # LATER in _links iteration order — two carts holding one person, and
+        # abandonment never firing for the first, decided by dict order.
+        claimed = {pid for pid in self._links.values() if pid in person_bboxes}
         for cart_id in list(self._links):
             pid = self._links[cart_id]
             if pid in person_bboxes:
-                claimed.add(pid)
                 continue
 
             # Linked person gone — check if it's a tracker swap
@@ -278,7 +475,18 @@ class PersonCartLinker:
         # wins — this ensures the person with the most consistent overlap
         # gets linked, not just whoever appeared first.
         #
-        # _link_candidates: cart_raw -> {person_raw: (cumulative_iou, frame_count)}
+        # Winners are PROPOSED here and assigned after the loop, best match
+        # first. Committing inside the loop gave a contested person to whichever
+        # cart happened to qualify first in dict order, and on the
+        # 1764099569430 clip that decided the whole run: P2 was standing at C1
+        # with mean IoU 0.28/frame, and C3 — a cart receding through the doorway,
+        # mean IoU 0.11/frame — qualified first and took him. C1 was left
+        # ownerless, and an unowned cart can never be scored as abandoned, so the
+        # merchandise-removal route was closed before it started. Nothing in the
+        # per-cart evidence was wrong; the arbitration was.
+        #
+        # _link_candidates: cart_raw -> {person_raw: (cum_iou, frames, foot_sum)}
+        proposals = []          # (mean_iou, cart_raw, person_raw)
         for cart_id, cart_bbox in cart_bboxes.items():
             if cart_id in self._links:
                 continue
@@ -294,34 +502,106 @@ class PersonCartLinker:
                 if gdi('person', pid) in self._perm_persons
             }
 
+            # Has this cart ever moved under observation? Both extra gates below
+            # apply to parked carts ONLY, and that restriction is what keeps them
+            # off the golden OUTSIDE clip: C1 there rolls in through the doorway
+            # and comes to rest, and its real handler works at a cart that is
+            # standing still for most of the window that links him. A cart at
+            # rest is not the same object as a cart that has never moved — the
+            # first has demonstrated it is in use, the second is furniture, and
+            # only the second can be grazed by a passer-by with nobody to
+            # contradict them.
+            parked = self._is_parked(cart_id, frame_idx)
+
             # Score ALL overlapping + co-moving persons this frame
             candidates = self._link_candidates.get(cart_id, {})
+            # Drop candidates who now belong to someone else. Their entry stops
+            # accumulating the moment they are excluded but used to stay in the
+            # dict forever, and `n_total_candidates` counts entries — so one
+            # stale frozen candidate held the threshold at LINK_CONTESTED_FRAMES
+            # (20) for the rest of the cart's life, for a person who was no
+            # longer available to link.
+            for pid in [p for p in candidates if p in excluded]:
+                del candidates[pid]
             any_update = False
             for pid, pbbox in person_bboxes.items():
                 if pid in excluded:
                     continue
                 iou = _iou(cart_bbox, pbbox)
-                if iou <= 0:
+                if iou < LINK_MIN_IOU:
                     continue
+                # static_a_ok with the CART as A: a parked cart and a person
+                # working at it are not "not co-moving", they are loading or
+                # unloading. The reverse (static person, cart rolling past) is
+                # still rejected — see are_co_moving().
+                #
+                # On a PARKED cart it is granted only to a person actually AT it.
+                # The exemption was written for a handler holding IoU 0.24-0.42
+                # on a cart that had come to rest; extended at LINK_MIN_IOU
+                # (0.02) to a cart that has NEVER moved it also exempts a shopper
+                # walking past one, and such a cart can never fail the
+                # co-movement test, so grazing contact plus LINK_CONFIRM_FRAMES
+                # was enough to own it. See LINK_STATIC_MIN_IOU.
+                # Keys let the co-movement test latch its static/moving call
+                # per track: without them one frame of float wobble at
+                # COMOVEMENT_STATIC_PX decides whether this frame is evidence
+                # at all, and 19 frames of accumulated evidence rode on it.
                 if not are_co_moving(obj_positions.get(cart_id),
-                                     obj_positions.get(pid)):
+                                     obj_positions.get(pid),
+                                     static_a_ok=(not parked
+                                                  or iou >= LINK_STATIC_MIN_IOU),
+                                     latch=self._static_latch,
+                                     key_a=cart_id, key_b=pid):
                     continue
-                prev_iou, prev_count = candidates.get(pid, (0.0, 0))
-                candidates[pid] = (prev_iou + iou, prev_count + 1)
+                prev_iou, prev_count, prev_foot = candidates.get(pid, (0.0, 0, 0.0))
+                candidates[pid] = (prev_iou + iou, prev_count + 1,
+                                   prev_foot + foot_ratio(pbbox, cart_bbox))
                 any_update = True
 
             if any_update:
                 self._link_candidates[cart_id] = candidates
+                self._candidate_misses.pop(cart_id, None)
 
                 # Adaptive threshold: if only 1 candidate ever seen, use
                 # fast confirmation (LINK_CONFIRM_FRAMES = 6).
                 # If 2+ candidates are competing, use the longer
                 # LINK_CONTESTED_FRAMES (20) to give the real pusher time.
-                n_total_candidates = len(candidates)
-                threshold = LINK_CONTESTED_FRAMES if n_total_candidates >= 2 else LINK_CONFIRM_FRAMES
+                # Ground-plane gate, applied on the accumulated MEAN and never per
+                # frame: a pusher is legitimately nearer the camera than their own
+                # cart whenever the cart is moving away from it, and on the
+                # primary golden clip the correct P1->C1 link is over the bar on
+                # 39% of its frames while averaging +0.19. Over a window the two
+                # cases separate cleanly — see LINK_GROUND_BAND and
+                # tests/sweep_link_geometry.py.
+                viable = {
+                    pid: (cum_iou, count)
+                    for pid, (cum_iou, count, foot_sum) in candidates.items()
+                    if _shares_ground_plane(foot_sum / count)
+                }
 
-                qualified = {pid: cum_iou for pid, (cum_iou, count)
-                             in candidates.items() if count >= threshold}
+                # Contested-ness counts VIABLE candidates only. A candidate the
+                # ground gate has already ruled out is not competition, and
+                # counting it was decisive on the 1764099569430 clip: a
+                # foreground body sat in the accumulator at mean +0.62, held the
+                # bar at LINK_CONTESTED_FRAMES (20) for a cart whose real handler
+                # was the only credible candidate, and his evidence was wiped by a
+                # barren gap at 18 frames — twice — so he never qualified.
+                # A PARKED cart gets the contested threshold whatever the field
+                # size. LINK_CONFIRM_FRAMES is 6 — 0.3s at 20fps — and it is
+                # calibrated on a cart in motion, where six frames of overlap
+                # means six frames of walking together. A cart that has not moved
+                # in LINK_STATIC_MIN_FRAMES offers no such evidence: six frames of
+                # overlap with it means only that somebody passed close by, which
+                # is what every shopper entering the store does to the cart parked
+                # inside the door. Raising the bar to LINK_CONTESTED_FRAMES (20,
+                # ~1s) costs a genuine pickup at the corral a second of delay and
+                # nothing else — the cart starts moving the moment it is taken,
+                # and a moving cart is back on the fast path.
+                threshold = (LINK_CONTESTED_FRAMES
+                             if len(viable) >= 2 or parked
+                             else LINK_CONFIRM_FRAMES)
+                qualified = {pid: cum_iou for pid, (cum_iou, count) in viable.items()
+                             if count >= threshold}
 
                 # Tiebreaker: if 2+ qualified candidates, apply "behind the cart"
                 # bonus.  The person pushing is behind the cart relative to its
@@ -364,15 +644,53 @@ class PersonCartLinker:
                         best_pid = pid
 
                 if best_pid is not None:
-                    self._links[cart_id] = best_pid
-                    self._link_start_frames[cart_id] = frame_idx
-                    claimed.add(best_pid)
-                    self._link_candidates.pop(cart_id, None)
-                    pd = gdi('person', best_pid)
-                    self._perm_persons.add(pd)
-                    self._perm_carts.add(cd)
-                    self._total_links.add((pd, cd))
-                    self._person_for_cart[cd] = pd
-                    self._person_raw_for_cart[cd] = best_pid
+                    # Normalised by frame count so it is comparable ACROSS carts
+                    # — cumulative IoU is not, since a cart that has been in
+                    # frame longer accumulates more of it regardless of how well
+                    # it matches anyone.
+                    n_frames = max(candidates[best_pid][1], 1)
+                    proposals.append((best_score / n_frames, cart_id, best_pid))
             else:
-                self._link_candidates.pop(cart_id, None)
+                # A frame with no qualifying candidate is not evidence that the
+                # accumulated ones were wrong. Popping it here made confirmation
+                # require CONSECUTIVE frames, and with the contested threshold at
+                # 20 that is a bar a busy doorway never clears: on the
+                # 1764099569430 clip the cart released at frame 109 stayed
+                # ownerless for the remaining 312 frames, one barren frame at a
+                # time, while the person who had taken it stood next to it.
+                #
+                # Reuses LINK_CANDIDATE_PATIENCE, which already means "frames a
+                # candidate survives without support" for the outscored case.
+                misses = self._candidate_misses.get(cart_id, 0) + 1
+                if misses >= LINK_CANDIDATE_PATIENCE:
+                    self._link_candidates.pop(cart_id, None)
+                    self._candidate_misses.pop(cart_id, None)
+                else:
+                    self._candidate_misses[cart_id] = misses
+
+        # Step 3: assign the proposals, best match first.
+        #
+        # One person cannot own two carts, so a contested person has to go
+        # somewhere, and "wherever qualified first" is not a decision — it is dict
+        # order. Sorting by mean IoU makes it one: the cart the person is actually
+        # walking with wins, and the cart that merely overlapped them for a while
+        # keeps looking for an owner.
+        for _score, cart_id, pid in sorted(proposals, key=lambda p: -p[0]):
+            if cart_id in self._links or pid in claimed:
+                continue
+            cd = gdi('cart', cart_id)
+            self._links[cart_id] = pid
+            self._link_start_frames[cart_id] = frame_idx
+            # Re-open the movement window at the link, so "has it moved" now
+            # means "has it moved since this person took it" — the question the
+            # parked-cart release in Step 0.5 asks.
+            self._open_extent_window(cart_id, obj_positions.get(cart_id), frame_idx)
+            claimed.add(pid)
+            self._link_candidates.pop(cart_id, None)
+            self._candidate_misses.pop(cart_id, None)
+            pd = gdi('person', pid)
+            self._perm_persons.add(pd)
+            self._perm_carts.add(cd)
+            self._total_links.add((pd, cd))
+            self._person_for_cart[cd] = pd
+            self._person_raw_for_cart[cd] = pid

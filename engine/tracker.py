@@ -11,6 +11,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 import time
 import traceback
 from collections import Counter, defaultdict
@@ -27,30 +28,36 @@ from .config import (
     COLOR_PERSON, COLOR_CART,
     YOLO_IMGSZ, CLASSIFY_EVERY_N_FRAMES, JSON_EVERY_N_FRAMES,
     PROGRESS_MAX_UPDATES, PROGRESS_MIN_INTERVAL_S,
-    LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES,
+    LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES, STALE_CART_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
-    WALKAWAY_DIST_THRESH, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
+    WALKAWAY_GAP_FRAC, WALKAWAY_MIN_GAP_PX, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
+    DIRECTION_LATCH_FRAMES,
+    LINK_DRIFT_IOU,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
     POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
     RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
+    PENDING_CASE_REPORTS_MAX,
 )
-from .ultralytics_compat import apply as _apply_ultralytics_compat
+from . import ultralytics_compat as _ultralytics_compat
+from .cancellation import CancelToken, RunCancelled
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
-from .motion import compute_motion, compute_direction_label
+from .motion import compute_motion, compute_direction_label, DirectionLatch
 from .scoring import (
     compute_pops, classify_event, peak_sustained_fill, merchandise_removed,
+    vote_classification,
     prune_event_log,
-    inbound_suppression_note, vote_bag_for_loaded_cart,
+    inbound_suppression_note, unassessed_cart_note, vote_bag_for_loaded_cart,
     sync_events_with_snapshots,
-    LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS,
+    LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS, MEDIUM_SCORE,
 )
 from .renderer import (
     draw_bbox, draw_centroid_trail, draw_classification_overlay,
     draw_person_overlay, draw_link_lines, draw_hud, outlined_text,
     draw_pose_skeleton,
 )
-from .video_io import open_video, create_writer, reencode_to_mp4
+from .video_io import (open_video, create_writer, reencode_to_mp4,
+                       discard_run_output)
 # The 3D View, Bird's-Eye 2D and Floor Map surfaces were removed from this
 # build. They embedded PER-FRAME data in a full HTML document that the browser
 # received in the same message as everything else, and the page froze at 100%.
@@ -64,9 +71,9 @@ from .case_report_builder import build_case_report_html
 # >= 8.4.40, where fuse_score is applied to it and makes every match in
 # that pass mathematically impossible. Must run before any tracker is
 # constructed. See engine/ultralytics_compat.py for the full analysis.
-if _apply_ultralytics_compat():
-    print("[INFO] ultralytics compat: re-enabled ByteTrack's "
-          "low-confidence second association")
+if _ultralytics_compat.install():
+    print(f"[INFO] tracker compat: {_ultralytics_compat.describe()} — "
+          f"fusing detection score into the first association only")
 from . import ui_builder
 from . import analytics_ui
 from . import highlights
@@ -77,10 +84,6 @@ from .analytics_models import (
     FACTS_SCHEMA_VERSION,
 )
 from .trajectory_cache import TrajectoryCache, make_video_key
-
-#: Fill severity order, shared by the live grab-and-run path in the frame loop.
-#: Module level so the frame loop is not rebuilding it per cart per frame.
-_FILL_RANK_TRACK = {"empty": 0, "partial": 1, "full": 2}
 
 
 class TrackingEngine:
@@ -121,9 +124,42 @@ class TrackingEngine:
         #: Predictor parked across a GPU offload round-trip — see
         #: _release_detection_gpu_memory() for why losing it corrupts tracking.
         self._held_predictor = None
-        #: True while the detection stack is deliberately parked on the CPU for
-        #: a local-VLM pass. _ensure_on_device() must not "repair" that.
+        #: True once a deliberate CPU park for a local-VLM pass has been
+        #: ATTEMPTED, until the matching restore clears it. "Attempted", not
+        #: "completed": _release_detection_gpu_memory() sets it before its first
+        #: .to("cpu") so a release that raises partway is still owed a restore.
+        #: _ensure_on_device() must not "repair" either state.
         self._offloaded = False
+        #: Serialises the two halves of the Gradio event chain against each
+        #: other: process_video() and finalize_case_report() are separate
+        #: dependencies over one engine and one GPU, and the case report parks
+        #: the detection stack on the CPU for its whole duration. Held by those
+        #: two methods ONLY — never by _release/_restore/_run_case_report, so
+        #: that "does this nest?" stays answerable by reading two call sites.
+        #: A plain Lock, not an RLock, because it provably does not nest: the
+        #: synchronous case-report branch in _process_video() calls
+        #: _run_case_report() directly rather than finalize_case_report().
+        self._gpu_lock = threading.Lock()
+        #: The Cancel button's signal. Sequence-scoped so cancelling a run
+        #: cannot discard an EARLIER run's still-pending case report — see
+        #: engine/cancellation.py.
+        self._cancel = CancelToken()
+        #: (cap, writer, avi_path) while a frame loop is running, None
+        #: otherwise — the registration `_release_run_handles()` reads.
+        self._run_handles = None
+        #: Payloads stashed by _process_video(defer_case_report=True), oldest
+        #: first, one per run still awaiting its finalize_case_report() call.
+        #:
+        #: A LIST, and declared HERE rather than in _reset(), both for the same
+        #: reason: the finalize event for run N is a separate Gradio dependency
+        #: submitted only after run N's process_video returns, so run N+1 can
+        #: legitimately start — and reset — before run N's report has been
+        #: consumed. As a single slot cleared by _reset() this silently served
+        #: run 2's payload to run 1's finalize, or served it None and rendered
+        #: "No case report for this clip" for a run that had captures. Popping
+        #: FIFO gives the Nth finalize the Nth payload. See
+        #: docs/device_drift_fix_plan.md §9.4.2.
+        self._pending_case_reports: list[dict] = []
 
         # Build colour map once
         self._class_colors = {}
@@ -172,6 +208,10 @@ class TrackingEngine:
         self._linker = PersonCartLinker(self._get_display_id)
 
         self._json_frames       = {}
+        # DISPLAY ids, not raw tracker ids. Raw ids inflate on every tracker ID
+        # switch and every re-ID, so counting them reported 18 carts for a clip
+        # that had 9 — while the per-frame records, which are keyed by display id,
+        # showed 9. One clip, two answers, and the larger one on the summary line.
         self._all_people_seen   = set()
         self._all_carts_seen    = set()
 
@@ -182,16 +222,33 @@ class TrackingEngine:
         self._peak_pops_snapshot= {}
         self._cart_cls_history  = defaultdict(list)  # cd -> [(fill, bag), ...]
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
+        # cart display_id -> last sustained OUTBOUND heading, held through the
+        # UNKNOWN frames a parked cart produces. See motion.DirectionLatch.
+        self._dir_latch         = DirectionLatch(DIRECTION_LATCH_FRAMES)
         self._walkaway_frames   = {}  # cd -> consecutive frames person is far from cart
+        # cd -> raw id of the last person the linker gave this cart. Abandonment
+        # used to be readable ONLY while the link was live, so the moment a cart
+        # lost its owner it became permanently un-abandonable — the one state in
+        # which abandonment is the interesting question. classify_event()'s
+        # invariant is preserved by this being a memory of a REAL link: a cart
+        # that never had an owner has no entry and still cannot be abandoned.
+        self._last_owner_raw    = {}
+        # cd -> the last frame this cart was seen, so the owner memory above can
+        # be aged out on the same rule the linker purges links with
+        # (STALE_CART_FRAMES). Without it a display ID reused much later would
+        # inherit a stranger's departure as its own abandonment evidence.
+        self._last_owner_frame  = {}
         # Rule-engine fact timeline: cart display_id -> [CartFactSample, ...].
         # Recorded before the MIN_CART_FRAMES_FOR_POPS guard so brief carts
         # still have facts even when POPS declines to score them.
         self._cart_facts        = defaultdict(list)
         self._cls_last_frame    = {}  # cd -> frame_idx of the last real classification
+        # Classification coverage. Counted rather than derived at the end because
+        # the per-frame records are sampled and the caches only hold the LAST
+        # reading, so neither can say how much of the run was unreadable.
+        self._cart_frames_total = 0
+        self._cart_frames_unassessed = 0
         self._scene_elements    = []
-        # Inputs stashed for finalize_case_report() when process_video is
-        # called with defer_case_report=True. Cleared after use.
-        self._pending_case_report: dict | None = None
 
     def _get_display_id(self, label, raw_id):
         if label not in self._display_map:
@@ -283,7 +340,7 @@ class TrackingEngine:
                 obj["linking"] = {"is_linked": False, "linked_cart_id": None, "link_confidence": 0.0}
                 people[key] = obj
                 frame_persons[raw_id] = (cx, cy)
-                self._all_people_seen.add(raw_id)
+                self._all_people_seen.add(display_id)
             else:
                 cr = self._cart_cls_cache.get(display_id, {})
                 pi = self._pops_cache.get(display_id, {})
@@ -295,11 +352,21 @@ class TrackingEngine:
                     "fill_conf": round(cr.get("fill_conf", 0.0), 4),
                     "bag_conf": round(cr.get("bag_conf", 0.0), 4),
                 }
-                obj["pops"] = {"score": pi.get("score", 0), "event": pi.get("event", "CLEAR")}
+                # `classification` above is this frame's OBSERVATION; `pops`
+                # below is scored from the VOTE over the cart's whole history
+                # (see the frame loop), so the two can legitimately disagree on
+                # a noisy frame. That is the point — a tier must not turn on one
+                # observation — but a reader comparing them needs to know which
+                # is which.
+                obj["pops"] = {
+                    "score": pi.get("score", 0), "event": pi.get("event", "CLEAR"),
+                    "abandoned": bool(pi.get("abandoned", False)),
+                    "merch_removed": bool(pi.get("merch_removed", False)),
+                }
                 obj["linking"] = {"is_linked": False, "linked_person_id": None, "link_confidence": 0.0}
                 carts[key] = obj
                 frame_carts[raw_id] = (cx, cy)
-                self._all_carts_seen.add(raw_id)
+                self._all_carts_seen.add(display_id)
 
         # Populate link info
         link_data = {}
@@ -583,6 +650,16 @@ class TrackingEngine:
     def _release_detection_gpu_memory(self):
         if self.device != "cuda":
             return
+        # Set BEFORE the first move, not after the last one. The flag means "a
+        # release was attempted", which is what the caller needs to decide
+        # whether a restore is owed: _run_case_report() runs this inside its
+        # try/finally, so a raise anywhere below must still leave the finally
+        # able to tell "half-moved, put it back" from "never moved, leave it
+        # alone". Setting it at the end could only ever describe a release that
+        # completed, and the failure it left behind — a stranded flag with no
+        # matching restore — is Phase 8.1's permanent-poison shape:
+        # _ensure_on_device() early-returns on this flag forever.
+        self._offloaded = True
         # Hold the predictor across the move. ultralytics' Model._apply() runs on
         # every .to() and does `self.predictor = None`, and Model.track() reacts
         # to a missing predictor by calling register_tracker() again — which
@@ -615,7 +692,6 @@ class TrackingEngine:
             self._classifier._quality_model.to("cpu")
         if self._classifier._fill_model is not None:
             self._classifier._fill_model.to("cpu")
-        self._offloaded = True
         torch.cuda.empty_cache()
 
     def _restore_detection_gpu_memory(self):
@@ -680,6 +756,15 @@ class TrackingEngine:
         inner = module.model if hasattr(module, "predictor") else module
         try:
             devs = {p.device.type for p in inner.parameters()}
+            # Buffers as well as parameters. Module._apply() moves children,
+            # then its own parameters, then its own buffers, so a move that
+            # failed at the tail can leave a BatchNorm running_mean behind with
+            # every parameter already correct — and a buffer on the wrong
+            # device raises the same conv2d type error a parameter does.
+            # Confirmed harmless on the real stack: every buffer tracks .to()
+            # (detector 231, pose 573, quality 138, fill 138), so this never
+            # reports phantom drift.
+            devs |= {b.device.type for b in inner.buffers()}
         except Exception:
             return None
         if not devs:
@@ -693,13 +778,23 @@ class TrackingEngine:
         Falls back to the predictor parked by _release_detection_gpu_memory():
         a `.to()` that raised has already run Model._apply(), which nulls
         `predictor`, so on the retry path the live attribute is gone and only
-        the parked one is left."""
+        the parked one is left.
+
+        The re-attach is in a `finally` because this `.to()` is itself allowed
+        to fail: _ensure_on_device() catches that and retries with "cpu", and
+        that retry must still find a predictor. Model._apply() nulls
+        `predictor` BEFORE it can raise, so without the finally the reference
+        is dropped on exactly the path that needs it most. Re-attaching a
+        predictor whose module is half-moved is safe — it wraps that same
+        module, and the caller's CPU fallback makes it consistent again."""
         held = (getattr(self.model, "predictor", None)
                 or getattr(self, "_held_predictor", None))
-        self.model.to(dev)
-        if held is not None:
-            self.model.predictor = held
-            self._held_predictor = None
+        try:
+            self.model.to(dev)
+        finally:
+            if held is not None:
+                self.model.predictor = held
+                self._held_predictor = None
 
     def _ensure_on_device(self, context: str = ""):
         """Repair any model whose weights are not on self.device.
@@ -716,6 +811,19 @@ class TrackingEngine:
         # the OOM this guard exists to clean up after.
         if getattr(self, "_offloaded", False):
             return []
+
+        # Past the offload check, a parked predictor is a leftover, not a
+        # deliberate state: _release_detection_gpu_memory() stashes it and
+        # .to("cpu") nulls it, so a restore that raised AFTER the detector's
+        # own move already succeeded leaves the drift check reading clean
+        # while Model.track() sees no predictor and registers a SECOND
+        # tracking callback — the silent detection-degradation regression
+        # documented in _release_detection_gpu_memory(). Nothing else is left
+        # to put it back, so do it here regardless of drift.
+        if getattr(self, "_held_predictor", None) is not None:
+            if getattr(self.model, "predictor", None) is None:
+                self.model.predictor = self._held_predictor
+            self._held_predictor = None
 
         want = self.device
         drifted = [name for name, dev in (
@@ -757,6 +865,51 @@ class TrackingEngine:
                 torch.cuda.empty_cache()
         return drifted
 
+    def _reset_trackers(self):
+        """Clear the tracker's state so a run starts from a clean slate.
+
+        `model.track(persist=True)` is right WITHIN a run — it is what keeps
+        ids stable frame to frame — but the predictor and the tracker hanging
+        off it survive between runs, and nothing in `_reset()` reaches them:
+        that method only clears this engine's own bookkeeping. So a second Run
+        Analysis in the same process used to inherit run 1's tracked and lost
+        tracks, its Kalman filter, its GMC warp estimate and its frame counter,
+        from a DIFFERENT video.
+
+        Measured on the golden clip, same engine, no case report in between:
+        run 1 reproduced the baseline exactly, run 2 lost cart 1 on frame 116,
+        and run 3 repeated run 2. With this reset all three match.
+
+        `BYTETracker.reset()` also calls `reset_id()`, which zeroes the
+        process-global `BaseTrack._count`. That is safe here because display
+        ids are remapped from raw ids per run — `_reset()` clears
+        `_display_map`/`_next_display` — so a fresh `track_id=1` cannot collide
+        with a previous run's entry. `TrajectoryCache` is the other state that
+        outlives a run, and it is keyed per video (`make_video_key()`), never by
+        a raw track id, so a restarted id counter cannot reach another video's
+        entry either. This touches the tracker only, never `predictor` itself,
+        so the parked-predictor contract in `_release_detection_gpu_memory()` is
+        unaffected.
+
+        The parked predictor is included deliberately. During a local-VLM pass
+        `.to("cpu")` has nulled `self.model.predictor`, so an overlapping run —
+        the second Run Analysis that §7 of docs/device_drift_fix_plan.md leaves
+        deferred — would otherwise find nothing to reset and keep run 1's
+        tracks. Resetting the parked one is safe: run 1's frame loop is long
+        finished by the time the case report starts, and the VLM never touches
+        trackers.
+        """
+        predictor = (getattr(self.model, "predictor", None)
+                     or getattr(self, "_held_predictor", None))
+        for tracker in (getattr(predictor, "trackers", None) or []):
+            try:
+                tracker.reset()
+            except Exception as e:
+                # Stale tracker state is a wrong-output problem, not a
+                # crash-the-run problem: an ultralytics without
+                # BYTETracker.reset() must degrade, not abort.
+                print(f"[WARN] could not reset the tracker between runs: {e}")
+
     @staticmethod
     def _bbox_iou(a, b):
         """IoU of two (x1,y1,x2,y2) boxes."""
@@ -768,6 +921,18 @@ class TrackingEngine:
         area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
         union = area_a + area_b - inter
         return (inter / union) if union > 0 else 0.0
+
+    @staticmethod
+    def _bbox_gap(a, b):
+        """Shortest distance between two (x1,y1,x2,y2) boxes; 0.0 if they touch.
+
+        Unlike a centroid distance this does not grow with the size of either
+        box, so a person standing against a cart measures zero however large the
+        cart is drawn. See WALKAWAY_GAP_FRAC in config.py.
+        """
+        dx = max(a[0] - b[2], b[0] - a[2], 0.0)
+        dy = max(a[1] - b[3], b[1] - a[3], 0.0)
+        return (dx * dx + dy * dy) ** 0.5
 
     def _match_pose_to_persons(self, pose_boxes, pose_kps, person_raw_to_bbox):
         """Greedy IoU match: for each tracked person, pick the pose result
@@ -798,6 +963,54 @@ class TrackingEngine:
                 out[raw] = kp_list
         return out
 
+    def _release_run_handles(self):
+        """Close whatever video handles the last run left open, and bin its
+        partial output.
+
+        Called from `process_video`'s finally, so it runs on every exit path
+        including the ones nobody planned: a CUDA error mid-loop, a cancel, a
+        bug in the POPS reconciliation. `_process_video` clears the registration
+        once it has released the handles itself, so the normal path reaches here
+        with nothing to do.
+
+        Never raises. It runs while an exception is already propagating, and
+        replacing a real error with an OSError from a tidy-up would hide the
+        thing worth reading.
+        """
+        handles = getattr(self, "_run_handles", None)
+        if handles is None:
+            return
+        self._run_handles = None
+        cap, writer, avi_path = handles
+        for name, handle in (("capture", cap), ("writer", writer)):
+            try:
+                handle.release()
+            except Exception as e:
+                print(f"[WARN] releasing the video {name} failed: {e}")
+        # After both releases, never before: the writer holds a lock on the file
+        # under Windows.
+        discard_run_output(avi_path)
+
+    def request_cancel(self) -> int | None:
+        """Ask the newest run (or its case report) to stop. Returns the
+        sequence it targeted, or None when nothing has run yet.
+
+        Called from the Cancel button's own Gradio event, on another thread,
+        while the run being cancelled holds `_gpu_lock` and is inside its frame
+        loop. So it must not take that lock and must not block: all it does is
+        set a flag the loop already checks every frame.
+
+        Gradio's `cancels=` cannot do this job — it explicitly lets a running
+        function finish — so the button needs both: `cancels=` to drop queued
+        jobs and clear the client spinner, and this to stop the work.
+        """
+        seq = self._cancel.request()
+        if seq is None:
+            print("[CANCEL] nothing to cancel — no run has started yet")
+        else:
+            print(f"[CANCEL] stopping run {seq} at the next checkpoint")
+        return seq
+
     def invalidate_cache(self, source_path=None):
         """Drop the cached trajectory for a specific video, or all of them."""
         if source_path:
@@ -809,7 +1022,58 @@ class TrackingEngine:
     # ------------------------------------------------------------------
     # Main pipeline
     # ------------------------------------------------------------------
-    def process_video(self, source_path,
+    def process_video(self, *args, progress=None, **kwargs):
+        """Serialised public entry point — see `_process_video` for the pipeline.
+
+        A thin wrapper so the whole pipeline runs under `_gpu_lock` without
+        re-indenting it. `process_video` and `finalize_case_report` are separate
+        Gradio dependencies over one engine and one GPU (app_poc_v2.py:1508 and
+        :1567), and a local-VLM case report parks the detection stack on the CPU
+        for its whole duration. A second Run click during that window used to
+        start this pipeline against CPU-resident weights while
+        `self._classifier.device` still said cuda, which is:
+
+            RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                          (torch.FloatTensor) should be the same
+
+        raised from the first classify() call. The start-of-run device guard
+        cannot fix it — it early-returns on `_offloaded` precisely so it does
+        not drag the detector back onto the card underneath a live VLM — so the
+        only fix is to not run the two at once. See
+        docs/device_drift_fix_plan.md §9.
+
+        The wait is announced BEFORE the acquire, and only when the lock is
+        actually held: after it, the message describes a wait that is already
+        over. `locked()` is advisory here — a false negative costs a missing
+        status line, never correctness, because the acquire below is what
+        serialises.
+        """
+        # BEFORE the wait, not after: a run blocked behind a case report has
+        # begun as far as the user is concerned, and pressing Cancel during that
+        # wait has to reach it. Claiming the sequence here is what lets it —
+        # see CancelToken.begin().
+        run_seq = self._cancel.begin()
+        if self._gpu_lock.locked():
+            progress = progress if progress is not None else gr.Progress()
+            progress(0, desc="Waiting for the previous case report to finish…")
+        with self._gpu_lock:
+            # The wait is the most likely place for a cancel to land: it is the
+            # only part of a run that can take minutes before a single frame has
+            # been read.
+            self._cancel.raise_if_cancelled(run_seq, "before the run started")
+            try:
+                return self._process_video(*args, run_seq=run_seq,
+                                           progress=progress, **kwargs)
+            finally:
+                # The only place that closes the frame loop's video handles on
+                # an unplanned exit. Here rather than around the loop itself
+                # because that would mean re-indenting ~600 lines of pipeline
+                # into a `with`, and this scope is the one that already owns the
+                # run: it takes the lock, so it can also guarantee the run gives
+                # its file handles back before the next one takes it.
+                self._release_run_handles()
+
+    def _process_video(self, source_path,
                       camera_placement="Outside (facing entrance)",
                       vlm_backend="Claude (API)", vlm_api_key="",
                       zones=None,
@@ -817,7 +1081,8 @@ class TrackingEngine:
                       defer_case_report: bool = False,
                       rule_thresholds=None,
                       enable_pose: bool = True,
-                      progress=None):
+                      progress=None,
+                      run_seq: int | None = None):
         # A FRESH progress tracker per run, never a default argument.
         #
         # `progress=gr.Progress()` in this signature was evaluated ONCE at
@@ -842,10 +1107,36 @@ class TrackingEngine:
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
         os.makedirs(analytics_out_dir, exist_ok=True)
 
+        # Holding _gpu_lock (see process_video), no case report can be in
+        # flight, so _offloaded True here cannot mean "deliberately parked right
+        # now" — it means a restore was skipped entirely and the flag was
+        # stranded. Left set, it turns the guard on the next line into a
+        # permanent no-op and makes the device-mismatch error permanent for the
+        # life of the process. Clearing it lets the guard do its job, and the
+        # message names the cause instead of leaving a silent CPU-speed run.
+        if self._offloaded:
+            print("[WARN] the detection stack was still parked on the CPU at "
+                  "the start of a run — a case report did not restore it. "
+                  "Repairing; the run continues.")
+            self._offloaded = False
+
         # A previous run's local-VLM offload can have left a model on the
         # wrong device; the cached-path early-return in load_quality/load_fill
         # below will not fix that, so check first. See _ensure_on_device().
         self._ensure_on_device(context="start of run")
+        # After the device check, not before: _ensure_on_device() can put a
+        # parked predictor back, and the trackers to reset are the ones on
+        # whatever predictor is live at the start of this run.
+        self._reset_trackers()
+        # Leftover duplicate tracking callbacks from an earlier run cannot be
+        # left in place: each one re-runs the tracker on every frame and
+        # silently starves detection. See dedupe_tracking_callbacks(). Checked
+        # again after this run's first .track() call, which is where a lost
+        # predictor makes ultralytics append a fresh one.
+        _stale_cbs = _ultralytics_compat.dedupe_tracking_callbacks(self.model)
+        if _stale_cbs:
+            print(f"[WARN] dropped {_stale_cbs} duplicate tracking callback(s) "
+                  f"left over from an earlier run")
 
         # Load classifiers from fixed weight paths
         self._classifier.load_quality(QUALITY_WEIGHT_PATH)
@@ -862,6 +1153,19 @@ class TrackingEngine:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind before main loop
         # Tracked output is camera-only.
         writer, avi_path = create_writer(w, h, fps)
+        # Registered so the wrapper's finally can close both on ANY exit path.
+        # Before this, `cap` and `writer` were released at exactly two points —
+        # the end of the loop and the cancel branch — so every other way out of
+        # this method leaked both: the device-mismatch RuntimeError that started
+        # this whole investigation left an open VideoCapture and a VideoWriter
+        # holding a lock on its AVI, and on Windows that lock is what makes the
+        # next run's writer fail with "being used by another process".
+        #
+        # AFTER create_writer, obviously: registering above it referenced
+        # `writer` before it existed, which broke every run with an
+        # UnboundLocalError. A tuple rather than three attributes — they are
+        # acquired and released together, and one name is one thing to reset.
+        self._run_handles = (cap, writer, avi_path)
         names = self.names
         gdi = self._get_display_id
         links = self._linker.links
@@ -894,7 +1198,18 @@ class TrackingEngine:
         # and drove Svelte into `effect_update_depth_exceeded` after the run.
         _prog_every = max(1, total_frames // max(1, PROGRESS_MAX_UPDATES))
         _prog_last_t = 0.0
+        _cancelled = False
         for _frame_no in range(total_frames):
+            # Checked EVERY frame, and before the frame is read. This is the
+            # Cancel button's only way in: Gradio's own `cancels=` lets a
+            # running function finish, so a run that does not look at the flag
+            # cannot be stopped at all. The check is an Event.is_set() plus an
+            # int compare — cheaper than the frame read below it — and nothing
+            # about the frame is processed once it fires, so a cancelled run
+            # never emits a half-processed frame.
+            if self._cancel.is_cancelled(run_seq):
+                _cancelled = True
+                break
             ok, im0 = cap.read()
             if not ok:
                 break
@@ -916,6 +1231,33 @@ class TrackingEngine:
                                            imgsz=YOLO_IMGSZ, verbose=False)
             _t_yolo += time.perf_counter() - _t0
 
+            # THE call that can duplicate the tracking callback: Model.track()
+            # registers one whenever it finds no predictor, and appends rather
+            # than replaces. Every copy calls tracker.update() again on the same
+            # frame, which divides track confirmation and track_buffer by the
+            # number of copies — the "carts and people stopped being detected"
+            # failure. Checked here so a degraded run is impossible rather than
+            # merely unlikely: the predictor-parking contract in
+            # _release_detection_gpu_memory() has to hold across a Gradio event
+            # chain in which a case report and the next run can overlap, and
+            # this does not depend on it holding.
+            #
+            # EVERY frame, not just the first. The previous run's case report is
+            # a chained Gradio event that can call
+            # _release_detection_gpu_memory() while this loop is running: .to()
+            # nulls `predictor` mid-run, the next frame re-registers, and a
+            # first-frame-only check has already passed by then. (Such a run has
+            # a second problem — its detector is now on the CPU — but that one
+            # is loud and self-repairing, and this one is neither.) The check is
+            # two list scans of two or three entries; Motion+POPS, which does
+            # far more, measures 0.03s across 415 frames.
+            _dup_cbs = _ultralytics_compat.dedupe_tracking_callbacks(self.model)
+            if _dup_cbs:
+                print(f"[WARN] dropped {_dup_cbs} duplicate tracking "
+                      f"callback(s) at frame {frame_idx} — the predictor was "
+                      f"re-registered; detection would have degraded from "
+                      f"here on")
+
             # --- Pose estimation (optional, toggled in the UI) ---
             # Run once per frame on the full image; results are matched to
             # tracked persons by bbox IoU below.
@@ -931,9 +1273,30 @@ class TrackingEngine:
             if enable_pose:
                 _t0 = time.perf_counter()
                 with torch.no_grad():
+                    # The device the pose weights are actually on, not
+                    # self.device. Handing predict() an explicit "cuda" while
+                    # the module is parked on the CPU for a local-VLM pass makes
+                    # ultralytics re-initialise AutoBackend on the card and take
+                    # VRAM back from a generating VLM — a path fighting the
+                    # offload rather than merely a victim of it.
+                    #
+                    # Passing the real device, NOT dropping the argument:
+                    # predict() with no device reaches select_device(""), which
+                    # per its own docstring "defaults to auto-selecting the
+                    # first available GPU" (ultralytics 8.4.50,
+                    # utils/torch_utils.py), so it would take the VRAM anyway.
+                    # self.model.track() a few lines up passes no device and is
+                    # still safe, but for a different reason — it reuses the
+                    # existing predictor instead of re-selecting. The two calls
+                    # are not symmetric.
+                    # "mixed" (a restore that OOM'd partway) is not a device
+                    # ultralytics can be handed; CPU is the one that cannot
+                    # raise, and the start-of-run guard repairs the module.
+                    _pose_dev = self._param_device(self._pose_model) or self.device
                     pres = self._pose_model.predict(
                         im0, imgsz=POSE_IMGSZ, conf=POSE_CONF_THRESHOLD,
-                        device=self.device, verbose=False,
+                        device="cpu" if _pose_dev == "mixed" else _pose_dev,
+                        verbose=False,
                     )
                 if pres and pres[0].boxes is not None and pres[0].keypoints is not None:
                     pb = pres[0].boxes.xyxy.cpu().numpy()
@@ -1023,6 +1386,20 @@ class TrackingEngine:
                                 self._obj_disappeared, self._obj_positions,
                                 self._obj_first_frame)
 
+            # A link the linker has just disowned was never real — a person who
+            # brushed past a parked cart, not one who took it. `_last_owner_raw`
+            # deliberately OUTLIVES a link so a departing owner can still be
+            # scored as abandonment, and that is exactly wrong here: it is aged
+            # out on STALE_CART_FRAMES since the cart was last SEEN, so for a
+            # cart that stays in frame it never expires at all. On the
+            # 1764200318790 clip that kept a passer-by on record as the owner of
+            # a parked cart for the rest of the run and scored it ABANDONED CART
+            # (65) from the frame she left the doorway.
+            for cd in self._linker.disowned_carts:
+                self._last_owner_raw.pop(cd, None)
+                self._last_owner_frame.pop(cd, None)
+                self._walkaway_frames.pop(cd, None)
+
             # --- Classification (every N frames) ---
             _t0 = time.perf_counter()
             if frame_idx % CLASSIFY_EVERY_N_FRAMES == 0 and self._classifier.has_quality_model:
@@ -1063,6 +1440,28 @@ class TrackingEngine:
                         old = self._motion_cache[cart_raw]
                         self._motion_cache[cart_raw] = (old[0], old[1], old[2], old[3], person_dir)
 
+            # Hold a cart's last SUSTAINED outbound heading through the UNKNOWN
+            # frames it produces once it stops. Applied AFTER the sync above so
+            # a heading inherited from the cart's owner latches too, and so a
+            # resolved reversal — the owner, or a staff member, wheeling the
+            # cart back inside — clears the latch on the frame it happens.
+            # Keyed by display id: see DirectionLatch.
+            # Resolved once per DISPLAY id, not once per detection: two raw
+            # boxes can carry the same display id on one frame (a nested
+            # duplicate the deduper let through), and calling resolve() twice
+            # would double-count that frame toward the latch run.
+            _latched_dirs = {}
+            for raw, c, _, _ in frame_detections:
+                if names[int(c)] != 'cart':
+                    continue
+                cd = gdi('cart', raw)
+                if cd not in _latched_dirs:
+                    _latched_dirs[cd] = self._dir_latch.resolve(
+                        cd, self._motion_cache[raw][4])
+                old = self._motion_cache[raw]
+                self._motion_cache[raw] = (
+                    old[0], old[1], old[2], old[3], _latched_dirs[cd])
+
             # --- Per-cart facts + POPS scoring ---
             # Fact recording for the rule engine happens BEFORE the cart-age
             # guard, so brief carts still get a fact timeline even when POPS
@@ -1085,14 +1484,62 @@ class TrackingEngine:
                         linked = True
                         linked_person_raw = pid
                         break
+                # Remember who the linker gave this cart, and forget the previous
+                # owner's walkaway progress when it changes hands: that counter
+                # measures ONE person's distance, and inheriting it would let a
+                # cart that just found a new owner be called abandoned on the
+                # strength of the old one's departure. Until the `linked` gate
+                # came off `person_far` below this was safe by accident.
+                if linked and linked_person_raw is not None:
+                    if self._last_owner_raw.get(cd) != linked_person_raw:
+                        self._walkaway_frames.pop(cd, None)
+                    self._last_owner_raw[cd] = linked_person_raw
+                if cd in self._last_owner_raw:
+                    last_seen = self._last_owner_frame.get(cd, frame_idx)
+                    if frame_idx - last_seen > STALE_CART_FRAMES:
+                        self._last_owner_raw.pop(cd, None)
+                        self._walkaway_frames.pop(cd, None)
+                    self._last_owner_frame[cd] = frame_idx
+
+                # Whose departure counts as this cart being abandoned. The live
+                # link when there is one, otherwise the last person who held it.
+                #
+                # Reading only the live link is what closed the whole abandonment
+                # route on the 1764099569430 clip: a released cart is exactly the
+                # cart whose owner may have walked off, and it was the one state
+                # in which the question could not be asked. A cart with no
+                # remembered owner still returns None here, so classify_event()'s
+                # invariant — abandonment is unavailable to a cart that never had
+                # an owner — holds unchanged.
+                owner_raw = (linked_person_raw if linked and linked_person_raw is not None
+                             else self._last_owner_raw.get(cd))
+
+                # A cart someone is currently engaged with is attended, whoever
+                # that is. This is what keeps a genuine handover from reading as
+                # abandonment in the frames between one link ending and the next
+                # being confirmed.
+                attended_now = any(
+                    self._bbox_iou(bb, pb) >= LINK_DRIFT_IOU
+                    for pb in person_bb.values()
+                )
+                if attended_now:
+                    self._walkaway_frames.pop(cd, None)
+
                 # Classic: person gone from frame for N frames
-                person_gone = (linked and linked_person_raw is not None
-                               and self._obj_disappeared.get(linked_person_raw, 0) > ABANDON_FRAMES)
+                person_gone = (not attended_now and owner_raw is not None
+                               and self._obj_disappeared.get(owner_raw, 0) > ABANDON_FRAMES)
 
                 cr = self._cart_cls_cache.get(cd, {})
                 is_valid = cr.get("is_valid", True)
                 fill_lbl = cr.get("fill", "unclassified")
                 bag_lbl  = cr.get("bag", "not_applicable")
+
+                # Coverage tally, before the cart-age guard below: a cart the
+                # classifier could not read is scored INBOUND_SCORE without being
+                # assessed, which looks exactly like a clean result.
+                self._cart_frames_total += 1
+                if cr.get("quality", "unclassified") in ("unclear", "unclassified"):
+                    self._cart_frames_unassessed += 1
 
                 # Rule-engine fact sample — raw observations only.  Recorded
                 # before the grab-and-run fill override below, which is
@@ -1115,36 +1562,35 @@ class TrackingEngine:
                 if cart_age < MIN_CART_FRAMES_FOR_POPS:
                     continue  # too new — might be a flicker
 
-                # Walkaway: person visible but far from cart for N consecutive frames
+                # Walkaway: the owner is visible but far from the cart for N
+                # consecutive frames. Judged against `owner_raw`, so it survives
+                # the link being released — a cart standing at the door while the
+                # person who brought it walks away is the case this measures, and
+                # gating it on the live link meant it could not see it.
+                #
+                # Distance is measured between the box EDGES and scaled by the
+                # cart's own size. Measuring it centroid to centroid against a
+                # flat pixel bar is what scored Cart 1 of the 1764173272870
+                # static-cart clip 65 ABANDONED CART while Person 4 stood
+                # against it: the two boxes were in contact (edge gap 0.0 px)
+                # yet their centroids were 232 px apart on every frame, past the
+                # old 200 px bar, so the counter ran to 31 and the finaliser
+                # latched the flag over the rest of the run. See
+                # WALKAWAY_GAP_FRAC in config.py.
                 person_far = False
-                if linked and linked_person_raw is not None and linked_person_raw in person_bb:
-                    pb = person_bb[linked_person_raw]
-                    pcx, pcy = (pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2
-                    ccx, ccy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
-                    dist = ((pcx - ccx) ** 2 + (pcy - ccy) ** 2) ** 0.5
-                    if dist > WALKAWAY_DIST_THRESH:
+                if (not attended_now and owner_raw is not None
+                        and owner_raw in person_bb):
+                    pb = person_bb[owner_raw]
+                    gap = self._bbox_gap(bb, pb)
+                    cart_diag = ((bb[2] - bb[0]) ** 2 + (bb[3] - bb[1]) ** 2) ** 0.5
+                    far_gap = max(WALKAWAY_GAP_FRAC * cart_diag, WALKAWAY_MIN_GAP_PX)
+                    if gap > far_gap:
                         self._walkaway_frames[cd] = self._walkaway_frames.get(cd, 0) + 1
                     else:
                         self._walkaway_frames.pop(cd, None)
                     person_far = self._walkaway_frames.get(cd, 0) > ABANDON_FRAMES
                 abandoned = person_gone or person_far
 
-                # For abandoned carts: if currently empty but previously had
-                # items, use the peak fill from history.  A cart that went from
-                # partial/full → empty means someone grabbed items and ran.
-                #
-                # The bag label is VOTED across the whole history, not copied
-                # from the frame the peak fill came from. The previous version
-                # reassigned fill_lbl inside the loop, so the rank comparison
-                # walked a running maximum and settled on the FIRST frame to
-                # reach the peak rank — one frame decided the bag label for the
-                # event row. On the 1764099569430 OUTSIDE clip that frame read
-                # "bagged" while the history votes unbagged 6.59 to 5.62, and
-                # partial+bagged is capped at 55 by compute_pops(), so a single
-                # noisy frame held a real grab-and-run 10 points under its own
-                # abandonment floor of 65. The end-of-run finaliser already
-                # votes the bag this way (see vote_bag_for_loaded_cart and the
-                # constraint block below); this makes the live path agree.
                 # Goods gone from a cart that was carrying them, owner gone
                 # too. Read off the classification HISTORY, not off the current
                 # cached frame and not off whether the fill override below
@@ -1165,15 +1611,52 @@ class TrackingEngine:
                         [h_fill for h_fill, _, _, _ in self._cart_cls_history[cd]],
                         GRABRUN_MIN_RUN_OBS))
 
-                if abandoned and fill_lbl == "empty" and cd in self._cart_cls_history:
-                    history = self._cart_cls_history[cd]
-                    peak_fill = max(
-                        (h_fill for h_fill, _, _, _ in history),
-                        key=lambda f: _FILL_RANK_TRACK.get(f, 0),
-                        default=fill_lbl,
-                    )
-                    if _FILL_RANK_TRACK.get(peak_fill, 0) > _FILL_RANK_TRACK.get(fill_lbl, 0):
-                        fill_lbl = peak_fill
+                # Score the VOTE over the cart's whole classification
+                # history, not the labels of the latest classified frame.
+                #
+                # A tier used to be decidable by one observation. On the
+                # FF1763940475070 INSIDE clip Cart 3 was read full|unbagged
+                # once, at bag confidence 0.679, against 28 bagged
+                # observations totalling 23.21 and 21 partial reads against 8
+                # full. OUTBOUND + full + unbagged + moving scores 75, so that
+                # single frame logged a HIGH PRIORITY event and froze a 75 peak
+                # — and because both peak-as-floor rules keep the higher live
+                # reading (below, and sync_events_with_snapshots), the run
+                # finished at 75 even though the finaliser's own vote said
+                # partial|bagged / 30. Voting here is what makes the two paths
+                # structurally incapable of disagreeing about labels; the
+                # floors then only ever arbitrate CONTEXT (direction, speed,
+                # abandonment), which is what they were written for.
+                #
+                # `is_valid` and `quality` still come from the current frame:
+                # they are the kill switch and the event-logging gate, and both
+                # ask "can the classifier read this cart right now", which is a
+                # question about this frame and not about the history.
+                #
+                # Costs nothing per frame that the finaliser was not already
+                # paying once per cart — the history is a few dozen tuples.
+                history = self._cart_cls_history.get(cd, ())
+                voted_fill, voted_bag, _vote_detail = vote_classification(history)
+                if voted_fill is not None:
+                    fill_lbl, bag_lbl = voted_fill, voted_bag
+                    # Grab-and-run: the vote lands on "empty" because the empty
+                    # tail outnumbers the loaded run, but the goods were there.
+                    # Gated on a SUSTAINED run, exactly as the finaliser gates
+                    # it — the any-frame peak this replaces let one noisy
+                    # "partial" on a genuinely empty cart float it to a
+                    # pushout, which is the same single-observation failure the
+                    # vote above exists to stop.
+                    if abandoned and fill_lbl == "empty":
+                        sustained = peak_sustained_fill(
+                            [h_fill for h_fill, _, _, _ in history],
+                            GRABRUN_MIN_RUN_OBS)
+                        if sustained:
+                            fill_lbl = sustained
+                    # A loaded cart cannot have bag "not_applicable": every
+                    # empty observation votes 1.0 for it, so it wins the bag
+                    # vote on any history with an empty majority. Re-vote
+                    # across the loaded observations only.
+                    if fill_lbl in ("partial", "full") and bag_lbl == "not_applicable":
                         bag_lbl = vote_bag_for_loaded_cart(history)
 
                 pops_score = compute_pops(dir_label, speed_status, is_valid, fill_lbl,
@@ -1186,6 +1669,14 @@ class TrackingEngine:
                     "score": pops_score, "event": event_name, "color": event_color,
                     "fill": fill_lbl, "bag": bag_lbl, "direction": dir_label,
                     "speed_status": speed_status, "linked": linked,
+                    # Exported to the per-frame JSON. `abandoned` is the
+                    # strongest term in compute_pops() — it floors the score at
+                    # 60/75 — and `merch_removed` is what separates a parked
+                    # cart from a grab-and-run. Neither was visible anywhere in
+                    # the output, so a run that scored a cart 45 instead of 75
+                    # could not be attributed without re-deriving both by hand
+                    # from the classification history.
+                    "abandoned": abandoned, "merch_removed": merch_removed,
                 }
 
                 prev_max = self._max_pops_per_cart.get(cd, 0)
@@ -1203,6 +1694,14 @@ class TrackingEngine:
                         "quality": quality_lbl,
                         "speed_status": speed_status,
                         "linked": linked, "abandoned": abandoned,
+                        "merch_removed": merch_removed,
+                        # Who the cart was linked to at its peak. Recorded
+                        # because abandonment is reasoned about per-owner, so a
+                        # cart that scored high for the right reason and one
+                        # that scored high off a mislinked bystander are
+                        # otherwise indistinguishable in the output.
+                        "owner": (gdi('person', linked_person_raw)
+                                  if linked_person_raw is not None else None),
                         # When the peak happened — lets the POPS table row seek
                         # the tracked video straight to the moment.
                         "timestamp": round(timestamp, 2), "frame": frame_idx,
@@ -1214,7 +1713,12 @@ class TrackingEngine:
                 # logged for this cart — the pushout already happened.
                 # Also skip events where the cart was not validly classified
                 # (unclear/unclassified) — these are noise, not actionable.
-                if event_name in LOGGABLE_EVENTS:
+                # The score check is not redundant with the name: "UNLINKED EXIT"
+                # is also returned below every tier for any unlinked outbound
+                # cart, so an empty cart drifting doorward at POPS 0 carried a
+                # loggable name. See prune_event_log(), which applies the same
+                # rule to the finalised log.
+                if event_name in LOGGABLE_EVENTS and pops_score >= MEDIUM_SCORE:
                     skip = False
                     if quality_lbl in ("unclear", "unclassified") and event_name not in HIGH_EVENTS:
                         skip = True  # don't log noise from unclassified carts
@@ -1311,6 +1815,16 @@ class TrackingEngine:
                 # in the tracking JSON.
                 _t_json += time.perf_counter() - _t0
 
+        if _cancelled:
+            # No release here: the wrapper's finally owns the handles now, and
+            # it does exactly what this used to — release both, then delete the
+            # partial file (that order matters, an open VideoWriter keeps a lock
+            # on it under Windows). One owner, so the two paths cannot drift.
+            print(f"[CANCEL] run {run_seq} stopped at frame {frame_idx} of "
+                  f"{total_frames}")
+            raise RunCancelled(f"cancelled at frame {frame_idx} of "
+                               f"{total_frames}")
+
         # Capture final frame for case report
         frame_capturer.capture_final_frame(
             im0, frame_idx, timestamp,
@@ -1318,6 +1832,12 @@ class TrackingEngine:
 
         cap.release()
         writer.release()
+        # Deregistered, so the finally does not delete an AVI the re-encode
+        # below still needs. Everything after this point is post-processing:
+        # an exception there leaves a complete AVI and its MP4 in a run
+        # directory the pruner owns, which is the pre-existing behaviour and
+        # not something a cleanup path should start second-guessing.
+        self._run_handles = None
 
         # --- Unified POPS summary reconciliation ---
         # Pick authoritative fill/bag, then RECOMPUTE score so everything
@@ -1366,25 +1886,21 @@ class TrackingEngine:
             # Fill/bag: ALWAYS use confidence-weighted vote from full history.
             # Events can be logged at early frames with wrong predictions;
             # the vote across all frames is more reliable.
+            #
+            # vote_classification() is the SAME function the frame loop scores
+            # with, which is the point: the two paths can no longer land on
+            # different labels for one cart, so `original_score > final_score`
+            # below can only ever mean the two paths saw different CONTEXT.
             if cd in self._cart_cls_history:
                 history = self._cart_cls_history[cd]
                 if history:
-                    fill_conf = defaultdict(float)
-                    fill_count = defaultdict(int)
-                    bag_conf = defaultdict(float)
-                    bag_count = defaultdict(int)
-                    for fill, bag, fc, bc in history:
-                        fill_conf[fill] += fc
-                        fill_count[fill] += 1
-                        bag_conf[bag] += bc
-                        bag_count[bag] += 1
-                    # confidence_sum × frame_count — rewards both high confidence and consistency
-                    fill_scores = {f: fill_conf[f] * fill_count[f] for f in fill_count}
-                    bag_scores = {b: bag_conf[b] * bag_count[b] for b in bag_count}
-                    best_fill = max(fill_scores, key=fill_scores.get)
-                    best_bag = max(bag_scores, key=bag_scores.get)
-                    print(f"[VOTE] Cart {cd}: fill_conf={dict(fill_conf)} fill_count={dict(fill_count)} fill_scores={dict(fill_scores)} → {best_fill}")
-                    print(f"[VOTE] Cart {cd}: bag_conf={dict(bag_conf)} bag_count={dict(bag_count)} bag_scores={dict(bag_scores)} → {best_bag}")
+                    best_fill, best_bag, _vd = vote_classification(history)
+                    print(f"[VOTE] Cart {cd}: fill_conf={_vd['fill_conf']} "
+                          f"fill_count={_vd['fill_count']} "
+                          f"fill_scores={_vd['fill_scores']} → {best_fill}")
+                    print(f"[VOTE] Cart {cd}: bag_conf={_vd['bag_conf']} "
+                          f"bag_count={_vd['bag_count']} "
+                          f"bag_scores={_vd['bag_scores']} → {best_bag}")
 
                     # # [OLD] Abandoned cart override (grab-and-run) — no threshold,
                     # # fires on ANY non-empty frame in early 30%. Too aggressive:
@@ -1473,14 +1989,44 @@ class TrackingEngine:
                 final_score, linked, direction, abandoned=abandoned,
             )
 
-            # Write back ALL fields consistently
-            snap.update({
-                "fill": best_fill, "bag": best_bag, "quality": "valid_cart",
-                "score": final_score, "event": final_event, "color": final_color,
-                "direction": direction, "speed_status": speed_status,
-                "linked": linked, "abandoned": abandoned,
-            })
-            self._max_pops_per_cart[cd] = final_score
+            # The live peak is a FLOOR, and it wins as a unit.
+            #
+            # `original_score` was computed and printed and then discarded, so a
+            # reconciliation that lands lower silently demoted the cart: on the
+            # 1764099569430 clip a live peak of 55 was reported as 45. Which
+            # reading is right is not decidable here — the vote is better evidence
+            # about fill and bag, the peak is better evidence about what the cart
+            # was doing at its worst moment — but a score from one and a context
+            # from the other describes a cart that never existed. So keep whichever
+            # is higher, with all of its own fields, and never blend. That is the
+            # same rule sync_events_with_snapshots() applies to an event row that
+            # scored higher live, and the two have to agree or the POPS table and
+            # the Events tab tell different stories about one cart.
+            # Only a peak recorded on a CLASSIFIED frame can floor the
+            # reconciliation. The vote exists precisely to overrule noisy
+            # single-frame classification, so a peak whose own frame read
+            # `unclear` is not the better evidence — and without this check the
+            # floor resurrected exactly those: carts scoring 5 on an unclear
+            # frame beat their own reconciled 0 and reappeared in the POPS table
+            # with a `non-applicable` fill.
+            peak_quality = snap.get("quality", "unclassified")
+            if (original_score > final_score
+                    and peak_quality not in ("unclear", "unclassified")):
+                print(f"[POPS] Cart {cd}: keeping live peak "
+                      f"{snap.get('fill')}|{snap.get('bag')} "
+                      f"{snap.get('event')} score={original_score} over "
+                      f"reconciled {best_fill}|{best_bag} score={final_score}")
+                self._max_pops_per_cart[cd] = original_score
+            else:
+                # Write back ALL fields consistently
+                snap.update({
+                    "fill": best_fill, "bag": best_bag, "quality": "valid_cart",
+                    "score": final_score, "event": final_event, "color": final_color,
+                    "direction": direction, "speed_status": speed_status,
+                    "linked": linked, "abandoned": abandoned,
+                    "merch_removed": merch_removed,
+                })
+                self._max_pops_per_cart[cd] = final_score
             print(f"[POPS] Cart {cd}: {best_fill}|{best_bag} {direction} "
                   f"score={final_score} (orig={original_score} recomp={recomputed}) "
                   f"[{source}]"
@@ -1537,7 +2083,21 @@ class TrackingEngine:
         # "N/N steps" to a plain percentage, which is what we want now that
         # there are no frames left to count.
         progress(1.0, desc="Encoding video")
-        out_path = reencode_to_mp4(avi_path)
+        # A broken encoder must not throw away a good run. reencode_to_mp4()
+        # raises now instead of silently returning a path to a file it failed to
+        # write, and everything downstream of here — POPS reconciliation,
+        # analytics, the heat-map, the case report — is worth having without a
+        # playable video. So this is the one place that swallows it: the video
+        # panel comes back empty, and the reason (ffmpeg's own last lines, and
+        # where the raw AVI was kept) is already in the log above.
+        try:
+            out_path = reencode_to_mp4(avi_path)
+        except Exception as e:
+            print(f"[ERROR] the tracked video could not be encoded: {e}")
+            print("[ERROR] the rest of the run is unaffected — POPS, analytics "
+                  "and the case report below are complete; only the video "
+                  "player will be empty.")
+            out_path = None
         t_encode = time.perf_counter()
         video_duration = total_frames / fps if fps > 0 else 0
         print(f"[PERF] Frame processing: {t_frames - t_start:.1f}s | "
@@ -1559,10 +2119,20 @@ class TrackingEngine:
             "frames": self._json_frames,
             "events": self._event_log,
             "cart_classifications": {f"C{cid}": self._cart_cls_cache.get(cid, {}) for cid in self._cart_cls_cache},
+            # Beyond max_score/peak_event: the reconciled snapshot's own reading
+            # of WHY the cart scored what it did. Without these a run cannot be
+            # attributed after the fact — see docs/missed_pushout_fix_plan.md,
+            # where a cart's 45 could only be explained by re-deriving
+            # abandonment and the owner link by hand from the per-frame records.
             "pops_summary": {
                 f"C{cid}": {
                     "max_score": self._max_pops_per_cart.get(cid, 0),
                     "peak_event": self._peak_pops_snapshot.get(cid, {}).get("event", "CLEAR"),
+                    "peak_frame": self._peak_pops_snapshot.get(cid, {}).get("frame"),
+                    "peak_timestamp": self._peak_pops_snapshot.get(cid, {}).get("timestamp"),
+                    "owner": self._peak_pops_snapshot.get(cid, {}).get("owner"),
+                    "abandoned": bool(self._peak_pops_snapshot.get(cid, {}).get("abandoned", False)),
+                    "merch_removed": bool(self._peak_pops_snapshot.get(cid, {}).get("merch_removed", False)),
                 }
                 for cid in set(list(self._max_pops_per_cart) + list(self._pops_cache))
             },
@@ -1621,6 +2191,16 @@ class TrackingEngine:
             self._peak_pops_snapshot, camera_placement)
         if _inbound_note:
             analytics_result.rule_diagnostics.append(_inbound_note)
+        # Same channel, same question: was this quiet run actually quiet, or just
+        # unreadable? A cart the quality head declined to classify is scored
+        # without being assessed, and that was reported nowhere.
+        _unassessed_note = unassessed_cart_note(
+            self._cart_frames_total, self._cart_frames_unassessed,
+            [cd for cd, snap in self._peak_pops_snapshot.items()
+             if (snap or {}).get("quality", "unclassified")
+             in ("unclear", "unclassified")])
+        if _unassessed_note:
+            analytics_result.rule_diagnostics.append(_unassessed_note)
 
         # --- Build HTML ---
         video_html  = ui_builder.build_video_info(source_path, w, h, fps, total_frames, frame_idx)
@@ -1743,7 +2323,7 @@ class TrackingEngine:
             # Gradio event — not a later yield of the same one, which would
             # keep a pending overlay over the whole dashboard until the VLM
             # finished (see run_analysis in app_poc_v2.py).
-            self._pending_case_report = {
+            self._stash_pending_case_report({
                 "captures": list(frame_capturer.captures),
                 "full_json": full_json,
                 "event_log": list(self._event_log),
@@ -1751,7 +2331,12 @@ class TrackingEngine:
                 "vlm_backend": vlm_backend,
                 "vlm_api_key": vlm_api_key,
                 "analytics_result": analytics_result,
-            }
+                # Which run this report belongs to. finalize_case_report()
+                # compares it against the cancel token so a Cancel aimed at a
+                # LATER run cannot discard this one — see
+                # engine/cancellation.py.
+                "run_seq": run_seq,
+            })
             case_report_html = (
                 "<div style='padding:20px;color:#94a3b8;font-family:Nunito Sans,sans-serif;'>"
                 "<div style='display:flex;align-items:center;gap:10px;'>"
@@ -1766,8 +2351,14 @@ class TrackingEngine:
                 "</div>"
             )
         elif frame_capturer.captures:
+            # The same checkpoint the deferred path gets in
+            # finalize_case_report(): a cancel that landed during the post-loop
+            # tail (encode, JSON, analytics, heat-map) must not be followed by a
+            # VLM pass.
+            self._cancel.raise_if_cancelled(run_seq, "before the case report")
             try:
                 case_report_html, case_report_file = self._run_case_report(
+                    run_seq=run_seq,
                     captures=frame_capturer.captures,
                     full_json=full_json,
                     event_log=self._event_log,
@@ -1829,14 +2420,28 @@ class TrackingEngine:
     # ------------------------------------------------------------------
     def _run_case_report(self, *, captures, full_json, event_log,
                          peak_snapshots, vlm_backend, vlm_api_key,
-                         analytics_result) -> tuple[str, str | None]:
+                         analytics_result,
+                         run_seq: int | None = None) -> tuple[str, str | None]:
         is_local_vlm = "Claude" not in vlm_backend
-        if is_local_vlm:
-            self._release_detection_gpu_memory()
         vlm = None
         try:
+            # INSIDE the try. Outside it, anything raising in here — the
+            # empty_cache(), or a .to("cpu") after a partial move — stranded
+            # self._offloaded True with no matching restore, because the finally
+            # that clears it had not been entered yet. finalize_case_report()
+            # swallows the exception into an inline banner, so the only visible
+            # sign was that every LATER run raised the device-mismatch error
+            # this whole document-length guard exists to prevent. Same shape as
+            # Phase 8.1; see docs/device_drift_fix_plan.md §9.3.
+            if is_local_vlm:
+                self._release_detection_gpu_memory()
+            # should_cancel, not the token itself: the analyzer has no
+            # business knowing about run sequences, and a plain callable is what
+            # a transformers StoppingCriteria wants anyway.
             vlm = VLMAnalyzer(backend=vlm_backend, api_key=vlm_api_key,
-                              device=self.device)
+                              device=self.device,
+                              should_cancel=(
+                                  lambda: self._cancel.is_cancelled(run_seq)))
             report_data = vlm.analyze_incident(
                 captures=captures,
                 pops_data=full_json,
@@ -1853,8 +2458,30 @@ class TrackingEngine:
             # detection stack's ~5-6 GB back — the restore then OOMs partway
             # through and leaves the detector half on CUDA, half on CPU.
             if vlm is not None:
-                vlm.unload_model()
-            if is_local_vlm:
+                try:
+                    vlm.unload_model()
+                except Exception as e:
+                    # Never let this escape. It would replace the real error,
+                    # and — worse — it would skip the restore below, leaving
+                    # self._offloaded True for the life of the process. The
+                    # start-of-run guard early-returns on that flag, so the
+                    # stack would stay on the CPU with self.device == "cuda"
+                    # and every later run would raise the device-mismatch
+                    # error this whole guard exists to prevent.
+                    print(f"[WARN] unloading the VLM failed: {e}")
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            # Gated on _offloaded, not on is_local_vlm alone. With the release
+            # now inside the try (above), it may not have run at all — and an
+            # unconditional restore in that case is NOT a no-op: it calls
+            # self.model.to(self.device), and Model._apply() nulls `predictor`
+            # on every .to(), same-device included. With no release there is no
+            # parked _held_predictor to put back, _ensure_on_device() sees no
+            # drift and returns early, and the next .track() appends a second
+            # tracking callback — the silent detection-degradation regression
+            # _release_detection_gpu_memory() is written to prevent.
+            if is_local_vlm and self._offloaded:
                 self._restore_detection_gpu_memory()
 
         gradio_html, standalone_html = build_case_report_html(
@@ -1870,6 +2497,23 @@ class TrackingEngine:
 
         return gradio_html, report_path
 
+    def _stash_pending_case_report(self, payload: dict):
+        """Queue a deferred case report for finalize_case_report() to consume.
+
+        Bounded. One finalize event is chained per run, so the queue normally
+        holds one entry and never more than a couple; it can only grow if a
+        chained event never fires at all — a browser reload, or a dropped SSE
+        stream mid-chain. Each entry pins a full JSON document plus the captured
+        frames, so an unbounded queue would leak memory and eventually hand a
+        stale report to a later run. Dropping the OLDEST is what keeps the newest
+        runs paired with their own reports.
+        """
+        self._pending_case_reports.append(payload)
+        while len(self._pending_case_reports) > PENDING_CASE_REPORTS_MAX:
+            self._pending_case_reports.pop(0)
+            print("[WARN] dropped an orphaned pending case report — its "
+                  "finalize event never ran (browser reload mid-run?)")
+
     def finalize_case_report(self) -> tuple[str, str | None]:
         """Run the deferred VLM case-report pass.
 
@@ -1878,11 +2522,38 @@ class TrackingEngine:
         when there's nothing pending — safe to call unconditionally.
         Errors are caught and surfaced as an inline error banner; the file
         is None in that case so gr.File renders empty.
+
+        Holds `_gpu_lock` for the whole pass, which is the other half of the
+        serialisation described in `process_video`: a local-VLM report parks the
+        detection stack on the CPU, so a run must not be in its frame loop while
+        this is running. The pop is inside the hold too — not because the lock
+        fixes the pairing (it cannot; see §9.4.2 of
+        docs/device_drift_fix_plan.md), but because there is no reason for it to
+        be outside.
         """
-        pending = self._pending_case_report
-        self._pending_case_report = None  # consume regardless of outcome
+        with self._gpu_lock:
+            return self._finalize_case_report_locked()
+
+    def _finalize_case_report_locked(self) -> tuple[str, str | None]:
+        # Popped, not read-then-cleared, and popped BEFORE the try: consuming
+        # regardless of outcome is deliberate (a failed report must not be
+        # served again to the next finalize), and taking the OLDEST entry is
+        # what pairs this call with the run it was chained to.
+        pending = (self._pending_case_reports.pop(0)
+                   if self._pending_case_reports else None)
         if not pending or not pending.get("captures"):
             return "", None
+        # Scoped to the popped payload's OWN run, which is the whole reason
+        # CancelToken counts sequences. This event is chained after a run, so it
+        # also fires after a run that was itself cancelled — and the payload it
+        # finds may belong to an EARLIER run that completed normally and is
+        # entitled to its report. Comparing sequences is what tells those apart;
+        # a bare flag would discard the innocent one.
+        if self._cancel.is_cancelled(pending.get("run_seq")):
+            print(f"[CANCEL] dropped the case report for run "
+                  f"{pending.get('run_seq')}")
+            return ("<p style='color:#94a3b8;padding:20px;'>"
+                    "Case report cancelled.</p>", None)
         try:
             return self._run_case_report(**pending)
         except Exception as e:

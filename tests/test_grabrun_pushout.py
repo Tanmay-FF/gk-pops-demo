@@ -15,7 +15,8 @@ test_outside_clip_bag_label.py.
 
 The negative cases matter more than the positive one. `abandoned` is not a
 theft signal: tracker.py computes it from ABANDON_FRAMES (30) of lost person
-track or 30 frames beyond WALKAWAY_DIST_THRESH, roughly a second at 30 fps. A
+track, or 30 frames with the owner further from the cart than
+WALKAWAY_GAP_FRAC of its box diagonal, roughly a second at 30 fps. A
 shopper who parks a loaded cart and steps to a shelf trips it constantly. What
 those carts never produce is an empty tail — their fill stays loaded — and that
 is the whole discriminator. Every "must NOT escalate" check below is guarding
@@ -74,8 +75,37 @@ check("a stray loaded frame inside the empty tail does not disqualify",
       merchandise_removed(["partial"] * 15 + ["empty"] * 3 + ["partial"]
                           + ["empty"] * 32, GRABRUN_MIN_RUN_OBS))
 
+# Cart 1 of the 1764092528600 OUTSIDE clip, per-observation out of that run's
+# tracking JSON. The goods plainly left this cart — 27 loaded observations, then
+# two empty runs — and the FINAL observation re-reads "partial" at fill
+# confidence 0.502. Tested because one 0.50 frame decided the tier: on an
+# UNKNOWN heading the difference is 65 / ABANDONED CART against
+# MERCH_REMOVED_FLOOR / PUSHOUT ALERT.
+GOLDEN_1764092528600_C1 = (["partial"] * 27 + ["empty"] * 4
+                           + ["partial"] * 4 + ["empty"] * 4 + ["partial"])
+check("one trailing loaded observation does not undo an empty tail",
+      merchandise_removed(GOLDEN_1764092528600_C1, GRABRUN_MIN_RUN_OBS))
+
+# The other side of that tolerance, and why it is a RUN test and not a
+# last-observation test with a fudge factor: the trailing loaded run in the
+# parked-cart case below is exactly GRABRUN_MIN_RUN_OBS long, so it survives
+# stripping and the cart still reads as ending loaded.
 check("a cart that ends loaded is NOT removal (parked cart)",
       merchandise_removed(_LOADED_RUN + ["empty"] * 5 + ["partial"] * 4,
+                          GRABRUN_MIN_RUN_OBS) is False)
+
+check("a trailing loaded run one observation over the gate still ends loaded",
+      merchandise_removed(_LOADED_RUN + ["empty"] * 5
+                          + ["partial"] * (GRABRUN_MIN_RUN_OBS + 1),
+                          GRABRUN_MIN_RUN_OBS) is False)
+
+# Cart 1 of the 1763942209000 OUTSIDE clip: 40 observations, not one of them
+# empty. The cart left the store WITH its merchandise, which is a pushout the
+# direction latch scores as one — it is not merchandise being removed, and this
+# field must not claim it is.
+check("a cart that never read empty is NOT removal",
+      merchandise_removed(["full"] * 3 + ["partial"] * 4 + ["full"]
+                          + ["partial"] * 15 + ["full"] * 4 + ["partial"] * 6,
                           GRABRUN_MIN_RUN_OBS) is False)
 
 check("a cart that was loaded the whole time is NOT removal",
