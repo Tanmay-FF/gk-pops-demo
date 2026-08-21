@@ -46,6 +46,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+#: Formatting only. Imported by path rather than as a package because this
+#: script runs on the bootstrap interpreter, before any environment exists --
+#: console_ui is stdlib-only for the same reason.
+sys.path.insert(0, str(HERE))
+import console_ui as ui  # noqa: E402
+
 #: The window every pin in requirements.txt is satisfiable in. numpy 1.26.4
 #: ships cp39-cp312 wheels and scipy 1.17.1 declares requires-python >= 3.11,
 #: so the intersection is exactly these two. Verified against PyPI metadata.
@@ -93,7 +99,9 @@ def check_python(allow_any: bool) -> None:
         f"--allow-any-python to try anyway."
     )
     if allow_any:
-        print(f"[WARN] {message}\n")
+        ui.warn("python", f"{v[0]}.{v[1]} is unsupported, continuing anyway")
+        for text in message.splitlines():
+            ui.note(text.strip())
         return
     raise SetupError(message)
 
@@ -163,15 +171,14 @@ def activate_hint(venv_path: Path) -> str:
 
 
 def print_plan(plan) -> None:
-    print("Plan")
-    print("----")
-    print(f"  python        {sys.version.split()[0]}  {sys.executable}")
-    print(f"  gpu           {plan['gpu'] or 'none detected'}")
-    print(f"  torch build   {plan['tag']}  ({plan['reason']})")
-    print(f"  torch index   {plan['index_url']}")
-    print(f"  venv          {plan['venv_path']}")
-    print(f"  requirements  {plan['requirements']}")
     print()
+    ui.detail("Plan")
+    ui.info("python", f"{sys.version.split()[0]}  {sys.executable}")
+    ui.info("gpu", plan["gpu"] or "none detected")
+    ui.info("torch build", f"{plan['tag']}  ({plan['reason']})")
+    ui.info("torch index", plan["index_url"])
+    ui.info("venv", str(plan["venv_path"]))
+    ui.info("requirements", str(plan["requirements"]))
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +187,9 @@ def print_plan(plan) -> None:
 
 def run(cmd, dry_run: bool, what: str) -> None:
     printable = " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
-    print(f"\n=== {what}\n$ {printable}")
+    print()
+    ui.detail(what)
+    ui.command(printable)
     if dry_run:
         return
     result = subprocess.run([str(c) for c in cmd])
@@ -196,12 +205,13 @@ def create_venv(plan, args) -> None:
             raise SetupError(
                 f"{path} already exists. Delete it and re-run for a clean "
                 f"build, or pass --reuse to install into it as it is.")
-        print(f"\n=== Reusing the existing environment at {path}")
+        print()
+        ui.detail(f"Reusing the existing environment at {path}")
         return
     if path.name not in GITIGNORED_VENVS:
-        print(f"[WARN] {path.name} is not one of the venv names .gitignore "
-              f"covers ({', '.join(GITIGNORED_VENVS)}). It will show up in "
-              f"`git status` unless you add it.")
+        ui.warn("venv name", f"{path.name} is not gitignored")
+        ui.note(f".gitignore covers {', '.join(GITIGNORED_VENVS)}. This one "
+                f"will show up in `git status` unless you add it.")
     run([sys.executable, "-m", "venv", str(path)], args.dry_run,
         f"Creating the virtual environment at {path}")
 
@@ -214,8 +224,9 @@ def install(plan, args) -> None:
         "Upgrading pip")
 
     if args.skip_torch:
-        print("\n=== Skipping torch (--skip-torch); requirements.txt will pull "
-              "whatever plain PyPI resolves")
+        print()
+        ui.warn("torch", "skipped (--skip-torch)")
+        ui.note("requirements.txt will pull whatever plain PyPI resolves.")
     else:
         # Before requirements.txt, and from its own index. ultralytics depends
         # on torch, so if requirements.txt goes first pip satisfies that from
@@ -274,7 +285,9 @@ def verify(plan, args) -> bool:
     """Report what the new environment can actually do. Returns False when the
     environment works but not the way the plan intended."""
     py = venv_python(plan["venv_path"])
-    print(f"\n=== Verifying the environment\n$ {py} -c <import check>")
+    print()
+    ui.detail("Verifying the environment")
+    ui.command(f"{py} -c <import check>")
     if args.dry_run:
         return True
 
@@ -291,48 +304,48 @@ def verify(plan, args) -> bool:
                 "gradio", "transformers", "accelerate", "PIL",
                 "imageio_ffmpeg", "scipy"):
         if key in report:
-            print(f"  {key:16} {report[key]}")
+            ui.ok(key, str(report[key]))
 
     ok = True
     if report["errors"]:
         ok = False
-        print("\n[FAIL] some packages did not import:")
         for e in report["errors"]:
-            print(f"  {e}")
+            ui.fail(*(e.split(": ", 1) if ": " in e else (e, "")))
+        ui.problem("Some packages did not import.", [
+            "The environment is not usable as it stands. Delete it and",
+            "re-run this script; if the same package fails again, the pip",
+            "output above the import check says why.",
+        ])
 
     wanted_gpu = plan["tag"] != "cpu"
     got_gpu = report.get("cuda_available", False)
     if wanted_gpu and got_gpu:
-        print(f"\n  CUDA             yes — {report.get('device')} "
-              f"(torch built against CUDA {report.get('cuda_built')})")
+        ui.ok("CUDA", str(report.get("device")))
+        ui.note(f"torch built against CUDA {report.get('cuda_built')}")
     elif wanted_gpu and not got_gpu:
         ok = False
-        print(
-            "\n[FAIL] a CUDA build was requested but torch.cuda.is_available() "
-            "is False.\n"
-            "       The demo will run on the CPU, and the only symptom is that "
-            "it is slow —\n"
-            "       so this is worth fixing now rather than wondering later.\n"
-            "       Usually one of:\n"
-            "         * the NVIDIA driver is older than the CUDA runtime in "
-            "these wheels.\n"
-            "           `nvidia-smi` prints the driver version; update it, or "
-            "re-run this\n"
-            "           script with an older index, e.g. --cuda cu126.\n"
-            "         * a CPU torch was already present and pip left it alone. "
-            "Delete the\n"
-            "           venv and re-run.\n"
-            "       If the machine genuinely has no usable GPU, re-run with "
-            "--cpu."
-        )
+        ui.fail("CUDA", "requested, but torch.cuda.is_available() is False")
+        ui.problem("A CUDA build was installed but cannot see the GPU.", [
+            "The demo will run on the CPU, and the only symptom is that it",
+            "is slow — so this is worth fixing now rather than wondering",
+            "later. Usually one of:",
+            "",
+            "  * the NVIDIA driver is older than the CUDA runtime in these",
+            "    wheels. `nvidia-smi` prints the driver version; update it,",
+            "    or re-run this script with an older index, e.g.",
+            "    --cuda cu126.",
+            "  * a CPU torch was already present and pip left it alone.",
+            "    Delete the venv and re-run.",
+            "",
+            "If the machine genuinely has no usable GPU, re-run with --cpu.",
+        ])
     elif not wanted_gpu and plan["gpu"]:
-        print(f"\n  CUDA             no — CPU build installed on purpose, but "
-              f"this machine has a GPU\n"
-              f"                   ({plan['gpu']}). Re-run without --cpu to "
-              f"use it.")
+        ui.warn("CUDA", "CPU build installed on purpose")
+        ui.note(f"but this machine has a GPU ({plan['gpu']}).")
+        ui.note("Re-run without --cpu to use it.")
     else:
-        print("\n  CUDA             no — CPU build. The demo works; inference "
-              "is much slower.")
+        ui.info("CUDA", "no — CPU build")
+        ui.note("The demo works; inference is much slower.")
     return ok
 
 
@@ -375,10 +388,17 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     if args.cpu and args.cuda:
-        print("[ERROR] --cpu and --cuda are mutually exclusive.")
+        ui.problem("--cpu and --cuda are mutually exclusive.",
+                   ["Pass one or the other."])
         return 2
 
-    print(f"POPS demo setup   {platform.system()} {platform.release()}\n")
+    #: --ensure is the launcher's mode: run_demo.py has already printed the
+    #: banner and the phase heading this output sits under, and a second
+    #: title block there just reads as two programs starting.
+    if not args.ensure:
+        ui.banner("POPS demo   environment setup",
+                  "torch, ultralytics, and everything the demo imports",
+                  f"{platform.system()} {platform.release()}")
     try:
         if args.ensure:
             # Deliberately before check_python: --ensure asks whether a
@@ -387,15 +407,18 @@ def main(argv=None) -> int:
             # not matter.
             plan = build_plan(args)
             if venv_python(plan["venv_path"]).exists():
-                print(f"An environment already exists at {plan['venv_path']}.")
+                ui.ok("virtual environment", plan["venv_path"].name)
                 if verify(plan, args):
-                    print("\nNothing to do.")
+                    print()
+                    ui.detail("Environment is ready — nothing to install.")
                     return 0
-                print("\n[WARN] that environment did not verify. Repairing "
-                      "it with the same steps a fresh install uses.")
+                print()
+                ui.warn("virtual environment", "did not verify")
+                ui.note("Repairing it with the same steps a fresh install "
+                        "uses.")
                 args.reuse = True
             else:
-                print("No environment yet -- building one.\n")
+                ui.info("virtual environment", "none yet — building one")
 
         check_python(args.allow_any_python)
         plan = build_plan(args)
@@ -404,23 +427,31 @@ def main(argv=None) -> int:
         install(plan, args)
         ok = verify(plan, args)
     except SetupError as e:
-        print(f"\n[ERROR] {e}")
+        ui.problem("Setup stopped.", str(e).splitlines())
         return 1
     except KeyboardInterrupt:
-        print("\n[ERROR] interrupted. The half-built venv is still on disk; "
-              "delete it before re-running.")
+        ui.problem("Interrupted.", [
+            "The half-built venv is still on disk; delete it before",
+            "re-running.",
+        ])
         return 130
 
     if args.dry_run:
-        print("\nDry run — nothing was installed.")
+        print()
+        ui.detail("Dry run — nothing was installed.")
         return 0
 
-    print(f"\nDone. Activate it with:\n{activate_hint(plan['venv_path'])}\n")
-    print(f"Then:\n"
-          f"  {venv_python(plan['venv_path'])} app_poc_v2.py       # the demo, "
-          f"on http://localhost:7860\n"
-          f"  {venv_python(plan['venv_path'])} tests/run_all.py --fast   "
-          f"# 26 test files, about a minute\n")
+    print()
+    ui.detail("Done. Activate it with:")
+    for text in activate_hint(plan["venv_path"]).splitlines():
+        ui.command(text.strip())
+    print()
+    ui.detail("Then:")
+    ui.command(f"{venv_python(plan['venv_path'])} app_poc_v2.py")
+    ui.note("the demo, on http://localhost:7860")
+    ui.command(f"{venv_python(plan['venv_path'])} tests/run_all.py --fast")
+    ui.note("26 test files, about a minute")
+    print()
     print(f"::venv_name::{plan['venv_path'].name}")
     return 0 if ok else 1
 

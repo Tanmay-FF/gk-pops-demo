@@ -39,7 +39,7 @@ from .config import (
     PENDING_CASE_REPORTS_MAX,
 )
 from . import ultralytics_compat as _ultralytics_compat
-from .cancellation import CancelToken, RunCancelled
+from .cancellation import CancelToken, RunCancelled, RunSuperseded
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
 from .motion import compute_motion, compute_direction_label, DirectionLatch
@@ -72,6 +72,11 @@ from .case_report_builder import build_case_report_html
 # that pass mathematically impossible. Must run before any tracker is
 # constructed. See engine/ultralytics_compat.py for the full analysis.
 if _ultralytics_compat.install():
+    # Deliberately a plain print and not console_ui: importing that module
+    # reconfigures sys.stdout and sets PYTHONIOENCODING process-wide, and
+    # engine/__init__ imports this file for every consumer, api/main.py
+    # included. A launcher may format its own output; a library must not
+    # reach into the process to do it.
     print(f"[INFO] tracker compat: {_ultralytics_compat.describe()} — "
           f"fusing detection score into the first association only")
 from . import ui_builder
@@ -1052,7 +1057,15 @@ class TrackingEngine:
         # begun as far as the user is concerned, and pressing Cancel during that
         # wait has to reach it. Claiming the sequence here is what lets it —
         # see CancelToken.begin().
-        run_seq = self._cancel.begin()
+        # supersede(), not begin(): a second Run means the user wants THIS
+        # video now, so anything still in flight for the previous one -- a frame
+        # loop, or more usually a local-VLM case report -- is stopped rather
+        # than waited out. See CancelToken.supersede() for why this cannot be a
+        # request() followed by a begin().
+        _superseded, run_seq = self._cancel.supersede()
+        if _superseded is not None:
+            print(f"[CANCEL] run {run_seq} supersedes work at seq <= "
+                  f"{_superseded}; it will stop at its next checkpoint")
         if self._gpu_lock.locked():
             progress = progress if progress is not None else gr.Progress()
             progress(0, desc="Waiting for the previous case report to finish…")
@@ -2545,13 +2558,30 @@ class TrackingEngine:
         # finds may belong to an EARLIER run that completed normally and is
         # entitled to its report. Comparing sequences is what tells those apart;
         # a bare flag would discard the innocent one.
-        if self._cancel.is_cancelled(pending.get("run_seq")):
-            print(f"[CANCEL] dropped the case report for run "
-                  f"{pending.get('run_seq')}")
+        _seq = pending.get("run_seq")
+        if self._cancel.is_cancelled(_seq):
+            # Superseded and cancelled are NOT the same outcome here. A newer
+            # run has already flushed case_report_html, so painting anything
+            # would drop this dead run's panel on top of the live one; raising
+            # lets the handler write nothing at all.
+            if self._cancel.was_superseded(_seq):
+                print(f"[CANCEL] case report for run {_seq} superseded by a "
+                      f"newer run; leaving its panels alone")
+                raise RunSuperseded(f"case report for run {_seq} superseded")
+            print(f"[CANCEL] dropped the case report for run {_seq}")
             return ("<p style='color:#94a3b8;padding:20px;'>"
                     "Case report cancelled.</p>", None)
         try:
             return self._run_case_report(**pending)
+        except RunCancelled:
+            # Reached when the cancel landed MID-GENERATION, so the VLM raised
+            # from inside _run_case_report. Re-raised rather than swallowed by
+            # the generic handler below, which used to turn a cancel into a red
+            # "Case report generation failed: cancelled mid-generation" banner
+            # and made the handler's own cancel branch unreachable.
+            if self._cancel.was_superseded(_seq):
+                raise RunSuperseded(f"case report for run {_seq} superseded")
+            raise
         except Exception as e:
             print(f"[WARN] Case report generation failed: {e}")
             traceback.print_exc()

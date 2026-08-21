@@ -866,6 +866,17 @@ class VLMAnalyzer:
             dtype="auto")
         self._local_processor = AutoProcessor.from_pretrained(QWEN3_VL_MODEL_ID)
         self._local_model.eval()
+        # The shipped generation_config.json asks for sampling (do_sample=true,
+        # temperature 0.7, top_p 0.8, top_k 20). _call_qwen3vl generates greedily
+        # on purpose -- see the comment there and test_vlm_score_fidelity -- so
+        # those three are dead parameters and transformers warns about them on
+        # every call. Clear them here rather than editing the model file, which
+        # is upstream and git-lfs tracked.
+        gen_cfg = self._local_model.generation_config
+        gen_cfg.do_sample = False
+        gen_cfg.temperature = None
+        gen_cfg.top_p = None
+        gen_cfg.top_k = None
         print("[VLM] Qwen3-VL loaded.")
 
     def _call_qwen3vl(self, image_bytes, prompt, max_tokens):

@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from engine.cancellation import CancelToken, RunCancelled
+from engine.cancellation import (CancelToken, RunCancelled,
+                                 RunSuperseded)
 from engine.tracker import TrackingEngine
 
 
@@ -350,6 +351,246 @@ def test_the_partial_video_of_a_cancelled_run_is_removed():
     discard_run_output(avi2)
     assert not os.path.exists(avi2)
     assert os.path.exists(keep), "the tidy-up removed a file it does not own"
+
+
+# ----------------------------------------------------------------------
+# Supersede: a second Run stops what is already in flight
+# ----------------------------------------------------------------------
+# The user-facing rule is "if the VLM is running and I run another video, the
+# VLM stops and the new video starts". That is NOT the Cancel button's
+# semantics: a press stops the NEWEST work, while a new run has to stop
+# everything OLDER than itself and leave itself alone. Hence a second
+# predicate; see CancelToken.supersede().
+
+def test_a_new_run_cancels_the_work_it_replaces():
+    t = CancelToken()
+    old = t.begin()                        # run 1, its case report still going
+    superseded, new = t.supersede()        # run 2 starts
+
+    assert superseded == old, f"expected to supersede run {old}, got {superseded}"
+    assert new == old + 1
+    assert t.is_cancelled(old), "the replaced run was not told to stop"
+    assert not t.is_cancelled(new), "the new run cancelled itself"
+
+
+def test_supersede_survives_a_later_begin():
+    """The race that rules out request()-then-begin(). begin() drops a stale
+    cancel and clears the event; if that clearing also killed the supersede,
+    the VLM would poll a cleared flag and never stop."""
+    t = CancelToken()
+    old = t.begin()
+    _, new = t.supersede()
+    later = t.begin()                      # e.g. a third run queued behind
+
+    assert t.is_cancelled(old), (
+        "a later begin() cleared the supersede out from under work that had "
+        "not noticed it yet"
+    )
+    assert not t.is_cancelled(later)
+    assert new < later
+
+
+def test_supersede_reaches_every_older_unit_not_just_the_newest():
+    """Two things can be in flight at once: a report for run N while run N+1
+    waits on the engine lock. A new run must stop both."""
+    t = CancelToken()
+    first = t.begin()
+    second = t.begin()
+    _, newest = t.supersede()
+
+    assert t.is_cancelled(first), "the oldest in-flight unit was left running"
+    assert t.is_cancelled(second)
+    assert not t.is_cancelled(newest)
+
+
+def test_supersede_is_distinguishable_from_a_cancel_press():
+    """What decides whether the panel says "cancelled" or is left untouched."""
+    t = CancelToken()
+    superseded_run = t.begin()
+    t.supersede()
+    assert t.was_superseded(superseded_run) is True
+
+    t2 = CancelToken()
+    pressed = t2.begin()
+    t2.request()
+    assert t2.is_cancelled(pressed) is True
+    assert t2.was_superseded(pressed) is False, (
+        "a Cancel press must not look like a supersede, or the report panel "
+        "silently stops saying it was cancelled"
+    )
+
+
+def test_raise_if_cancelled_reports_which_kind():
+    t = CancelToken()
+    old = t.begin()
+    t.supersede()
+    try:
+        t.raise_if_cancelled(old, "in the case report")
+    except RunSuperseded as e:
+        assert "superseded" in str(e)
+    else:
+        raise AssertionError("expected RunSuperseded")
+
+    t2 = CancelToken()
+    run = t2.begin()
+    t2.request()
+    try:
+        t2.raise_if_cancelled(run)
+    except RunSuperseded:
+        raise AssertionError("a Cancel press must not raise RunSuperseded")
+    except RunCancelled:
+        pass
+    else:
+        raise AssertionError("expected RunCancelled")
+
+
+def test_run_superseded_is_a_run_cancelled():
+    """Existing `except RunCancelled` handlers must keep catching it, so a
+    caller that does not care about the distinction still unwinds correctly."""
+    assert issubclass(RunSuperseded, RunCancelled)
+
+
+def test_the_cancel_button_still_works_after_a_supersede():
+    """The ceiling is monotonic and never cleared, so it must not shadow a
+    later press aimed at the run that did the superseding."""
+    t = CancelToken()
+    t.begin()
+    _, current = t.supersede()
+    assert not t.is_cancelled(current)
+
+    t.request()
+    assert t.is_cancelled(current), "Cancel stopped working after a supersede"
+    assert not t.was_superseded(current), (
+        "the press was misreported as a supersede, so the panel would be left "
+        "blank instead of saying cancelled"
+    )
+
+
+def test_supersede_with_nothing_in_flight_reports_nothing_replaced():
+    t = CancelToken()
+    superseded, first = t.supersede()
+    assert superseded is None, "claimed to replace work that never existed"
+    assert first == 1
+    assert not t.is_cancelled(first)
+
+
+def test_a_superseded_report_writes_nothing_rather_than_a_cancelled_panel():
+    """The forward-reaching wrong-output bug. case_report_html is in
+    FLUSH_OUTPUT_NAMES, so the new run has already blanked it; a superseded
+    report that RETURNS a panel paints the dead run over the live one. It has
+    to raise instead."""
+    e = _engine()
+    old = e._cancel.begin()
+    e._pending_case_reports.append(
+        {"run_seq": old, "captures": [{}], "full_json": {"video_info": {}},
+         "event_log": [], "peak_snapshots": [], "vlm_backend": "Claude (API)",
+         "vlm_api_key": "", "analytics_result": None})
+    e._cancel.supersede()                  # a new run replaces it
+
+    try:
+        e.finalize_case_report()
+    except RunSuperseded:
+        pass
+    else:
+        raise AssertionError(
+            "a superseded case report returned a value instead of raising; it "
+            "would be painted over the new run's freshly flushed panel"
+        )
+    assert not e._pending_case_reports, "the superseded payload was left queued"
+
+
+def test_a_pressed_cancel_still_paints_the_cancelled_panel():
+    """The other half: a user Cancel must keep SAYING cancelled."""
+    e = _engine()
+    run = e._cancel.begin()
+    e._pending_case_reports.append(
+        {"run_seq": run, "captures": [{}], "full_json": {"video_info": {}},
+         "event_log": [], "peak_snapshots": [], "vlm_backend": "Claude (API)",
+         "vlm_api_key": "", "analytics_result": None})
+    e._cancel.request()
+
+    html, path = e.finalize_case_report()
+    assert "cancelled" in html.lower(), html
+    assert path is None
+
+
+def test_an_earlier_completed_run_still_gets_its_report_after_a_supersede():
+    """The backwards-reaching bug the sequence numbers exist for, re-checked
+    under the new predicate: superseding run 2 must not eat run 1's report if
+    run 1 finished before the supersede."""
+    t = CancelToken()
+    finished = t.begin()
+    assert not t.is_cancelled(finished)
+    # run 1 completes and its report is queued; nothing has been superseded yet
+    # so it stays eligible.
+    assert not t.was_superseded(finished)
+
+
+def test_a_new_run_does_not_wait_out_the_case_report_it_replaced():
+    """The user-facing claim, end to end on the real locking.
+
+    A case report holds `_gpu_lock` for its whole pass and a run has to acquire
+    it, so the new run DOES wait -- but only for as long as the report takes to
+    notice it was superseded, not for as long as the report would have taken.
+    The stub here would run for 30s if nobody stopped it; the run must get going
+    in a fraction of that.
+    """
+    e = _engine()
+    started = threading.Event()
+    stub_finished_naturally = threading.Event()
+    outcome = {}
+
+    def slow_report(**pending):
+        # Stands in for a local VLM: polls the cancel flag the way
+        # _call_vlm and the StoppingCriteria do, between units of work.
+        started.set()
+        deadline = time.perf_counter() + 30.0
+        while time.perf_counter() < deadline:
+            e._cancel.raise_if_cancelled(pending.get("run_seq"),
+                                         "in the case report")
+            time.sleep(0.005)
+        stub_finished_naturally.set()
+        return "<p>report</p>", None
+
+    e._run_case_report = slow_report
+    run_seq = e._cancel.begin()
+    e._pending_case_reports.append(
+        {"run_seq": run_seq, "captures": [{}], "full_json": {"video_info": {}},
+         "event_log": [], "peak_snapshots": [], "vlm_backend": "Claude (API)",
+         "vlm_api_key": "", "analytics_result": None})
+
+    def report_thread():
+        try:
+            e.finalize_case_report()
+        except RunSuperseded as exc:
+            outcome["superseded"] = str(exc)
+        except BaseException as exc:            # noqa: BLE001 - reported below
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    t = threading.Thread(target=report_thread, daemon=True)
+    t.start()
+    assert started.wait(5), "the stub case report never started"
+
+    # The new run. process_video is the wrapper that supersedes and then takes
+    # the lock; the pipeline underneath is stubbed so this test stays CPU-only.
+    e._process_video = lambda *a, **k: "ran"
+    t0 = time.perf_counter()
+    result = e.process_video("some_video.mp4")
+    elapsed = time.perf_counter() - t0
+
+    t.join(10)
+    assert result == "ran"
+    assert not stub_finished_naturally.is_set(), (
+        "the case report ran to completion; the new run waited it out instead "
+        "of superseding it"
+    )
+    assert "superseded" in outcome, (
+        f"the report did not stop with RunSuperseded: {outcome}"
+    )
+    assert elapsed < 5.0, (
+        f"the new run took {elapsed:.1f}s to get going; it should only wait for "
+        f"the superseded report to release the engine lock"
+    )
 
 
 if __name__ == "__main__":

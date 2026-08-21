@@ -33,13 +33,32 @@ box for the key anyway. The GK_* variables in app_poc_v2.py are debugging
 switches that default to off.
 """
 import os
+import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import console_ui as ui
+
+#: transformers still probes for TensorFlow: image_transforms.py does
+#: `if is_tf_available(): import tensorflow as tf`, which fires when the
+#: Qwen3-VL processor is built and prints two absl/oneDNN banners to stderr.
+#: Nothing here uses TF. USE_TF=0 makes is_tf_available() False so the import
+#: never happens; the other two only matter if something else pulls TF in.
+#: All three have to be set before the first transformers import -- once TF
+#: has initialised they are ignored. Set here as well as in app_poc_v2.py so
+#: the child processes launched below -- the model fetch and the demo itself --
+#: inherit them; nothing in this file imports transformers directly.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 #: Without this, this script's prints sit in a buffer while the pip and
-#: setup output of the child processes goes straight out, and the log
-#: reads out of order -- confusing for anyone trying to follow along.
+#: setup output of the child processes goes straight out, and the log reads
+#: out of order -- confusing for anyone trying to follow along. The stream's
+#: encoding is console_ui's business and is already settled by the import
+#: above.
 sys.stdout.reconfigure(line_buffering=True)
 
 HERE = Path(__file__).resolve().parent
@@ -58,10 +77,6 @@ VIDEO_SUFFIXES = (".mp4", ".avi", ".mov")
 URL = "http://localhost:7860"
 
 
-def line(char="-", n=74):
-    print(char * n)
-
-
 def check_weights() -> bool:
     """git-lfs check. Without it the .pt files are text pointers, and the
     failure that produces downstream names neither git nor lfs."""
@@ -74,23 +89,28 @@ def check_weights() -> bool:
             broken.append((rel, f"{path.stat().st_size} bytes — a git-lfs "
                                 f"pointer, not the model"))
     if not broken:
-        print("  model weights    ok")
+        ui.ok("model weights", f"{len(REQUIRED_WEIGHTS)} files present")
         return True
 
-    line("=")
-    print("The model weights did not come through.\n")
-    for rel, why in broken:
-        print(f"  {rel}  ({why})")
-    print("\nThis repository stores its weights with Git LFS. A plain `git")
-    print("clone` on a machine without LFS installed silently substitutes")
-    print("small text pointers for the real files.\n")
-    print("To fix it, in this folder:\n")
-    print("    git lfs install")
-    print("    git lfs pull\n")
-    print("Install Git LFS first if that command is not found:")
-    print("    https://git-lfs.com\n")
-    print("Then run this again.")
-    line("=")
+    ui.fail("model weights",
+            f"{len(broken)} of {len(REQUIRED_WEIGHTS)} unusable")
+    ui.problem("The model weights did not come through.", [
+        *(f"  {rel}  ({why})" for rel, why in broken),
+        "",
+        "This repository stores its weights with Git LFS. A plain `git",
+        "clone` on a machine without LFS installed silently substitutes",
+        "small text pointers for the real files.",
+        "",
+        "To fix it, in this folder:",
+        "",
+        "    git lfs install",
+        "    git lfs pull",
+        "",
+        "Install Git LFS first if that command is not found:",
+        "    https://git-lfs.com",
+        "",
+        "Then run this again.",
+    ])
     return False
 
 
@@ -100,15 +120,14 @@ def check_sample_videos() -> None:
     clips = ([p for p in folder.iterdir() if p.suffix.lower() in VIDEO_SUFFIXES]
              if folder.is_dir() else [])
     if clips:
-        print(f"  sample videos    {len(clips)} in sample_videos/")
+        ui.ok("sample clips", f"{len(clips)} in sample_videos/")
         return
-    print("  sample videos    none found")
-    print("                   The dropdown will be empty. Either drop an .mp4")
-    print(f"                   into {folder}")
-    print("                   and restart, or drag a video into the upload box")
-    print("                   once the page opens. Clips are not part of the")
-    print("                   repository — they are store recordings, so")
-    print("                   whoever sent you this sends the clip separately.")
+    ui.warn("sample clips", "none found")
+    ui.note("The dropdown will be empty. Drop an .mp4 into")
+    ui.note(str(folder))
+    ui.note("and restart, or drag a video into the upload box once the page "
+            "opens. Clips are not in the repository — they are store "
+            "recordings, so whoever sent you this sends the clip separately.")
 
 
 def venv_python() -> Path:
@@ -120,10 +139,13 @@ def ensure_environment() -> bool:
     """Build the venv if it is missing, verify it if it is not. All of the
     actual logic lives in create_virtual_env.py; this just calls it in the mode
     that is safe to run every time."""
-    print("\nChecking the environment (first run downloads several GB and can")
-    print("take 10-20 minutes — later runs take a couple of seconds)...\n")
+    ui.detail("First run downloads several GB and can take 10-20 minutes.")
+    ui.detail("Later runs verify in a couple of seconds.")
+    started = time.monotonic()
     result = subprocess.run([sys.executable,
                              str(HERE / "create_virtual_env.py"), "--ensure"])
+    if result.returncode == 0:
+        ui.took(time.monotonic() - started)
     return result.returncode == 0
 
 
@@ -187,7 +209,8 @@ def fetch_case_report_model() -> None:
     case report works without it, and a machine behind a proxy that blocks
     huggingface.co should still get a demo."""
     py = venv_python()
-    print("\nChecking the case-report model (4 GB, first time only)...\n")
+    ui.detail("4 GB, downloaded once and then reused.")
+    started = time.monotonic()
     out = subprocess.run([str(py), "-c", _FETCH_MODEL], capture_output=True,
                          text=True)
     if "---FETCH-OK---" in out.stdout:
@@ -195,15 +218,17 @@ def fetch_case_report_model() -> None:
         detail = {"bundled": "offline copy in models/",
                   "cached": "already downloaded",
                   "downloaded": "downloaded now"}.get(how, how)
-        print(f"  case-report model   ready ({detail})")
+        ui.ok("case-report model", f"ready — {detail}")
+        ui.took(time.monotonic() - started)
         return
     reason = ""
     for chunk in out.stdout.split("---FETCH-FAILED---")[1:]:
         reason = chunk.strip().splitlines()[0]
-    print(f"  case-report model   NOT downloaded ({reason or 'unknown error'})")
-    print("                      Everything else works. The written case report")
-    print("                      will be unavailable, and the first Run Analysis")
-    print("                      will try the download again.")
+    ui.warn("case-report model",
+            f"not downloaded — {reason or 'unknown error'}")
+    ui.note("Everything else works. The written case report will be "
+            "unavailable, and the first Run Analysis will try the download "
+            "again.")
 
 
 def main(argv=None) -> int:
@@ -219,40 +244,64 @@ def main(argv=None) -> int:
     # engine/config.py resolves MODEL_PATH relative to the working directory.
     os.chdir(HERE)
 
-    line("=")
-    print("  POPS demo")
-    line("=")
+    #: Built before anything prints, so the [n/total] counter matches the
+    #: flags actually passed instead of counting phases that get skipped.
+    plan = ["Environment"]
+    if not no_model:
+        plan.append("Case-report model")
+    plan.append("Checkout")
+    if not check_only:
+        plan.append("Launch")
+    step = 0
 
+    def next_phase() -> None:
+        nonlocal step
+        ui.phase(step + 1, len(plan), plan[step])
+        step += 1
+
+    ui.banner("GATEKEEPER SYSTEMS   POPS",
+              "Pushout prevention — single-video analysis demo",
+              f"{platform.system()} {platform.release()}")
+
+    next_phase()
     if not ensure_environment():
-        print("\nSetup did not finish. The messages above say why. Nothing was")
-        print("left running; fix the problem and start this again.")
+        ui.problem("Setup did not finish.", [
+            "The messages above say why. Nothing was left running; fix the",
+            "problem and start this again.",
+        ])
         return 1
 
     if not no_model:
+        next_phase()
         fetch_case_report_model()
 
-    line()
+    next_phase()
     if not check_weights():
         return 1
     check_sample_videos()
-    line()
 
     if check_only:
-        print("\nEverything checks out. Run this again without "
-              "--check-only to start the demo.")
+        print()
+        ui.detail("Everything checks out. Run this again without "
+                  "--check-only to start the demo.")
+        print()
         return 0
 
-    py = venv_python()
-    print(f"\nStarting the demo. Your browser should open at {URL}")
-    print("It can take a minute the first time while the models load.\n")
-    print("Leave this window open — closing it stops the demo.")
-    print("Press Ctrl+C here when you are finished.\n")
-    line()
+    next_phase()
+    ui.launching(URL, [
+        "Your browser opens by itself. The first load takes a minute while",
+        "the models come up.",
+        "",
+        "Leave this window open — closing it stops the demo.",
+        "Press Ctrl+C here when you are finished.",
+    ])
 
+    py = venv_python()
     try:
         return subprocess.run([str(py), "app_poc_v2.py"]).returncode
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print()
+        ui.detail("Stopped.")
         return 0
 
 

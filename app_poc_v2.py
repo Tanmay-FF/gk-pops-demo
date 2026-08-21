@@ -5,6 +5,18 @@ Thin Gradio UI wrapper.  All logic lives in engine/*.py.
 python code/demo_app_v2.py
 """
 import os
+
+#: transformers still probes for TensorFlow: image_transforms.py does
+#: `if is_tf_available(): import tensorflow as tf`, which fires when the
+#: Qwen3-VL processor is built and prints two absl/oneDNN banners to stderr.
+#: Nothing here uses TF. USE_TF=0 makes is_tf_available() False so the import
+#: never happens; the other two only matter if something else pulls TF in.
+#: All three have to be set before the first transformers import -- once TF
+#: has initialised they are ignored.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 import time
 import traceback
 from functools import partial
@@ -13,8 +25,9 @@ from pathlib import Path
 import cv2
 import gradio as gr
 
+import console_ui as ui
 from engine import TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor
-from engine.cancellation import RunCancelled
+from engine.cancellation import RunCancelled, RunSuperseded
 from engine import theme as T
 from engine import ui_builder
 from engine.config import TEST_VIDEO_DIR
@@ -520,6 +533,15 @@ def finalize_case_report_handler():
     t0 = time.perf_counter()
     try:
         case_html, case_file = engine.finalize_case_report()
+    except RunSuperseded as e:
+        # A NEWER run replaced this one, so its Run click already flushed
+        # case_report_html and case_report_download (both are in
+        # FLUSH_OUTPUT_NAMES). Returning any value -- even the "cancelled"
+        # panel -- would paint this dead run's result over the live run's fresh
+        # panels. gr.skip() leaves both components exactly as the flush left
+        # them, so the new run's own finalize fills them in when it gets there.
+        print(f"[CANCEL] case report abandoned: {e}")
+        return gr.skip(), gr.skip()
     except RunCancelled as e:
         # Same reasoning as run_analysis: not a failure, so not the SAFETY
         # notice. The engine also returns a "cancelled" panel without raising
@@ -1695,12 +1717,21 @@ if __name__ == "__main__":
     # Announce the bisection switches at startup, so the log of any run says
     # which configuration produced it. Without this, "it froze again" and "it
     # froze again, with app.js off" are indistinguishable after the fact.
+    #: Printed here, not at import time: the rows below are the only thing
+    #: under this heading, and everything between the import and this point
+    #: is model loading. A heading that appears a minute before its own
+    #: content reads as a hang.
+    ui.phase_free("Runtime")
     _sw = _active_switches()
-    print(f"[gk] bisection switches: {', '.join(_sw) if _sw else 'none (normal run)'}")
-    if NO_APP_JS:
-        print("[gk]   -> launching WITHOUT static/app.js")
-    if NO_APP_CSS:
-        print("[gk]   -> launching WITHOUT static/app.css")
+    if _sw:
+        ui.warn("bisection", ", ".join(_sw))
+        if NO_APP_JS:
+            ui.note("launching WITHOUT static/app.js")
+        if NO_APP_CSS:
+            ui.note("launching WITHOUT static/app.css")
+    else:
+        ui.ok("bisection", "none — normal run")
+    print()
 #5173
     demo.launch( 
         server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True, 

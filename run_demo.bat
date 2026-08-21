@@ -19,6 +19,8 @@ cd /d "%~dp0"
 title POPS demo
 
 echo.
+echo    Looking for a Python to run the demo on...
+echo.
 set "PY="
 set "UV="
 
@@ -33,15 +35,16 @@ call :try_py 3.11
 if defined PY goto found_python
 
 rem --- 3. uv, installing it first if this machine does not have it ----------
-echo  No suitable Python found on this machine (3.11 or 3.12 is required).
-echo  Using uv to fetch a private copy that will not affect anything else.
+echo   [!]  python                none suitable on this machine
+echo                               3.11 or 3.12 is required. Fetching a private copy
+echo                               with uv; nothing else on this machine is affected.
 echo.
 
 for /f "delims=" %%P in ('where uv 2^>nul') do set "UV=%%P"
 if not defined UV if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
 
 if not defined UV (
-    echo  Installing uv from https://astral.sh/uv ...
+    echo   [-]  uv                    installing from https://astral.sh/uv
     echo.
     rem The pipe is inside the quoted -Command argument, so cmd never
     rem sees it and it must NOT be escaped: a "^|" here reaches
@@ -53,27 +56,28 @@ if not defined UV (
 
 if not defined UV (
     echo.
-    echo  [PROBLEM] uv could not be installed automatically.
+    echo   [x]  uv                    could not be installed automatically
     echo.
-    echo  Please install Python 3.12 from https://www.python.org/downloads/
-    echo  - tick "Add python.exe to PATH" in the installer - then run this
-    echo  file again.
+    echo    Install Python 3.12 from https://www.python.org/downloads/ -
+    echo    tick "Add python.exe to PATH" in the installer - then run this
+    echo    file again.
     goto fail
 )
 
-echo  Downloading Python 3.12 ...
+echo   [-]  python                downloading 3.12
 "%UV%" python install 3.12
 for /f "delims=" %%P in ('"%UV%" python find 3.12 2^>nul') do set "PY=%%P"
 
 if not defined PY (
     echo.
-    echo  [PROBLEM] could not obtain a Python 3.12.
-    echo  Check that this machine can reach the internet, then try again.
+    echo   [x]  python                could not obtain a 3.12
+    echo                               Check that this machine can reach the internet,
+    echo                               then try again.
     goto fail
 )
 
 :found_python
-echo  Using Python: %PY%
+echo   [-]  python                %PY%
 echo.
 
 :run
@@ -81,15 +85,15 @@ echo.
 if errorlevel 1 goto fail
 
 echo.
-if "%~1"=="" echo  The demo has stopped.
+if "%~1"=="" echo    The demo has stopped.
 goto end
 
 :fail
 echo.
-echo  ======================================================================
+echo   ======================================================================
 echo    Setup did not finish. The messages above explain why.
 echo    Send a photo of this window to whoever gave you this folder.
-echo  ======================================================================
+echo   ======================================================================
 
 :end
 echo.
