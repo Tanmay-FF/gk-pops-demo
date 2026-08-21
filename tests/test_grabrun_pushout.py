@@ -202,13 +202,16 @@ check("no cart detected still scores 0",
 
 
 # ---------------------------------------------------------------------------
-section("the escalation survives the event/snapshot sync in both directions")
+section("the escalation has to come from the finaliser, not just from a frame")
 # ---------------------------------------------------------------------------
 # The live per-frame path and the end-of-run finaliser both score this cart, and
-# sync_events_with_snapshots() keeps whichever read scored HIGHER as a unit. So
-# the escalation only reaches the user if it survives regardless of which of the
-# two paths produced it — a 75 that gets voted back to 65 by the other side is
-# precisely the orig=75/recomp=60 defect the finaliser exists to prevent.
+# sync_events_with_snapshots() rewrites every row from the RECONCILED snapshot —
+# there is no live-peak floor, in either direction. So a merch-removed escalation
+# only reaches the user if the finaliser reaches it too: the finaliser reads
+# `abandoned` from the cart's best event and re-derives merch_removed from the
+# whole classification history, so an escalation the live path found is normally
+# re-found there. What it cannot do any more is survive on the strength of the
+# live frame alone.
 _ESCALATED = MERCH_REMOVED_FLOOR
 _esc_event_name, _ = classify_event(_ESCALATED, True, "UNKNOWN", abandoned=True)
 
@@ -224,30 +227,37 @@ check("a 65 live row is rewritten from the escalated snapshot",
       == (_ESCALATED, "PUSHOUT ALERT"),
       f"got {(_events[0]['pops_score'], _events[0]['event'])}")
 
-# Live path escalated, finaliser recomputed lower (its `abandoned` came from a
-# best-event context that did not carry the flag). The live reading is the floor.
+# The other direction: live path escalated, finaliser recomputed lower (its
+# `abandoned` came from a best-event context that did not carry the flag). The
+# snapshot wins here too, and the row is rewritten DOWN — the price of making the
+# reconciliation the single authority on a cart's contents. What keeps the real
+# escalation safe is that the finaliser derives merch_removed from the same
+# history the vote reads, so this shape means the evidence was not there at the
+# end of the run either.
 _events = [{"cart_id": 2, "frame": 40, "event": _esc_event_name,
             "pops_score": _ESCALATED, "fill": "partial", "bag": "unbagged"}]
 _snapshots = {2: {"fill": "partial", "bag": "unbagged", "score": 65,
                   "event": "ABANDONED CART"}}
 _max = {2: 65}
-sync_events_with_snapshots(_events, _snapshots, _max)
-check("an escalated live row is not demoted by a 65 snapshot",
-      (_events[0]["pops_score"], _events[0]["event"])
-      == (_ESCALATED, "PUSHOUT ALERT"),
+_notes = sync_events_with_snapshots(_events, _snapshots, _max)
+check("an escalated live row IS rewritten from a 65 snapshot",
+      (_events[0]["pops_score"], _events[0]["event"]) == (65, "ABANDONED CART"),
       f"got {(_events[0]['pops_score'], _events[0]['event'])}")
-check("and the snapshot is lifted with it, so table and row agree",
-      (_snapshots[2]["score"], _snapshots[2]["event"])
-      == (_ESCALATED, "PUSHOUT ALERT"),
+check("the snapshot is not lifted to meet it, so table and row still agree",
+      (_snapshots[2]["score"], _snapshots[2]["event"]) == (65, "ABANDONED CART"),
       f"got {(_snapshots[2]['score'], _snapshots[2]['event'])}")
-check("max_pops follows the escalated reading", _max[2] == _ESCALATED,
+check("max_pops stays on the reconciled reading", _max[2] == 65,
       f"got {_max[2]}")
+check("and the demotion is reported rather than silent", bool(_notes),
+      f"got {_notes}")
 
 # The rewritten name has to still be loggable, or prune_event_log() drops the
-# alert on the floor after the sync just promoted it.
+# row on the floor after the sync just rewrote it. Checked for both outcomes of
+# the sync, since either can be what a row ends up carrying.
 check("PUSHOUT ALERT is a loggable event", "PUSHOUT ALERT" in LOGGABLE_EVENTS)
+check("so is ABANDONED CART", "ABANDONED CART" in LOGGABLE_EVENTS)
 _kept, _dropped = prune_event_log(_events)
-check("the promoted row survives pruning", len(_kept) == 1 and _dropped == 0,
+check("the rewritten row survives pruning", len(_kept) == 1 and _dropped == 0,
       f"got kept={len(_kept)} dropped={_dropped}")
 
 

@@ -133,23 +133,36 @@ sync_events_with_snapshots(log, snap, {1: 45})
 assert_coherent("outside clip shape", log)
 
 # ---------------------------------------------------------------------------
-section("the live-peak floor still wins as a UNIT, never blended")
+section("the reconciliation wins even when it demotes the row")
 # ---------------------------------------------------------------------------
-# A row that scored higher live keeps its OWN reading, all fields together. If the
-# floor took the score but left the snapshot's context, it would manufacture
-# exactly the incoherence above.
+# There is no live-peak floor. The snapshot has been reconciled from the whole
+# classification history, so a row that scored higher live is rewritten DOWN from
+# it — score, labels and context together, as one reading. This is gk-pops-code's
+# rule: the vote is the only authority on what was in the cart.
 snap = {
     1: {"fill": "empty", "bag": "not_applicable", "score": 5,
         "event": "INBOUND", "direction": "INBOUND", "speed_status": "STATIC",
         "linked": False, "abandoned": False, "frame": 200, "timestamp": 10.0},
 }
+max_pops = {1: 5}
 log = [_row(event="PUSHOUT ALERT", pops_score=75, fill="partial", bag="unbagged",
             direction="OUTBOUND", speed_status="SLOW", abandoned=True)]
-notes = sync_events_with_snapshots(log, snap, {1: 5})
-check("the higher live reading is kept", log[0]["pops_score"] == 75,
-      str(log[0]["pops_score"]))
-check("and it is explained in the notes, not applied silently", bool(notes), str(notes))
-assert_coherent("live floor", log)
+notes = sync_events_with_snapshots(log, snap, max_pops)
+check("the row takes the reconciled score, not the higher live one",
+      log[0]["pops_score"] == 5, str(log[0]["pops_score"]))
+check("...and the reconciled labels with it",
+      (log[0]["fill"], log[0]["bag"]) == ("empty", "not_applicable"),
+      f"{log[0]['fill']}|{log[0]['bag']}")
+check("...and the reconciled context, so the row is still one reading",
+      (log[0]["direction"], log[0]["speed_status"], log[0]["abandoned"])
+      == ("INBOUND", "STATIC", False),
+      f"{log[0]['direction']} {log[0]['speed_status']} abandoned={log[0]['abandoned']}")
+check("the snapshot is left as the reconciliation set it",
+      (snap[1]["score"], snap[1]["fill"]) == (5, "empty"), str(snap[1]))
+check("and max_pops is not raised to the live reading", max_pops[1] == 5,
+      str(max_pops[1]))
+check("the demotion is reported, not applied silently", bool(notes), str(notes))
+assert_coherent("reconciled demotion", log)
 
 # ---------------------------------------------------------------------------
 section("an event needs the medium tier, not just a loggable name")

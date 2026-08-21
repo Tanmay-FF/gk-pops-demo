@@ -599,14 +599,15 @@ def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]
     The snapshot has just been reconciled (confidence-weighted fill/bag vote
     over the whole classification history, score recomputed from it), so it is
     the source of truth and every logged row for that cart is rewritten from it.
+    There is no exception: a row that scored higher live does NOT keep its own
+    reading, and a reconciliation that lands lower rewrites the row downward.
 
-    The one exception is a score FLOOR: if the row logged live scored higher
-    than the reconciliation, the live reading wins - but as a UNIT, all four
-    fields together, never a blend. That keeps the protection the old
-    "Events is truth for abandonment" branch was really providing (a finaliser
-    re-vote must not quietly demote a confirmed pushout, orig=75 recomp=60)
-    without letting one frame's bag label overwrite a voted one, which is what
-    that branch actually did.
+    There used to be a score FLOOR here, mirroring the one in the finaliser, so
+    that a re-vote could not quietly demote a confirmed pushout (orig=75
+    recomp=60). It is gone, with the finaliser's, because it also let one
+    frame's labels stand against the vote of a whole history - which is how a
+    cart voted partial was reported full. The vote is the better evidence about
+    contents, and the two paths have to agree, so both defer to it.
     """
     notes: list[str] = []
     last_event: dict = {}
@@ -618,28 +619,14 @@ def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]
             continue
         snap = peak_snapshots[cd]
         if ev["pops_score"] > snap.get("score", 0):
+            # Reported, not acted on. The row is about to be rewritten downward
+            # from the snapshot, and a demotion that happens silently is how a
+            # score nobody can account for reaches a demo.
             notes.append(
-                f"Cart {cd}: keeping live event reading "
-                f"{ev['fill']}|{ev['bag']} {ev['event']} score={ev['pops_score']} "
-                f"over reconciled {snap.get('fill')}|{snap.get('bag')} "
-                f"score={snap.get('score')}"
+                f"Cart {cd}: reconciled {snap.get('fill')}|{snap.get('bag')} "
+                f"score={snap.get('score')} overrides the live event reading "
+                f"{ev['fill']}|{ev['bag']} {ev['event']} score={ev['pops_score']}"
             )
-            # ALL of the row's fields, not just the four the score is printed
-            # with. "As a unit" has to include the inputs: copying score, fill and
-            # bag while leaving the snapshot's direction, speed and abandonment
-            # means the rewrite loop below then stamps THOSE onto the row, and the
-            # result is a score from the live frame beside a context from the
-            # reconciliation — the exact incoherence this function exists to
-            # prevent, manufactured by the branch meant to prevent it.
-            snap["fill"] = ev["fill"]
-            snap["bag"] = ev["bag"]
-            snap["score"] = ev["pops_score"]
-            snap["event"] = ev["event"]
-            snap["direction"] = ev.get("direction", snap.get("direction"))
-            snap["speed_status"] = ev.get("speed_status", snap.get("speed_status"))
-            snap["linked"] = ev.get("linked", snap.get("linked"))
-            snap["abandoned"] = ev.get("abandoned", snap.get("abandoned"))
-            max_pops[cd] = ev["pops_score"]
 
         # EVERY row for this cart, not just the last one. Rewriting only the
         # last row left a cart's earlier rows carrying the un-reconciled score,

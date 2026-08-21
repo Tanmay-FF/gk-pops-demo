@@ -1889,8 +1889,9 @@ class TrackingEngine:
             #
             # vote_classification() is the SAME function the frame loop scores
             # with, which is the point: the two paths can no longer land on
-            # different labels for one cart, so `original_score > final_score`
-            # below can only ever mean the two paths saw different CONTEXT.
+            # different labels for one cart, so a live peak that scored higher
+            # than the reconciliation below differs only in CONTEXT — direction,
+            # pace, abandonment — never in what was in the cart.
             if cd in self._cart_cls_history:
                 history = self._cart_cls_history[cd]
                 if history:
@@ -1989,54 +1990,49 @@ class TrackingEngine:
                 final_score, linked, direction, abandoned=abandoned,
             )
 
-            # The live peak is a FLOOR, and it wins as a unit.
+            # The reconciliation is the ONLY authority, and it writes back
+            # unconditionally — including when it scores LOWER than the live peak
+            # this cart reached mid-run.
             #
-            # `original_score` was computed and printed and then discarded, so a
-            # reconciliation that lands lower silently demoted the cart: on the
-            # 1764099569430 clip a live peak of 55 was reported as 45. Which
-            # reading is right is not decidable here — the vote is better evidence
-            # about fill and bag, the peak is better evidence about what the cart
-            # was doing at its worst moment — but a score from one and a context
-            # from the other describes a cart that never existed. So keep whichever
-            # is higher, with all of its own fields, and never blend. That is the
-            # same rule sync_events_with_snapshots() applies to an event row that
-            # scored higher live, and the two have to agree or the POPS table and
-            # the Events tab tell different stories about one cart.
-            # Only a peak recorded on a CLASSIFIED frame can floor the
-            # reconciliation. The vote exists precisely to overrule noisy
-            # single-frame classification, so a peak whose own frame read
-            # `unclear` is not the better evidence — and without this check the
-            # floor resurrected exactly those: carts scoring 5 on an unclear
-            # frame beat their own reconciled 0 and reappeared in the POPS table
-            # with a `non-applicable` fill.
-            peak_quality = snap.get("quality", "unclassified")
-            if (original_score > final_score
-                    and peak_quality not in ("unclear", "unclassified")):
-                print(f"[POPS] Cart {cd}: keeping live peak "
-                      f"{snap.get('fill')}|{snap.get('bag')} "
-                      f"{snap.get('event')} score={original_score} over "
-                      f"reconciled {best_fill}|{best_bag} score={final_score}")
-                self._max_pops_per_cart[cd] = original_score
-            else:
-                # Write back ALL fields consistently
-                snap.update({
-                    "fill": best_fill, "bag": best_bag, "quality": "valid_cart",
-                    "score": final_score, "event": final_event, "color": final_color,
-                    "direction": direction, "speed_status": speed_status,
-                    "linked": linked, "abandoned": abandoned,
-                    "merch_removed": merch_removed,
-                })
-                self._max_pops_per_cart[cd] = final_score
+            # The live peak used to be a floor: whichever of the two scored
+            # higher won, with all of its own fields. That is what put a cart in
+            # the POPS table under a fill its own history voted against. On the
+            # FF1763940475070 INSIDE clip Cart 3 was voted partial|bagged (fill
+            # score 320 partial against 47 full) and displayed full|bagged,
+            # because one full-reading frame had scored 40 against the
+            # reconciled 35 and carried its labels with it.
+            #
+            # The cost is real and is accepted deliberately: a reconciliation
+            # that lands lower now demotes the cart, which on the 1764099569430
+            # OUTSIDE clip reports a live peak of 55 as 45. The vote is the
+            # better evidence about what was in the cart — it is the whole
+            # classification history against one frame — and a fill the table
+            # shows has to be the fill the vote reached. Anything else is a
+            # number from one reading beside a label from another.
+            #
+            # This is gk-pops-code's rule, taken as it stands there: see its
+            # engine/tracker.py, where snap.update() is likewise unconditional.
+            # sync_events_with_snapshots() drops its matching floor for the same
+            # reason, and the two have to agree or the POPS table and the Events
+            # tab tell different stories about one cart.
+            snap.update({
+                "fill": best_fill, "bag": best_bag, "quality": "valid_cart",
+                "score": final_score, "event": final_event, "color": final_color,
+                "direction": direction, "speed_status": speed_status,
+                "linked": linked, "abandoned": abandoned,
+                "merch_removed": merch_removed,
+            })
+            self._max_pops_per_cart[cd] = final_score
             print(f"[POPS] Cart {cd}: {best_fill}|{best_bag} {direction} "
                   f"score={final_score} (orig={original_score} recomp={recomputed}) "
                   f"[{source}]"
                   + (" merch_removed" if merch_removed else ""))
 
         # --- Sync last event per cart with POPS table ---
-        # The reconciled POPS snapshot is the single source of truth and the
-        # Events rows are rewritten from it; a row that scored higher live keeps
-        # its own reading as a unit. See sync_events_with_snapshots() for why
-        # the old "Events is truth for abandonment" direction was wrong: it
+        # The reconciled POPS snapshot is the single source of truth and every
+        # Events row is rewritten from it, downward included. See
+        # sync_events_with_snapshots() for why the old "Events is truth for
+        # abandonment" direction was wrong: it
         # discarded the reconciliation that had just been PRINTED, so the
         # 1764099569430 OUTSIDE clip logged `Cart 1: partial|unbagged score=65`
         # and showed partial|bagged 55 in the UI, and no cart could ever be

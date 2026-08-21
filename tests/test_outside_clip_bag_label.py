@@ -222,21 +222,30 @@ check("the event row is rewritten from the snapshot",
 check("no override note when reconciliation wins", notes == [],
       f"got {notes}")
 
-# The floor the old branch was really providing: a finaliser re-vote must not
-# demote a confirmed pushout (the orig=75 recomp=60 regression).
+# The reverse direction, and the price of making the vote the only authority: a
+# live PUSHOUT ALERT at 75 against a reconciled 60 is rewritten DOWN. There is no
+# score floor in either path any more — see sync_events_with_snapshots(). The
+# escalation this file is about survives because the finaliser re-derives
+# merch_removed from the same history the vote reads, not because the live frame
+# is held against it.
 snapshots = {2: {"fill": "empty", "bag": "not_applicable", "score": 60,
                  "event": "ABANDONED CART"}}
 events = [{"cart_id": 2, "frame": 120, "event": "PUSHOUT ALERT",
            "pops_score": 75, "fill": "partial", "bag": "unbagged"}]
 max_pops = {2: 60}
 notes = sync_events_with_snapshots(events, snapshots, max_pops)
-check("a higher live score still wins", snapshots[2]["score"] == 75,
-      f"got {snapshots[2]['score']}")
-check("and it wins as a UNIT, not a blend",
+check("the reconciled reading stands, high live score or not",
+      snapshots[2]["score"] == 60, f"got {snapshots[2]['score']}")
+check("the snapshot is not blended with the live row",
       (snapshots[2]["fill"], snapshots[2]["bag"], snapshots[2]["event"])
-      == ("partial", "unbagged", "PUSHOUT ALERT"),
+      == ("empty", "not_applicable", "ABANDONED CART"),
       f"got {(snapshots[2]['fill'], snapshots[2]['bag'], snapshots[2]['event'])}")
-check("the override is reported", len(notes) == 1, f"got {notes}")
+check("and the row is brought down to it",
+      (events[0]["pops_score"], events[0]["fill"], events[0]["event"])
+      == (60, "empty", "ABANDONED CART"),
+      f"got {(events[0]['pops_score'], events[0]['fill'], events[0]['event'])}")
+check("max_pops stays reconciled", max_pops[2] == 60, f"got {max_pops[2]}")
+check("the demotion is reported", len(notes) == 1, f"got {notes}")
 
 # Every row for a cart is rewritten, not only the last one.
 snapshots = {3: {"fill": "partial", "bag": "unbagged", "score": 65,
