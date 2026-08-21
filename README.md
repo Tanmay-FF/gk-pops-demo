@@ -225,13 +225,23 @@ uv itself first if necessary. Then it builds the environment, checks the model
 weights arrived intact, and opens the demo in your browser at
 **http://localhost:7860**.
 
-The first run downloads several GB and takes 10-20 minutes. Later runs start in
-seconds. An internet connection is needed the first time only.
+The first run downloads several GB and takes 10-20 minutes: the environment,
+plus the 4 GB local model that writes the case report. That model is fetched
+during setup on purpose — otherwise it downloads the first time someone clicks
+Run Analysis, silently, while the case-report tab appears to hang. Later runs
+start in seconds. An internet connection is needed the first time only.
+
+**No environment variables are needed.** Nothing has to be set, exported, or
+added to PATH. `ANTHROPIC_API_KEY` is read only if you switch the backend
+dropdown to Claude instead of the local model, and there is a box in the UI for
+that key. The `GK_*` variables in `app_poc_v2.py` are debugging switches that
+default to off.
 
 To check a machine is ready without starting anything:
 
 ```
-run_demo.bat --check-only
+run_demo.bat --check-only     # check and prepare, do not start the demo
+run_demo.bat --no-model       # skip the 4 GB case-report model
 ```
 
 On macOS or Linux, or if you would rather not use the `.bat`:

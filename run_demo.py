@@ -4,6 +4,7 @@ open the UI.
 
     python run_demo.py
     python run_demo.py --check-only   # everything except opening the demo
+    python run_demo.py --no-model     # do not pre-download the case-report model
 
 Safe to run repeatedly. The environment is only built the first time; after
 that this takes a couple of seconds to verify and then launches.
@@ -21,6 +22,15 @@ before anything slow starts:
     you can drag a video into the UI — but worth saying before the browser
     opens rather than after.
   * the virtual environment is missing or half-built.
+  * the local case-report model is not in the Hugging Face cache. It is a 4 GB
+    download that otherwise happens the first time someone clicks Run
+    Analysis, silently, while the case-report tab appears to hang. Better to
+    pay for it during setup, where the wait is expected and visible.
+
+No environment variables are required. ANTHROPIC_API_KEY is read only if you
+pick a Claude backend in the UI instead of the local model, and the UI has a
+box for the key anyway. The GK_* variables in app_poc_v2.py are debugging
+switches that default to off.
 """
 import os
 import subprocess
@@ -117,11 +127,83 @@ def ensure_environment() -> bool:
     return result.returncode == 0
 
 
+#: Run inside the environment. Deliberately NOT huggingface_hub's
+#: snapshot_download: on Windows without Developer Mode that raises
+#: "[WinError 1314] A required privilege is not held by the client" while
+#: trying to symlink a blob into the snapshot directory, even for a model it
+#: has just downloaded. transformers' own per-file path handles the
+#: no-symlink case, and it is what the app itself uses, so warming the cache
+#: this way warms exactly what Run Analysis will later read.
+_FETCH_MODEL = r"""
+import os
+import sys
+import warnings
+warnings.filterwarnings("ignore")
+
+from engine.config import QWEN3_VL_MODEL_ID as MODEL
+from transformers.utils import cached_file
+
+
+def already_cached():
+    # True only if the config AND at least one weight shard are on disk.
+    # Config alone is not enough: an interrupted first run leaves exactly
+    # that.
+    try:
+        config = cached_file(MODEL, "config.json", local_files_only=True)
+    except Exception:
+        return False
+    if not config:
+        return False
+    snapshot = os.path.dirname(config)
+    return any(f.endswith(".safetensors") for f in os.listdir(snapshot))
+
+
+if already_cached():
+    print("---FETCH-OK---cached")
+    sys.exit(0)
+
+try:
+    from huggingface_hub import list_repo_files
+    for name in list_repo_files(MODEL):
+        if not name.endswith("/"):
+            cached_file(MODEL, name)
+except Exception as e:
+    print("---FETCH-FAILED---" + type(e).__name__ + ": " + str(e))
+    sys.exit(0)
+
+print("---FETCH-OK---downloaded")
+"""
+
+
+def fetch_case_report_model() -> None:
+    """Warm the Hugging Face cache. Never fatal: everything except the written
+    case report works without it, and a machine behind a proxy that blocks
+    huggingface.co should still get a demo."""
+    py = venv_python()
+    print("\nChecking the case-report model (4 GB, first time only)...\n")
+    out = subprocess.run([str(py), "-c", _FETCH_MODEL], capture_output=True,
+                         text=True)
+    if "---FETCH-OK---" in out.stdout:
+        print("  case-report model   ready")
+        return
+    reason = ""
+    for chunk in out.stdout.split("---FETCH-FAILED---")[1:]:
+        reason = chunk.strip().splitlines()[0]
+    print(f"  case-report model   NOT downloaded ({reason or 'unknown error'})")
+    print("                      Everything else works. The written case report")
+    print("                      will be unavailable, and the first Run Analysis")
+    print("                      will try the download again.")
+
+
 def main(argv=None) -> int:
     #: Runs every check and builds the environment, then stops instead of
     #: launching. This is what you run before handing the folder to someone
     #: else: it proves their path works without leaving a server running.
-    check_only = "--check-only" in (argv if argv is not None else sys.argv[1:])
+    args = argv if argv is not None else sys.argv[1:]
+    check_only = "--check-only" in args
+    #: Skips the 4 GB warm-up. For a machine that already has the model, or
+    #: one that is only ever going to use a Claude backend.
+    no_model = "--no-model" in args
 
     # engine/config.py resolves MODEL_PATH relative to the working directory.
     os.chdir(HERE)
@@ -134,6 +216,9 @@ def main(argv=None) -> int:
         print("\nSetup did not finish. The messages above say why. Nothing was")
         print("left running; fix the problem and start this again.")
         return 1
+
+    if not no_model:
+        fetch_case_report_model()
 
     line()
     if not check_weights():
