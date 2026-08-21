@@ -31,7 +31,7 @@
 # ByteTrack's low-confidence second association, which is a real difference in
 # POPS score from the same video. engine/ultralytics_compat.py makes the two
 # agree; the pin is what stops a third version arriving unnoticed.
-ultralytics==8.4.40
+ultralytics==8.4.19
 numpy==1.26.4
 opencv-python==4.11.0.86
 
