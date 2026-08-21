@@ -96,7 +96,17 @@ FRAME_CAPTURE_MAX         = 8
 #: mid-run), and each entry pins a full JSON document plus captured frames.
 PENDING_CASE_REPORTS_MAX  = 3
 MOONDREAM2_MODEL_ID  = "vikhyatk/moondream2"
-QWEN3_VL_MODEL_ID   = "Qwen/Qwen3-VL-2B-Instruct"
+#: Either a Hugging Face repo id, downloaded on demand into the usual
+#: ~/.cache/huggingface cache, or a directory sitting in the repo. The
+#: directory wins when it exists, which is the offline path: copy the
+#: model's 12 files into models/Qwen3-VL-2B-Instruct/ and the machine
+#: never has to reach huggingface.co. transformers' from_pretrained takes
+#: either form, so nothing downstream changes and no variable has to be
+#: set. See models/README.txt.
+_BUNDLED_QWEN3_VL = _REPO_ROOT / 'models' / 'Qwen3-VL-2B-Instruct'
+QWEN3_VL_MODEL_ID = (str(_BUNDLED_QWEN3_VL)
+                     if (_BUNDLED_QWEN3_VL / 'config.json').is_file()
+                     else 'Qwen/Qwen3-VL-2B-Instruct')
 INTERNVL2_MODEL_ID   = "OpenGVLab/InternVL2-2B"
 VLM_MAX_TOKENS_PER_FRAME = 200
 VLM_MAX_TOKENS_SUMMARY   = 1500

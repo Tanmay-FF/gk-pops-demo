@@ -111,6 +111,12 @@ weights/pose_estimation/yolo26n-pose.pt
 # Superseded pip manifest. requirements.txt is the real one; nothing reads this.
 /requirements2.txt
 
+# Offline copy of the case-report model: 4 GB of weights that Hugging Face
+# already hosts. models/README.txt explains when to put them there and stays
+# in git so the instructions survive a clone.
+/models/*
+!/models/README.txt
+
 # OS
 .DS_Store
 Thumbs.db

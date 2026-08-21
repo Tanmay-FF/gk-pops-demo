@@ -144,6 +144,13 @@ from engine.config import QWEN3_VL_MODEL_ID as MODEL
 from transformers.utils import cached_file
 
 
+# A directory rather than a repo id means someone put an offline copy in
+# models/ -- see models/README.txt. Nothing to fetch.
+if os.path.isdir(MODEL):
+    print("---FETCH-OK---bundled")
+    sys.exit(0)
+
+
 def already_cached():
     # True only if the config AND at least one weight shard are on disk.
     # Config alone is not enough: an interrupted first run leaves exactly
@@ -184,7 +191,11 @@ def fetch_case_report_model() -> None:
     out = subprocess.run([str(py), "-c", _FETCH_MODEL], capture_output=True,
                          text=True)
     if "---FETCH-OK---" in out.stdout:
-        print("  case-report model   ready")
+        how = out.stdout.split("---FETCH-OK---")[1].strip().splitlines()[0]
+        detail = {"bundled": "offline copy in models/",
+                  "cached": "already downloaded",
+                  "downloaded": "downloaded now"}.get(how, how)
+        print(f"  case-report model   ready ({detail})")
         return
     reason = ""
     for chunk in out.stdout.split("---FETCH-FAILED---")[1:]:

@@ -250,9 +250,36 @@ On macOS or Linux, or if you would rather not use the `.bat`:
 python run_demo.py
 ```
 
+#### The case-report model
+
+The written case report is produced by **Qwen3-VL-2B-Instruct** — Apache-2.0,
+public, no Hugging Face account and no token. It is ~4 GB and is not in this
+repository.
+
+`run_demo.bat` fetches it during setup and skips instantly on later runs. Three
+ways it can be satisfied, checked in this order:
+
+| Source | When it applies |
+|:--|:--|
+| `models/Qwen3-VL-2B-Instruct/` | You put an offline copy there. Nothing contacts Hugging Face. |
+| `%USERPROFILE%\.cache\huggingface` | It has been downloaded before on this machine. |
+| Hugging Face | Neither of the above — downloaded during setup. |
+
+**Offline or blocked network.** If the machine cannot reach huggingface.co, copy
+the model's 12 files into `models/Qwen3-VL-2B-Instruct/`. `engine/config.py`
+checks for `config.json` there at import and loads from the folder when it
+exists — no variable to set, nothing else to change. `models/README.txt` has
+the copy instructions, including how to lift the files out of a working
+machine's cache.
+
+**If the download fails**, setup says so and carries on. Everything except the
+written case report works; detection, tracking, scoring, the annotated video
+and every dashboard tab are unaffected. `--no-model` skips the fetch
+deliberately.
+
 #### Before you send this folder to someone
 
-1. **Git LFS.** The model weights are LFS objects. Whoever clones needs
+1. **Git LFS.** The detection/classifier weights are LFS objects. Whoever clones needs
    `git lfs install` then `git lfs pull`, or the `.pt` files arrive as 130-byte
    pointers. `run_demo.bat` detects that and says so in plain English rather
    than dying inside torch.
