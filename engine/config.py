@@ -126,6 +126,21 @@ INTERNVL2_MODEL_ID   = "OpenGVLab/InternVL2-2B"
 VLM_MAX_TOKENS_PER_FRAME = 200
 VLM_MAX_TOKENS_SUMMARY   = 1500
 
+#: n-gram blocking exists to stop a 2B model repeating the same sentence until
+#: it runs out of tokens. At 4 it also forbids the model from repeating a
+#: FACT, because a fact is a short n-gram: with "peak POPS score of 100" in
+#: the prompt, the model reaches that phrase, finds the 4-gram banned, and
+#: emits the nearest thing it is allowed to say. Measured on
+#: Qwen3-VL-2B-Instruct, greedy, with that exact prompt:
+#:
+#:     no_repeat_ngram_size=4   ->  "peak POPS score of 99"   (or 101, or the
+#:                                  Unicode subscripts "C2" and "100")
+#:     no_repeat_ngram_size=0   ->  "peak POPS score of 100"  correct
+#:
+#: 12 keeps the anti-looping property -- a repeated sentence is far longer
+#: than twelve tokens -- while leaving short factual phrases sayable.
+VLM_NO_REPEAT_NGRAM      = 12
+
 # ---------------------------------------------------------------------------
 # Classification settings
 # ---------------------------------------------------------------------------

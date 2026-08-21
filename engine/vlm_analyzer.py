@@ -9,6 +9,7 @@ TrackingEngine._run_case_report). Claude API and other open-source local
 models (Moondream2, InternVL2-2B) remain available as alternate backends.
 """
 import base64
+import re
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from PIL import Image
 from .cancellation import RunCancelled
 from .config import (
     MOONDREAM2_MODEL_ID, QWEN3_VL_MODEL_ID, INTERNVL2_MODEL_ID,
-    VLM_MAX_TOKENS_PER_FRAME, VLM_MAX_TOKENS_SUMMARY,
+    VLM_MAX_TOKENS_PER_FRAME, VLM_MAX_TOKENS_SUMMARY, VLM_NO_REPEAT_NGRAM,
 )
 
 # ---------------------------------------------------------------------------
@@ -145,6 +146,67 @@ def _is_suspect_capture(capture: dict, suspect_key: str | None) -> bool:
         return False
     # pops_summary keys are "C{id}"; capture['cart_id'] is the integer id.
     return f"C{cid}" == suspect_key or str(cid) == str(suspect_key)
+
+
+#: Digits the model reaches for when it is not allowed to write the real ones.
+#: With no_repeat_ngram_size low enough to ban a repeated fact, Qwen3-VL-2B was
+#: observed writing "1<subscript zero><subscript zero>" rather than "100" —
+#: visually almost identical, and not a number to anything that parses it.
+_LOOKALIKE_DIGITS = str.maketrans(
+    "₀₁₂₃₄₅₆₇₈₉"
+    "⁰¹²³⁴⁵⁶⁷⁸⁹",
+    "01234567890123456789")
+
+#: A number that follows the word "score" or "POPS" within a few words. Narrow
+#: on purpose: ages, bullet counts and timestamps must not be touched.
+_SCORE_MENTION = re.compile(
+    r"(?i)\b(?:POPS|score)\b[^.\n]{0,40}?\b(\d{1,3})\b")
+
+#: How far a written number may sit from a real one and still be treated as a
+#: corrupted copy of it rather than a different number entirely.
+_SCORE_SLACK = 3
+
+
+def _repair_scores(text: str, pops_summary: dict) -> str:
+    """Snap POPS numbers in VLM prose back to the ones POPS actually produced.
+
+    The decoding settings are the real fix — see VLM_NO_REPEAT_NGRAM — and
+    this is the belt to that pair of braces. A case report is read as a record
+    of what the system measured, so a score in its prose that appears nowhere
+    in its own table is a defect however small the model was.
+
+    Only numbers within _SCORE_SLACK of a genuine score are rewritten. A model
+    that invents 42 out of nothing is not making a copying error, and silently
+    turning that into 100 would be inventing a finding rather than fixing one.
+    """
+    if not text:
+        return text
+    text = text.translate(_LOOKALIKE_DIGITS)
+
+    real = set()
+    for info in (pops_summary or {}).values():
+        try:
+            real.add(int(info.get("max_score")))
+        except (TypeError, ValueError):
+            continue
+    if not real:
+        return text
+
+    def fix(match):
+        whole = match.group(0)
+        written = int(match.group(1))
+        if written in real:
+            return whole
+        near = [s for s in real if abs(s - written) <= _SCORE_SLACK]
+        if not near:
+            return whole
+        # Ties go to the higher score: the number the model is most likely to
+        # have been copying is the headline one, and that is the peak.
+        best = max(near, key=lambda s: (-abs(s - written), s))
+        start = match.start(1) - match.start()
+        return whole[:start] + str(best) + whole[start + len(match.group(1)):]
+
+    return _SCORE_MENTION.sub(fix, text)
 
 
 def _format_pops_table(pops_summary: dict, suspect_key: str | None = None) -> str:
@@ -559,6 +621,7 @@ class VLMAnalyzer:
             analytics_block=analytics_block,
         )
         summary_text = self._call_vlm(None, prompt, VLM_MAX_TOKENS_SUMMARY)
+        summary_text = _repair_scores(summary_text, pops_summary)
         self._parse_summary(summary_text, result)
         if result.risk_level in ("UNKNOWN", "LOW", "MEDIUM"):
             # The model contradicted (or lost) the level it was given. POPS is
@@ -831,12 +894,17 @@ class VLMAnalyzer:
             # Small VLMs (Qwen3-VL-2B in particular) loop badly with greedy
             # defaults — the same sentence repeats until max_tokens runs out.
             # Repetition penalty + n-gram block + EOS gives clean truncation.
+            #
+            # The n-gram size is NOT 4. See VLM_NO_REPEAT_NGRAM in config.py:
+            # at 4 the block also forbids the model from repeating the score
+            # it was given, and a report that says 99 or 101 where POPS says
+            # 100 is worse than a report that repeats itself.
             out = self._local_model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
                 do_sample=False,
                 repetition_penalty=1.15,
-                no_repeat_ngram_size=4,
+                no_repeat_ngram_size=VLM_NO_REPEAT_NGRAM,
                 pad_token_id=self._local_processor.tokenizer.eos_token_id,
                 # Cancellation, checked per generated token. Without it a Cancel
                 # pressed during a summary pass waits out up to
