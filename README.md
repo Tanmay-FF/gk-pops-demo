@@ -12,19 +12,36 @@ POPS processes surveillance video to detect, track, and score shopping carts and
 
 ## Demonstration
 
-Follow these steps to run the POPS demo locally:
+**Double-click `run_demo.bat`.** That is the whole procedure on Windows.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Tanmay-FF/gk-pops-demo
+Nothing has to be installed first. It finds or fetches a Python 3.11/3.12,
+builds the environment, checks the model weights, and opens the demo in your
+browser at **http://localhost:7860**. The first run downloads several GB and
+takes 10-20 minutes; later runs start in seconds.
 
-2. Navigate into the Project Folder:
-   ```bash
-   cd gk-pops-demo
+Before the first run, drop a video clip into `sample_videos/`. Clips are never
+committed since `*.mp4` is gitignored, so whoever sends you this project sends the clip separately.
 
-3. Run demo script:
-   ```bash
-   python run_demo.py
+```
+run_demo.bat                 # normal run
+run_demo.bat --check-only    # prepare the machine, do not open the demo
+run_demo.bat --no-model      # do not pre-fetch the 4 GB case-report model
+```
+
+
+Starting from a fresh clone instead of a copied folder:
+
+```bash
+git clone https://github.com/Tanmay-FF/gk-pops-demo
+cd gk-pops-demo
+git lfs install && git lfs pull    # weights are LFS objects
+run_demo.bat
+```
+
+Handing this to someone non-technical: give them
+[RUN_THIS_DEMO.md](RUN_THIS_DEMO.md). A shorter overview of this build is in
+[QUICKSTART.md](QUICKSTART.md). Details of what `run_demo.bat` does are under
+[Running it](#running-it-no-setup-knowledge-required) below.
 
 ---
 
@@ -220,14 +237,14 @@ Double-click **`run_demo.bat`**. That is the whole procedure.
 
 It needs nothing installed beforehand. It looks for a Python 3.12 or 3.11 on
 the machine, and if there isn't one it uses [uv](https://astral.sh/uv) to
-download a private copy that touches nothing else on the system — installing
-uv itself first if necessary. Then it builds the environment, checks the model
+download a private copy that touches nothing else on the system,
+installing uv itself first if necessary. Then it builds the environment, checks the model
 weights arrived intact, and opens the demo in your browser at
 **http://localhost:7860**.
 
 The first run downloads several GB and takes 10-20 minutes: the environment,
 plus the 4 GB local model that writes the case report. That model is fetched
-during setup on purpose — otherwise it downloads the first time someone clicks
+during setup on purpose; otherwise it downloads the first time someone clicks
 Run Analysis, silently, while the case-report tab appears to hang. Later runs
 start in seconds. An internet connection is needed the first time only.
 
@@ -252,7 +269,7 @@ python run_demo.py
 
 #### The case-report model
 
-The written case report is produced by **Qwen3-VL-2B-Instruct** — Apache-2.0,
+The written case report is produced by **Qwen3-VL-2B-Instruct**: Apache-2.0,
 public, no Hugging Face account and no token. It is ~4 GB and is not in this
 repository.
 
@@ -263,12 +280,12 @@ ways it can be satisfied, checked in this order:
 |:--|:--|
 | `models/Qwen3-VL-2B-Instruct/` | You put an offline copy there. Nothing contacts Hugging Face. |
 | `%USERPROFILE%\.cache\huggingface` | It has been downloaded before on this machine. |
-| Hugging Face | Neither of the above — downloaded during setup. |
+| Hugging Face | Neither of the above, so it is downloaded during setup. |
 
 **Offline or blocked network.** If the machine cannot reach huggingface.co, copy
 the model's 12 files into `models/Qwen3-VL-2B-Instruct/`. `engine/config.py`
 checks for `config.json` there at import and loads from the folder when it
-exists — no variable to set, nothing else to change. `models/README.txt` has
+exists. No variable to set, nothing else to change. `models/README.txt` has
 the copy instructions, including how to lift the files out of a working
 machine's cache.
 
@@ -283,7 +300,7 @@ deliberately.
    `git lfs install` then `git lfs pull`, or the `.pt` files arrive as 130-byte
    pointers. `run_demo.bat` detects that and says so in plain English rather
    than dying inside torch.
-2. **A video clip.** Clips are never committed — `*.mp4` is gitignored, and
+2. **A video clip.** Clips are never committed. `*.mp4` is gitignored, and
    these are store recordings of identifiable people. Send one separately and
    tell the recipient to drop it into `sample_videos/`. Without one the
    dropdown is empty; they can still drag a video into the upload box.
@@ -291,7 +308,7 @@ deliberately.
 
 ### Prerequisites
 
-None, if you use `run_demo.bat` — it obtains what it needs.
+None, if you use `run_demo.bat`. It obtains what it needs.
 
 For a manual setup:
 
@@ -299,7 +316,7 @@ For a manual setup:
   3.10 (scipy 1.17.1 needs >= 3.11). `create_virtual_env.py` refuses to run
   outside that window rather than letting pip fail halfway.
 - **An NVIDIA driver**, if you want GPU inference. You do *not* need the CUDA
-  toolkit — the torch wheels carry their own CUDA runtime. Without a GPU the
+  toolkit; the torch wheels carry their own CUDA runtime. Without a GPU the
   demo still runs; inference is just much slower.
 - **Nothing else.** ffmpeg arrives with the `imageio-ffmpeg` package, so no
   system ffmpeg and no PATH entry is required.
