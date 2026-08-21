@@ -43,7 +43,11 @@ if not defined UV if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFIL
 if not defined UV (
     echo  Installing uv from https://astral.sh/uv ...
     echo.
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 ^| iex"
+    rem The pipe is inside the quoted -Command argument, so cmd never
+    rem sees it and it must NOT be escaped: a "^|" here reaches
+    rem PowerShell literally and it parses "^" as a second argument to
+    rem Invoke-RestMethod.
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
     if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
 )
 
