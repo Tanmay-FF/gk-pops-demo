@@ -82,6 +82,11 @@ _SPEED_SCORE_OUTBOUND = {"FAST": 15, "MEDIUM": 5}
 _SPEED_SCORE_UNKNOWN  = {"FAST": 8}
 
 # Linked person is WITH the cart — dampen risk score
+#: Loose merchandise moving toward the exit. Sized so that a loaded
+#: unbagged cart walked out clears HIGH_SCORE without reaching
+#: PUSHOUT_SCORE -- see the table at its use site.
+LOOSE_MERCH_MOVING = 10
+
 _LINKED_DAMPING = 20
 
 
@@ -127,11 +132,28 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
         #
         # Without this term the textbook pushout — walk a full unbagged cart
         # calmly out the exit — was arithmetically incapable of reaching HIGH:
-        # 15 base + 50 full/unbagged + 5 MEDIUM = 70, one point under the 71
-        # classify_event() needs. Nothing in 71..94 was reachable at all, and
-        # the whole high tier hinged on speed crossing SPEED_MEDIUM (240 px/s),
-        # a threshold that varies with resolution and camera distance. Someone
-        # who simply does not run scored the same tier as a paying customer.
+        # 15 base + 50 full/unbagged + 0 SLOW = 65, well under the 71
+        # classify_event() needs. The whole high tier hinged on speed crossing
+        # SPEED_MEDIUM (240 px/s), a threshold that varies with resolution and
+        # camera distance. Someone who simply does not run scored the same tier
+        # as a paying customer.
+        #
+        # The pace bonus is dropped for MEDIUM here. Left in, it stacks with
+        # this term and lands full+unbagged on exactly PUSHOUT_SCORE, so a
+        # brisk walk is scored identically to a sprint and the high band this
+        # term exists to reach is skipped over:
+        #
+        #     full+unbagged, OUTBOUND      now          with MEDIUM's +5
+        #       STATIC                      65 MEDIUM     65 MEDIUM
+        #       SLOW                        75 HIGH       75 HIGH
+        #       MEDIUM                      75 HIGH       80 PUSHOUT
+        #       FAST                       100 PUSHOUT   105 -> 100 PUSHOUT
+        #
+        # Walking a loaded unbagged cart out is HIGH PRIORITY at any walking
+        # pace. Running with it is a PUSHOUT ALERT. Keeping those apart is the
+        # point of having two tiers. FAST keeps its +15 combo below, so the
+        # sprint still saturates the scale — and now lands on 100 exactly
+        # rather than needing the clamp to hide 105.
         #
         # STATIC is excluded on purpose. A loaded cart standing still near the
         # exit is not leaving yet, and that situation already has an owner: the
@@ -146,7 +168,9 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
         # term under those floors cannot move them.
         if (bag_label == "unbagged" and fill_label in ("partial", "full")
                 and speed_status != "STATIC"):
-            score += 10
+            score += LOOSE_MERCH_MOVING
+            if speed_status == "MEDIUM":
+                score -= _SPEED_SCORE_OUTBOUND["MEDIUM"]
         # Combo: rushing with loose items is the classic pushout pattern
         if speed_status == "FAST" and bag_label == "unbagged" and fill_label in ("partial", "full"):
             score += 15

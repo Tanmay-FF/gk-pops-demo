@@ -595,10 +595,25 @@ check("no INBOUND or UNKNOWN cart can be called a pushout",
       not _bad, f"{len(_bad)} combos: {_bad[:3]}")
 
 # What it means in practice, end to end from the scorer.
-_walk_full = compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="unbagged")
-check("walking a full unbagged cart out is now a pushout",
-      classify_event(_walk_full, False, "OUTBOUND")[0] == "PUSHOUT ALERT",
-      f"score={_walk_full}")
+#
+# Walking pace and running are deliberately different verdicts. A loaded
+# unbagged cart leaving at a walk is HIGH PRIORITY; the same cart at a run is
+# a PUSHOUT ALERT. Both walking bands must agree with each other, or the
+# verdict turns on whether the shopper hurried across an arbitrary px/s line.
+for _pace in ("SLOW", "MEDIUM"):
+    _walk_full = compute_pops("OUTBOUND", _pace, True, "full",
+                              bag_label="unbagged")
+    check(f"walking ({_pace}) a full unbagged cart out is HIGH PRIORITY",
+          classify_event(_walk_full, False, "OUTBOUND")[0] == "HIGH PRIORITY",
+          f"score={_walk_full}")
+
+_run_full = compute_pops("OUTBOUND", "FAST", True, "full", bag_label="unbagged")
+check("running with one is a pushout",
+      classify_event(_run_full, False, "OUTBOUND")[0] == "PUSHOUT ALERT",
+      f"score={_run_full}")
+check("and the two walking paces score the same",
+      compute_pops("OUTBOUND", "SLOW", True, "full", bag_label="unbagged")
+      == compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="unbagged"))
 _bagged = compute_pops("OUTBOUND", "FAST", True, "full", bag_label="bagged")
 check("a bagged full cart is not, however fast",
       classify_event(_bagged, False, "OUTBOUND")[0] != "PUSHOUT ALERT",
