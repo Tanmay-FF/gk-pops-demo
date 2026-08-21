@@ -214,11 +214,81 @@ gk-pops-code/
 
 ---
 
+### Running it (no setup knowledge required)
+
+Double-click **`run_demo.bat`**. That is the whole procedure.
+
+It needs nothing installed beforehand. It looks for a Python 3.12 or 3.11 on
+the machine, and if there isn't one it uses [uv](https://astral.sh/uv) to
+download a private copy that touches nothing else on the system — installing
+uv itself first if necessary. Then it builds the environment, checks the model
+weights arrived intact, and opens the demo in your browser at
+**http://localhost:7860**.
+
+The first run downloads several GB and takes 10-20 minutes. Later runs start in
+seconds. An internet connection is needed the first time only.
+
+To check a machine is ready without starting anything:
+
+```
+run_demo.bat --check-only
+```
+
+On macOS or Linux, or if you would rather not use the `.bat`:
+
+```bash
+python run_demo.py
+```
+
+#### Before you send this folder to someone
+
+1. **Git LFS.** The model weights are LFS objects. Whoever clones needs
+   `git lfs install` then `git lfs pull`, or the `.pt` files arrive as 130-byte
+   pointers. `run_demo.bat` detects that and says so in plain English rather
+   than dying inside torch.
+2. **A video clip.** Clips are never committed — `*.mp4` is gitignored, and
+   these are store recordings of identifiable people. Send one separately and
+   tell the recipient to drop it into `sample_videos/`. Without one the
+   dropdown is empty; they can still drag a video into the upload box.
+3. **Check it.** Run `run_demo.bat --check-only` on the target machine.
+
 ### Prerequisites
 
-- Python 3.10+
-- NVIDIA GPU with CUDA support (recommended)
-- FFmpeg installed and on PATH (for video encoding)
+None, if you use `run_demo.bat` — it obtains what it needs.
+
+For a manual setup:
+
+- **Python 3.11 or 3.12.** Not 3.13 (numpy 1.26.4 has no cp313 wheel) and not
+  3.10 (scipy 1.17.1 needs >= 3.11). `create_virtual_env.py` refuses to run
+  outside that window rather than letting pip fail halfway.
+- **An NVIDIA driver**, if you want GPU inference. You do *not* need the CUDA
+  toolkit — the torch wheels carry their own CUDA runtime. Without a GPU the
+  demo still runs; inference is just much slower.
+- **Nothing else.** ffmpeg arrives with the `imageio-ffmpeg` package, so no
+  system ffmpeg and no PATH entry is required.
+
+### Manual setup
+
+```bash
+python create_virtual_env.py            # detects the GPU, builds the venv, verifies it
+python create_virtual_env.py --dry-run  # see the plan first, install nothing
+python create_virtual_env.py --cpu      # force the CPU build of torch
+python create_virtual_env.py --ensure   # build only if needed; verify and exit otherwise
+```
+
+The script creates `venv_gk-pops-enhanced/`, installs the CUDA build of
+torch/torchvision from PyTorch's own index, then everything in
+`requirements.txt`, and finishes by importing the whole stack and reporting
+whether `torch.cuda.is_available()` actually came back true. It fails loudly if
+a GPU was detected but CUDA is not usable, because the only other symptom of
+that is a demo that runs quietly on the CPU.
+
+Then:
+
+```bash
+venv_gk-pops-enhanced/Scripts/python app_poc_v2.py        # http://localhost:7860
+venv_gk-pops-enhanced/Scripts/python tests/run_all.py --fast
+```
 
 ### Model Weights
 

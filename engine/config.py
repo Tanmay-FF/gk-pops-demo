@@ -11,9 +11,36 @@ from torchvision import transforms
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+#: Relative to the working directory, which run_demo.py and run_demo.bat both
+#: set to the repo root before launching anything.
 MODEL_PATH = r"weights\detection\weights\best.pt"
 TRACKER_CONFIG = r"engine\botsort_retail.yaml"
-TEST_VIDEO_DIR = r"D:\gatekeeper_projects\gk-pops-code\sample_videos"
+
+#: Where the sample-video dropdown looks. This used to be an absolute path
+#: into a sibling checkout on one particular D: drive, which meant the
+#: dropdown was empty on every other machine in the world -- the demo still
+#: ran, but only if you knew to drag a file into the upload box. It is now
+#: the repo's own sample_videos/ directory. Clips are never committed
+#: (*.mp4 is gitignored, and they are store CCTV of identifiable people), so
+#: on a fresh clone the folder is empty until someone drops one in.
+#: run_demo.py says so at startup.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+TEST_VIDEO_DIR = str(_REPO_ROOT / "sample_videos")
+
+#: The old location. Still used when the repo's own folder holds no clips, so
+#: nothing changes on the machine this was developed on -- the library of test
+#: videos there stays one dropdown away. Anywhere else this path does not
+#: exist and the repo folder wins by default.
+_LEGACY_VIDEO_DIR = r"D:\gatekeeper_projects\gk-pops-code\sample_videos"
+
+
+def _has_clips(folder):
+    return os.path.isdir(folder) and any(
+        f.lower().endswith((".mp4", ".avi", ".mov")) for f in os.listdir(folder))
+
+
+if not _has_clips(TEST_VIDEO_DIR) and _has_clips(_LEGACY_VIDEO_DIR):
+    TEST_VIDEO_DIR = _LEGACY_VIDEO_DIR
 #RUNS_ROOT = r"D:\gatekeeper_projects\empty_or_full_classification\runs"
 
 # ---------------------------------------------------------------------------

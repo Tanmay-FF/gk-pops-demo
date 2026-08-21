@@ -80,8 +80,12 @@ runs/
 /design_handoff_gk_pops/
 /diagrams/
 
-# Demo / test scripts and root-level model weights (kept locally, not pushed)
-/run_demo.py
+# Demo / test scripts and root-level model weights (kept locally, not pushed).
+#
+# run_demo.py is NOT in this list any more. It is the launcher run_demo.bat
+# hands over to, so a clone without it gets a batch file that fails on its
+# first real instruction -- which is precisely the person least able to
+# diagnose it.
 /test_cli.py
 /test_cli_img.py
 /mobile_sam.pt
