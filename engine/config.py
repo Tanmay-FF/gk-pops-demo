@@ -98,14 +98,29 @@ PENDING_CASE_REPORTS_MAX  = 3
 MOONDREAM2_MODEL_ID  = "vikhyatk/moondream2"
 #: Either a Hugging Face repo id, downloaded on demand into the usual
 #: ~/.cache/huggingface cache, or a directory sitting in the repo. The
-#: directory wins when it exists, which is the offline path: copy the
-#: model's 12 files into models/Qwen3-VL-2B-Instruct/ and the machine
-#: never has to reach huggingface.co. transformers' from_pretrained takes
-#: either form, so nothing downstream changes and no variable has to be
+#: directory wins when it holds real weights, which is the offline path: copy
+#: the model's files into models/Qwen3-VL-2B-Instruct/ and the machine never
+#: has to reach huggingface.co.
+#: transformers' from_pretrained takes a path or a repo id interchangeably,
+#: so nothing downstream cares which one it got and no variable has to be
 #: set. See models/README.txt.
 _BUNDLED_QWEN3_VL = _REPO_ROOT / 'models' / 'Qwen3-VL-2B-Instruct'
+
+
+def _bundled_model_is_real(folder):
+    # The weights must be weights. A half-finished copy, or a Git LFS pointer
+    # from someone who bundled the model and cloned without git-lfs, leaves a
+    # small text file with the right name -- and pointing transformers at that
+    # fails deep inside safetensors with an error that names neither problem.
+    # Falling back to the download is far kinder.
+    if not (folder / 'config.json').is_file():
+        return False
+    return any(f.stat().st_size > 1_000_000
+               for f in folder.glob('*.safetensors'))
+
+
 QWEN3_VL_MODEL_ID = (str(_BUNDLED_QWEN3_VL)
-                     if (_BUNDLED_QWEN3_VL / 'config.json').is_file()
+                     if _bundled_model_is_real(_BUNDLED_QWEN3_VL)
                      else 'Qwen/Qwen3-VL-2B-Instruct')
 INTERNVL2_MODEL_ID   = "OpenGVLab/InternVL2-2B"
 VLM_MAX_TOKENS_PER_FRAME = 200
