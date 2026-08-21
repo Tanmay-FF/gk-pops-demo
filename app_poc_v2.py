@@ -25,6 +25,7 @@ from pathlib import Path
 import cv2
 import gradio as gr
 
+import console_noise
 import console_ui as ui
 from engine import TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor
 from engine.cancellation import RunCancelled, RunSuperseded
@@ -34,6 +35,13 @@ from engine.config import TEST_VIDEO_DIR
 from engine.config import VLM_BACKENDS, VLM_DEFAULT_BACKEND
 from engine.rules import DEFAULT_THRESHOLDS
 from engine.trajectory_cache import make_video_key
+
+# Third-party console noise, muted before the server starts. Same intent as the
+# USE_TF block at the top of this file: keep the demo console readable so OUR
+# lines are the ones a reader sees. Narrow by construction -- see
+# console_noise.py for what each filter covers and why neither is actionable
+# from this repo.
+console_noise.apply()
 
 _HERE = Path(__file__).resolve().parent
 _STATIC = _HERE / "static"
@@ -1733,10 +1741,23 @@ if __name__ == "__main__":
         ui.ok("bisection", "none — normal run")
     print()
 #5173
-    demo.launch( 
-        server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True, 
-        allowed_paths=_allowed_paths,
-        theme=_THEME,
-        css=(None if NO_APP_CSS else _CSS),
-        js=(None if NO_APP_JS else _JS),
-    )
+    # Guarded so nothing the server does can put a raw traceback on screen
+    # during a demo. Ctrl-C is a normal way to stop it, not a crash, and gets
+    # a plain line; anything else goes to console_noise.report_fatal, which
+    # prints a tidy block and puts the traceback in temp/server_errors.log
+    # rather than on the console. The exit code stays non-zero so
+    # run_demo.bat can still tell it failed.
+    try:
+        demo.launch( 
+            server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True, 
+            allowed_paths=_allowed_paths,
+            theme=_THEME,
+            css=(None if NO_APP_CSS else _CSS),
+            js=(None if NO_APP_JS else _JS),
+        )
+    except KeyboardInterrupt:
+        print()
+        ui.info("stopped", "demo closed from the console")
+    except Exception as _exc:
+        console_noise.report_fatal(_exc)
+        raise SystemExit(1)
