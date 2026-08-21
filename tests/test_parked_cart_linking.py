@@ -24,8 +24,15 @@ WHAT THIS PINS
    tests/fixtures/golden/baseline_outside.json.
 5. A link on a cart that has not moved since it was established is released when
    the owner is visible and no longer touching it, even though nobody is taking
-   the cart over — and the release reports the cart as DISOWNED, which is what
-   tells the tracker to forget the remembered owner too.
+   the cart over.
+5b. The release reports the cart as DISOWNED — which is what tells the tracker to
+   forget the remembered owner too — only when the link never amounted to
+   possession, measured as its peak IoU against LINK_OWNED_PEAK_IOU. A link that
+   DID reach possession is released without being disowned, so the owner stays on
+   record and can still be scored as abandonment when they leave. The real
+   geometry for that half is tests/fixtures/door_side_owner_geometry.py: the
+   FF1763940475070 door-side cart, whose owner held it at IoU peak 0.363 for a
+   hundred frames without ever pushing it.
 6. A person who leaves the FRAME still keeps the link, parked cart or not. That
    is abandonment, and it is the invariant tests/test_abandonment_after_release.py
    exists to protect.
@@ -39,14 +46,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine import linker as L  # noqa: E402
 from engine.config import (  # noqa: E402
     LINK_CONFIRM_FRAMES, LINK_CONTESTED_FRAMES, LINK_GRACE_FRAMES,
-    LINK_DRIFT_FRAMES, LINK_GROUND_BAND, LINK_MIN_IOU,
-    LINK_STATIC_MIN_FRAMES, LINK_STATIC_MIN_IOU, LINK_STATIC_SPREAD_PX,
+    LINK_DRIFT_FRAMES, LINK_DRIFT_IOU, LINK_GROUND_BAND, LINK_MIN_IOU,
+    LINK_OWNED_PEAK_IOU, LINK_STATIC_MIN_FRAMES, LINK_STATIC_MIN_IOU,
+    LINK_STATIC_SPREAD_PX,
 )
 from engine.motion import are_co_moving  # noqa: E402
 from fixtures.parked_cart_geometry import (  # noqa: E402
     CART_BY_FRAME, CART_PARKED, CART_CENTROID_SPAN_PX, P4_BY_FRAME,
     P4_WALKING_AWAY, LINKED_ON_FRAME, OVERLAP_FRAMES,
 )
+from fixtures import door_side_owner_geometry as DOOR  # noqa: E402
 
 _passed = _failed = 0
 
@@ -280,20 +289,72 @@ link_frame = frame
 
 _away = (900, 300, 1000, 560)     # visible, same ground plane, no overlap
 released_on = None
+disowned_on_release = None
 for _ in range(LINK_STATIC_MIN_FRAMES + LINK_DRIFT_FRAMES + 4):
     frame += 1
     sc.step(frame, {5: _away}, {10: CART_PARKED[0]},
             {10: CART_PARKED[1], 5: _centre(_away)})
     if released_on is None and lk.links.get(10) is None:
         released_on = frame
-        check("the release reports the cart as disowned",
-              10 in lk.disowned_carts, f"disowned={lk.disowned_carts}")
+        disowned_on_release = set(lk.disowned_carts)
 check("a link that never moved its cart is released once the contact stops",
       released_on is not None, f"links={lk.links}")
 check("...and not before the cart has stood still LINK_STATIC_MIN_FRAMES "
       "since the link was made",
       released_on is None or released_on - link_frame >= LINK_STATIC_MIN_FRAMES,
       f"released {released_on} - linked {link_frame}")
+# This link held _at_cart, which is over LINK_OWNED_PEAK_IOU — someone working at
+# the cart, not someone passing it. The link is over; the claim that it was never
+# real is not available, so the owner stays on record.
+check("a link that reached possession is NOT disowned when it is released",
+      disowned_on_release == set(),
+      f"disowned={disowned_on_release} — the tracker needs this owner to score "
+      f"their departure as abandonment")
+
+# ---------------------------------------------------------------------------
+section("...and the same release DOES disown a link that never got that far")
+# ---------------------------------------------------------------------------
+# A parked cart can still be linked by someone who only grazes it, as long as
+# they stand still while they do: are_co_moving() returns True for two static
+# tracks whatever their overlap, so LINK_STATIC_MIN_IOU never comes into it. That
+# is the link this branch exists to undo, and undoing it has to reach the
+# tracker's remembered owner — hence the disowned report.
+_grazing = (300, 360, 400, 660)
+_grazing_iou = L._iou(CART_PARKED[0], _grazing)
+check("the grazing control really is over the linking floor",
+      _grazing_iou >= LINK_MIN_IOU, f"IoU {_grazing_iou:.3f}")
+check("...and under the possession bar",
+      _grazing_iou < LINK_OWNED_PEAK_IOU, f"IoU {_grazing_iou:.3f}")
+check("...and over the drift floor, so it is contact while it lasts",
+      _grazing_iou >= LINK_DRIFT_IOU, f"IoU {_grazing_iou:.3f}")
+check("...and shares the cart's ground plane",
+      L._shares_ground_plane(L.foot_ratio(_grazing, CART_PARKED[0])))
+
+lk = _linker()
+sc = Scene(lk)
+_hold_parked(sc, 10, 1, 60)
+frame = 60
+for _ in range(LINK_CONTESTED_FRAMES + 1):
+    frame += 1
+    # Standing at the cart, not walking past it: both tracks static.
+    sc.step(frame, {5: _grazing}, {10: CART_PARKED[0]},
+            {10: CART_PARKED[1], 5: _centre(_grazing)})
+check("a grazing link forms on a parked cart when the person stands still",
+      lk.links.get(10) == 5, f"links={lk.links}")
+
+released_on = None
+disowned_on_release = None
+for _ in range(LINK_STATIC_MIN_FRAMES + LINK_DRIFT_FRAMES + 4):
+    frame += 1
+    sc.step(frame, {5: _away}, {10: CART_PARKED[0]},
+            {10: CART_PARKED[1], 5: _centre(_away)})
+    if released_on is None and lk.links.get(10) is None:
+        released_on = frame
+        disowned_on_release = set(lk.disowned_carts)
+check("it is released like any other", released_on is not None,
+      f"links={lk.links}")
+check("and the release reports the cart as disowned",
+      disowned_on_release == {10}, f"disowned={disowned_on_release}")
 check("disowned_carts is per-frame state, cleared by the next update",
       10 not in lk.disowned_carts, f"disowned={lk.disowned_carts}")
 
@@ -379,6 +440,61 @@ check("nor is anything disowned, because nothing was ever linked",
       not lk.disowned_carts, f"disowned={lk.disowned_carts}")
 check("and the cart has no remembered owner for the tracker to inherit",
       not lk.person_raw_for_cart, f"{lk.person_raw_for_cart}")
+
+# ---------------------------------------------------------------------------
+section("the door-side owner, on the real geometry that lost their cart")
+# ---------------------------------------------------------------------------
+# FF1763940475070 INSIDE, Cart 2 and P3, frames 20-175 as the pipeline saw them.
+# P3 holds the cart at the door for a hundred frames without ever pushing it,
+# steps away in plain view, and leaves the frame 34 frames later. The release is
+# correct; disowning it is what closed the abandonment route and turned a PUSHOUT
+# ALERT into 75 HIGH PRIORITY.
+_door_ious = [L._iou(DOOR.CART_BY_FRAME[f][0], DOOR.P3_BY_FRAME[f][0])
+              for f in sorted(DOOR.P3_BY_FRAME) if f in DOOR.CART_BY_FRAME]
+check("the clip's own peak contact is possession, not grazing",
+      max(_door_ious) >= LINK_OWNED_PEAK_IOU,
+      f"peak IoU {max(_door_ious):.3f} vs bar {LINK_OWNED_PEAK_IOU}")
+check("...and the fixture's recorded peak is that number",
+      abs(max(_door_ious) - DOOR.CONTACT_PEAK_IOU) < 0.001,
+      f"{max(_door_ious):.3f} vs {DOOR.CONTACT_PEAK_IOU}")
+check("the mean alone would not have carried it",
+      sum(_door_ious) / len(_door_ious) < LINK_OWNED_PEAK_IOU,
+      f"mean IoU {sum(_door_ious) / len(_door_ious):.3f}")
+
+lk = _linker()
+sc = Scene(lk, first_frame=min(DOOR.CART_BY_FRAME))
+linked_on = released_on = None
+disowned_on_release = None
+parked_at_release = None
+for f in sorted(DOOR.CART_BY_FRAME):
+    cart_box, cart_centroid = DOOR.CART_BY_FRAME[f]
+    people = {}
+    centroids = {1: cart_centroid}
+    if f in DOOR.P3_BY_FRAME:
+        people[4] = DOOR.P3_BY_FRAME[f][0]
+        centroids[4] = DOOR.P3_BY_FRAME[f][1]
+    sc.step(f, people, {1: cart_box}, centroids)
+    if linked_on is None and lk.links.get(1) == 4:
+        linked_on = f
+    if linked_on is not None and released_on is None and lk.links.get(1) is None:
+        released_on = f
+        disowned_on_release = set(lk.disowned_carts)
+        parked_at_release = lk._is_parked(1, f)
+
+check("P3 gets the cart", linked_on is not None, f"links={lk.links}")
+check("and loses it while still in frame — the release itself is right",
+      released_on is not None and released_on < DOOR.OWNER_GONE_FRAME,
+      f"released_on={released_on}, P3 left at {DOOR.OWNER_GONE_FRAME}")
+check("...on the parked branch, which is the one under test",
+      parked_at_release is True, f"_is_parked={parked_at_release}")
+check("...and on the run's own release frame",
+      released_on == 130, f"released_on={released_on}")
+check("the cart is NOT disowned: this owner held it",
+      disowned_on_release == set(), f"disowned={disowned_on_release}")
+check("and nothing disowns it later in the slice",
+      not lk.disowned_carts, f"disowned={lk.disowned_carts}")
+check("the cart is ownerless once released, so a new owner could still claim it",
+      lk.links.get(1) is None, f"links={lk.links}")
 
 # ---------------------------------------------------------------------------
 print(f"\n{_passed} passed, {_failed} failed")

@@ -297,6 +297,37 @@ LINK_STATIC_MIN_FRAMES = 40
 #: LINK_STATIC_SPREAD_PX raise their bar to LINK_CONTESTED_FRAMES instead.
 LINK_STATIC_MIN_IOU = 0.15
 
+#: Peak IoU a link must have reached, at any point in its life, before it counts
+#: as real POSSESSION rather than contact the geometry happened to allow.
+#:
+#: Read only by the parked-cart release in linker.py, and only to decide whether
+#: to report the cart DISOWNED. A release always happens; disownment is the
+#: stronger claim that the link was never real, and it makes the tracker forget
+#: the remembered owner — which closes the abandonment route for the rest of the
+#: run, because a cart with no owner cannot be abandoned by anyone.
+#:
+#: The two clips this is calibrated on:
+#:   * 1764200318790: shopper grazes a parked cart, peak IoU 0.064 over six
+#:     frames. Never real. Disownment is right, and the whole reason that branch
+#:     exists.
+#:   * FF1763940475070 Cart 2: owner P3 holds the cart from frame 28 to 130 at
+#:     IoU mean 0.155, peak 0.363, then steps away; the cart has not moved, so
+#:     the parked branch fired and disowned it. P3 left frame at 164 with the
+#:     cart still loaded and unbagged, and with no remembered owner `abandoned`
+#:     stayed False for all 412 frames — 75 HIGH PRIORITY where the run had
+#:     been a PUSHOUT ALERT.
+#:
+#: A PEAK rather than a mean: grazing contact has no peak — 0.064 is what the
+#: 1764200318790 crossing reaches at its closest — while a long real link is
+#: diluted by every frame the owner stands off to the side, which is most of
+#: them. The two cases separate by 5.6x on peak and by 2.4x on mean.
+#:
+#: Numerically equal to LINK_STATIC_MIN_IOU today and calibrated on the same
+#: clips, but NOT the same quantity: that one gates one frame's co-movement
+#: evidence for a candidate, this one judges a whole established link. They are
+#: free to be retuned apart.
+LINK_OWNED_PEAK_IOU = 0.15
+
 ABANDON_FRAMES      = 30      # person gone N frames → abandonment
 
 #: How far the owner has to be from their cart before the walkaway branch of

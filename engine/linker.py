@@ -12,7 +12,7 @@ from .config import (
     LINK_DRIFT_FRAMES, STALE_CART_FRAMES, REID_DIST_THRESH, REID_MAX_GONE_FRAMES,
     LINK_CANDIDATE_PATIENCE, LINK_MIN_IOU, LINK_GROUND_BAND, LINK_BEHIND_BAND,
     LINK_DRIFT_IOU, LINK_STATIC_SPREAD_PX, LINK_STATIC_MIN_FRAMES,
-    LINK_STATIC_MIN_IOU,
+    LINK_STATIC_MIN_IOU, LINK_OWNED_PEAK_IOU,
 )
 from .motion import are_co_moving, StaticLatch
 
@@ -71,6 +71,7 @@ class PersonCartLinker:
         "_person_for_cart", "_person_raw_for_cart",
         "_drift_counter", "_candidate_misses", "_get_display_id",
         "_total_links", "_pos_extent", "_disowned", "_static_latch",
+        "_link_peak_iou",
     )
 
     def __init__(self, get_display_id_fn):
@@ -111,6 +112,13 @@ class PersonCartLinker:
         # tracker, which also has to forget the remembered owner; a release alone
         # does not stop abandonment scoring.
         self._disowned = set()
+        # cart_raw -> the highest IoU this cart's CURRENT link has reached with
+        # its owner, over the life of that link. Read only by the parked-cart
+        # release below, to tell a link that was real possession from one the
+        # geometry merely allowed: only the second is reported disowned, because
+        # disownment makes the tracker forget the owner and that closes the
+        # abandonment route for the rest of the run. See LINK_OWNED_PEAK_IOU.
+        self._link_peak_iou = {}
         # Hysteresis for the co-movement test's static/moving call, keyed by raw
         # track id. Held here rather than inside are_co_moving() because the
         # state belongs to a run: a fresh linker must start with no opinion
@@ -228,6 +236,11 @@ class PersonCartLinker:
         if best_old in self._links:
             self._links[new_raw_id] = self._links.pop(best_old)
             self._link_start_frames[new_raw_id] = self._link_start_frames.pop(best_old, 0)
+        # Same link, so the same record of how strong it ever got. Left behind it
+        # would restart at 0.0 and the next parked release would disown a cart
+        # whose owner had been holding it since before the re-ID.
+        if best_old in self._link_peak_iou:
+            self._link_peak_iou[new_raw_id] = self._link_peak_iou.pop(best_old)
         if best_old in self._link_candidates:
             self._link_candidates[new_raw_id] = self._link_candidates.pop(best_old)
         # Moves with the accumulator it counts against, or a re-identified cart
@@ -291,6 +304,7 @@ class PersonCartLinker:
             self._link_start_frames.pop(cid, None)
             self._link_candidates.pop(cid, None)
             self._candidate_misses.pop(cid, None)
+            self._link_peak_iou.pop(cid, None)
             # Gone longer than REID_MAX_GONE_FRAMES, so try_reidentify_cart can
             # no longer carry this record forward to a new raw id and holding it
             # only leaks.
@@ -321,6 +335,12 @@ class PersonCartLinker:
                 continue
 
             overlap = _iou(cart_bbox, person_bboxes[pid])
+            # Best contact this link has ever had, folded in before anything
+            # reads it. Recorded on every frame the owner is visible, including
+            # the drifting ones — the question it answers is what this link was
+            # at its best, not what it is now.
+            if overlap > self._link_peak_iou.get(cart_id, 0.0):
+                self._link_peak_iou[cart_id] = overlap
             if overlap >= DRIFT_IOU_THRESH:
                 self._drift_counter.pop(cart_id, None)  # still engaged
             else:
@@ -354,6 +374,7 @@ class PersonCartLinker:
                         self._links.pop(cart_id, None)
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
+                        self._link_peak_iou.pop(cart_id, None)
                         # Hand the cart to the taker rather than to nobody. The
                         # release already names the person who IS engaged with
                         # it, and dropping that on the floor is what left the
@@ -389,9 +410,29 @@ class PersonCartLinker:
                     # `_last_owner_raw` keeps answering the abandonment question
                     # with this person for the rest of the run and the release
                     # changes no score.
+                    #
+                    # ...but ONLY for a link that never amounted to possession.
+                    # Disownment is two claims, not one: the link is over, AND it
+                    # was never real. The first is true of every release here;
+                    # the second is a statement about the WHOLE life of the link,
+                    # and reading it off "the cart has not moved" alone was wrong
+                    # for a cart that never had to move. On the FF1763940475070
+                    # INSIDE clip P3 held Cart 2 at the door from frame 28 to 130
+                    # — IoU peak 0.363, mean 0.155, a hundred frames of contact —
+                    # and stepped away without ever pushing it. That release
+                    # disowned the cart, so when P3 left frame at 164 there was
+                    # no owner whose departure could be scored: `abandoned`
+                    # stayed False for all 412 frames and the run finalised
+                    # 75 HIGH PRIORITY where it had been a PUSHOUT ALERT.
+                    #
+                    # Link strength is what separates the two, and only peak
+                    # strength does: the 1764200318790 shopper's crossing never
+                    # exceeded 0.064. See LINK_OWNED_PEAK_IOU.
                     self._drift_counter[cart_id] = self._drift_counter.get(cart_id, 0) + 1
                     if self._drift_counter[cart_id] >= LINK_DRIFT_FRAMES:
                         cd = gdi('cart', cart_id)
+                        was_possession = (self._link_peak_iou.get(cart_id, 0.0)
+                                          >= LINK_OWNED_PEAK_IOU)
                         pd_disp = self._person_for_cart.pop(cd, None)
                         self._person_raw_for_cart.pop(cd, None)
                         self._perm_carts.discard(cd)
@@ -400,12 +441,17 @@ class PersonCartLinker:
                         self._links.pop(cart_id, None)
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
+                        self._link_peak_iou.pop(cart_id, None)
                         # No seeding: there is no candidate to seed. The cart
                         # goes back to Step 2, where a parked cart's bar is
                         # LINK_CONTESTED_FRAMES.
                         self._link_candidates.pop(cart_id, None)
                         self._candidate_misses.pop(cart_id, None)
-                        self._disowned.add(cd)
+                        # The link goes either way. Only the never-real one is
+                        # reported, and only that report reaches the tracker's
+                        # remembered owner.
+                        if not was_possession:
+                            self._disowned.add(cd)
                 else:
                     self._drift_counter.pop(cart_id, None)
 
@@ -464,6 +510,10 @@ class PersonCartLinker:
                 self._links[cart_id] = best_new_pid
                 self._person_for_cart[cd] = new_pd
                 self._person_raw_for_cart[cd] = best_new_pid
+                # `_link_peak_iou` is deliberately left alone. A swap is the same
+                # body under a new tracker id, so the contact it already proved
+                # is this link's contact — resetting it would let a swap 40
+                # frames before a parked release disown a real owner.
                 if old_pd:
                     self._perm_persons.discard(old_pd)
                 self._perm_persons.add(new_pd)
@@ -681,6 +731,12 @@ class PersonCartLinker:
             cd = gdi('cart', cart_id)
             self._links[cart_id] = pid
             self._link_start_frames[cart_id] = frame_idx
+            # Opens on the frame the link is made, and is updated from Step 0.5
+            # on every frame after it. The accumulated candidate evidence is not
+            # reused: it is a SUM over frames, and the question this answers is
+            # about one frame's best contact.
+            self._link_peak_iou[cart_id] = _iou(cart_bboxes[cart_id],
+                                                person_bboxes[pid])
             # Re-open the movement window at the link, so "has it moved" now
             # means "has it moved since this person took it" — the question the
             # parked-cart release in Step 0.5 asks.
