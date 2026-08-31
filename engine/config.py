@@ -509,14 +509,45 @@ CROWD_CLUSTER_RADIUS_PX        = 100.0
 CROWD_CLUSTER_MIN_SIZE         = 3
 
 # A cluster event must persist at least this long to surface as a spike.
-CROWD_CLUSTER_MIN_DURATION_S   = 4.0
+#
+# Was 4.0, retuned against the CORRECTED frame index. The old number was picked
+# when TrackRecord.frames was a synthetic gap-free arange(first_f, first_f + n),
+# which bucketed samples from different frames together and inflated every
+# cluster duration — a real 3.5s event at an exit measured 5.2s. Any threshold
+# chosen against those numbers is meaningless here.
+#
+# Measured over the 8 distinct clips in the repo, every stitched cluster event
+# is either <= 1.9s or >= 3.47s — the corpus has an empty band in between:
+#
+#   1763916270090      none
+#   1763918117640      6.4s/5
+#   1763922797790      0.1s/3
+#   1763927048590      3.5s/4, 0.33s/3, 0.13s/3
+#   1763941601750      8.47s/4, 3.47s/5, 1.9s/6, 1.13s/3, 0.97s/3, 0.93s/4, 0.8s/3
+#   try                none
+#   1763942945490      0.2s/3
+#   FF1763940475070    1.1s/4
+#
+# 3.0 sits inside that band rather than on a cliff. 3.5 would put the exit event
+# exactly on the boundary, where float noise decides the outcome.
+CROWD_CLUSTER_MIN_DURATION_S   = 3.0
 
 # Tolerance for stitching cluster samples across consecutive frames into a
 # single event (handles missed/dropped detections).
 CROWD_CLUSTER_GAP_TOLERANCE_S  = 1.5
 
 # Severity bucketing for crowd clusters: (peak_size, duration_s) ≥ tuple.
-CROWD_CLUSTER_QUEUE_FORMING    = (4, 5.0)
+#
+# QUEUE_FORMING duration moved 5.0 -> 3.0 with MIN_DURATION_S, and it has to:
+# MIN_DURATION_S only decides whether a QueueSpike record EXISTS. The sticky
+# banner filters on severity, so a 3.5s event under a 5.0s QUEUE_FORMING gate
+# is a WATCH row in the Analytics tab that never reaches the banner — lowering
+# MIN_DURATION_S alone changes nothing a user would see.
+#
+# BACKED_UP is deliberately left at (6, 8.0). Nothing in the corpus reaches it,
+# and it is the "this is bad now" tier — widening the WATCH/QUEUE_FORMING gate
+# should not drag the severe tier down with it.
+CROWD_CLUSTER_QUEUE_FORMING    = (4, 3.0)
 CROWD_CLUSTER_BACKED_UP        = (6, 8.0)
 
 # Co-movement
