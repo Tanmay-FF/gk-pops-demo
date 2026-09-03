@@ -33,7 +33,6 @@ box for the key anyway. The GK_* variables in app_poc_v2.py are debugging
 switches that default to off.
 """
 import os
-import platform
 import subprocess
 import sys
 import time
@@ -261,7 +260,7 @@ def main(argv=None) -> int:
 
     ui.banner("GATEKEEPER SYSTEMS   POPS",
               "Pushout prevention — single-video analysis demo",
-              f"{platform.system()} {platform.release()}")
+              ui.os_label())
 
     next_phase()
     if not ensure_environment():

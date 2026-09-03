@@ -71,7 +71,7 @@ class PersonCartLinker:
         "_person_for_cart", "_person_raw_for_cart",
         "_drift_counter", "_candidate_misses", "_get_display_id",
         "_total_links", "_pos_extent", "_disowned", "_static_latch",
-        "_link_peak_iou",
+        "_link_peak_iou", "_cand_extent", "_link_moved_under",
     )
 
     def __init__(self, get_display_id_fn):
@@ -82,7 +82,7 @@ class PersonCartLinker:
     def reset(self):
         self._links = {}                    # cart_raw -> person_raw
         self._link_start_frames = {}        # cart_raw -> frame_idx
-        # cart_raw -> {person_raw: (cum_iou, frames, foot_ratio_sum)}
+        # cart_raw -> {person_raw: (cum_iou, frames, foot_ratio_sum, peak_iou)}
         self._link_candidates = {}
         # cart_raw -> consecutive frames with no qualifying candidate at all.
         # The accumulator above used to be discarded on the first such frame,
@@ -113,12 +113,31 @@ class PersonCartLinker:
         # does not stop abandonment scoring.
         self._disowned = set()
         # cart_raw -> the highest IoU this cart's CURRENT link has reached with
-        # its owner, over the life of that link. Read only by the parked-cart
-        # release below, to tell a link that was real possession from one the
-        # geometry merely allowed: only the second is reported disowned, because
-        # disownment makes the tracker forget the owner and that closes the
-        # abandonment route for the rest of the run. See LINK_OWNED_PEAK_IOU.
+        # its owner, over the life of that link AND over the candidacy that
+        # formed it. Read only by the parked-cart release below, to tell a link
+        # that was real possession from one the geometry merely allowed: only
+        # the second is reported disowned, because disownment makes the tracker
+        # forget the owner and that closes the abandonment route for the rest of
+        # the run. See LINK_OWNED_PEAK_IOU.
+        #
+        # The candidacy window is in scope on purpose. Possession is a claim
+        # about the whole relationship, and on a cart that is pushed to the door
+        # and parked, the closest contact happens during the PUSH — before the
+        # link confirms. Seeded from the formation frame alone this read 0.1388
+        # on 1764029361010 against a candidate peak of 0.3139, disowned a cart
+        # its owner had just walked to the door, and cost the run its
+        # PUSHOUT ALERT. See the seed at the end of Step 3.
         self._link_peak_iou = {}
+        # cart_raw -> [window_start_frame, min_x, min_y, max_x, max_y] over the
+        # cart's centroids for as long as it has had a link CANDIDATE, so
+        # _link_moved_under below can be answered at the moment a link forms.
+        # Dropped as soon as it is consumed.
+        self._cand_extent = {}
+        # cart_raw -> did this cart MOVE while its current owner was accumulating
+        # a claim on it. The second possession signal, and the one that needs no
+        # threshold argument: a person who merely stands near a cart does not
+        # push it anywhere. Read beside the peak IoU by the parked-cart release.
+        self._link_moved_under = {}
         # Hysteresis for the co-movement test's static/moving call, keyed by raw
         # track id. Held here rather than inside are_co_moving() because the
         # state belongs to a run: a fresh linker must start with no opinion
@@ -241,6 +260,16 @@ class PersonCartLinker:
         # whose owner had been holding it since before the re-ID.
         if best_old in self._link_peak_iou:
             self._link_peak_iou[new_raw_id] = self._link_peak_iou.pop(best_old)
+        # Same reason, for the other half of the possession evidence: a cart the
+        # re-ID renamed is the same cart its owner pushed here. `_cand_extent`
+        # moves with `_link_candidates` below for the narrower case — an
+        # UNLINKED cart that was re-identified mid-candidacy keeps the
+        # accumulator, so it has to keep the movement window measured over the
+        # same frames or the two describe different candidacies.
+        if best_old in self._link_moved_under:
+            self._link_moved_under[new_raw_id] = self._link_moved_under.pop(best_old)
+        if best_old in self._cand_extent:
+            self._cand_extent[new_raw_id] = self._cand_extent.pop(best_old)
         if best_old in self._link_candidates:
             self._link_candidates[new_raw_id] = self._link_candidates.pop(best_old)
         # Moves with the accumulator it counts against, or a re-identified cart
@@ -294,6 +323,25 @@ class PersonCartLinker:
         # cart in the frame, linked or not.
         for cart_id in cart_bboxes:
             self._note_position(cart_id, obj_positions.get(cart_id), frame_idx)
+            # A second, narrower movement window, covering only the frames this
+            # cart has had a link CANDIDATE. _pos_extent cannot answer the
+            # question it is here for — "did the cart move while this person was
+            # claiming it" — because it re-opens when the link is ESTABLISHED,
+            # which is one frame after the answer is needed. While there is no
+            # candidate the window simply follows the cart, so the first
+            # candidate frame measures from where the cart stood at the time.
+            pos = obj_positions.get(cart_id)
+            if not pos or cart_id in self._links:
+                continue
+            cx, cy = pos[-1]
+            win = self._cand_extent.get(cart_id)
+            if win is None or cart_id not in self._link_candidates:
+                self._cand_extent[cart_id] = [frame_idx, cx, cy, cx, cy]
+            else:
+                if cx < win[1]: win[1] = cx
+                if cy < win[2]: win[2] = cy
+                if cx > win[3]: win[3] = cx
+                if cy > win[4]: win[4] = cy
 
         # Step 0: Purge stale links
         stale = [cid for cid in self._links
@@ -305,6 +353,8 @@ class PersonCartLinker:
             self._link_candidates.pop(cid, None)
             self._candidate_misses.pop(cid, None)
             self._link_peak_iou.pop(cid, None)
+            self._cand_extent.pop(cid, None)
+            self._link_moved_under.pop(cid, None)
             # Gone longer than REID_MAX_GONE_FRAMES, so try_reidentify_cart can
             # no longer carry this record forward to a new raw id and holding it
             # only leaks.
@@ -375,6 +425,7 @@ class PersonCartLinker:
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
                         self._link_peak_iou.pop(cart_id, None)
+                        self._link_moved_under.pop(cart_id, None)
                         # Hand the cart to the taker rather than to nobody. The
                         # release already names the person who IS engaged with
                         # it, and dropping that on the floor is what left the
@@ -386,9 +437,11 @@ class PersonCartLinker:
                         seeded = self._link_candidates.setdefault(cart_id, {})
                         for op in takers:
                             ob = person_bboxes[op]
-                            cum, n, fsum = seeded.get(op, (0.0, 0, 0.0))
-                            seeded[op] = (cum + _iou(cart_bbox, ob), n + 1,
-                                          fsum + foot_ratio(ob, cart_bbox))
+                            cum, n, fsum, pk = seeded.get(op, (0.0, 0, 0.0, 0.0))
+                            _ov = _iou(cart_bbox, ob)
+                            seeded[op] = (cum + _ov, n + 1,
+                                          fsum + foot_ratio(ob, cart_bbox),
+                                          max(pk, _ov))
                         self._candidate_misses.pop(cart_id, None)
                 elif self._is_parked(cart_id, frame_idx):
                     # Nobody is taking the cart over, and the cart has not moved
@@ -428,11 +481,25 @@ class PersonCartLinker:
                     # Link strength is what separates the two, and only peak
                     # strength does: the 1764200318790 shopper's crossing never
                     # exceeded 0.064. See LINK_OWNED_PEAK_IOU.
+                    #
+                    # Two readings of possession, either of which is enough,
+                    # because a real owner can fail one and not the other:
+                    #   * peak IoU over the candidacy AND the link — how close
+                    #     this pair ever got;
+                    #   * `_link_moved_under` — whether the cart actually TRAVELLED
+                    #     while this person was claiming it. A cart that has been
+                    #     pushed somewhere was pushed by someone, and a bystander
+                    #     standing next to a parked cart cannot produce it.
+                    # 1764029361010 needs the first (peak 0.3139, all of it before
+                    # the link confirmed at 0.1388). Neither fires for the
+                    # 1764200318790 crossing: 0.064 peak, and that cart never moved.
                     self._drift_counter[cart_id] = self._drift_counter.get(cart_id, 0) + 1
                     if self._drift_counter[cart_id] >= LINK_DRIFT_FRAMES:
                         cd = gdi('cart', cart_id)
-                        was_possession = (self._link_peak_iou.get(cart_id, 0.0)
-                                          >= LINK_OWNED_PEAK_IOU)
+                        was_possession = (
+                            self._link_peak_iou.get(cart_id, 0.0)
+                            >= LINK_OWNED_PEAK_IOU
+                            or self._link_moved_under.get(cart_id, False))
                         pd_disp = self._person_for_cart.pop(cd, None)
                         self._person_raw_for_cart.pop(cd, None)
                         self._perm_carts.discard(cd)
@@ -442,6 +509,7 @@ class PersonCartLinker:
                         self._link_start_frames.pop(cart_id, None)
                         self._drift_counter.pop(cart_id, None)
                         self._link_peak_iou.pop(cart_id, None)
+                        self._link_moved_under.pop(cart_id, None)
                         # No seeding: there is no candidate to seed. The cart
                         # goes back to Step 2, where a parked cart's bar is
                         # LINK_CONTESTED_FRAMES.
@@ -535,7 +603,7 @@ class PersonCartLinker:
         # merchandise-removal route was closed before it started. Nothing in the
         # per-cart evidence was wrong; the arbitration was.
         #
-        # _link_candidates: cart_raw -> {person_raw: (cum_iou, frames, foot_sum)}
+        # _link_candidates: cart_raw -> {person_raw: (cum_iou, frames, foot_sum, peak_iou)}
         proposals = []          # (mean_iou, cart_raw, person_raw)
         for cart_id, cart_bbox in cart_bboxes.items():
             if cart_id in self._links:
@@ -603,9 +671,11 @@ class PersonCartLinker:
                                      latch=self._static_latch,
                                      key_a=cart_id, key_b=pid):
                     continue
-                prev_iou, prev_count, prev_foot = candidates.get(pid, (0.0, 0, 0.0))
+                prev_iou, prev_count, prev_foot, prev_peak = candidates.get(
+                    pid, (0.0, 0, 0.0, 0.0))
                 candidates[pid] = (prev_iou + iou, prev_count + 1,
-                                   prev_foot + foot_ratio(pbbox, cart_bbox))
+                                   prev_foot + foot_ratio(pbbox, cart_bbox),
+                                   max(prev_peak, iou))
                 any_update = True
 
             if any_update:
@@ -625,7 +695,7 @@ class PersonCartLinker:
                 # tests/sweep_link_geometry.py.
                 viable = {
                     pid: (cum_iou, count)
-                    for pid, (cum_iou, count, foot_sum) in candidates.items()
+                    for pid, (cum_iou, count, foot_sum, _pk) in candidates.items()
                     if _shares_ground_plane(foot_sum / count)
                 }
 
@@ -699,7 +769,8 @@ class PersonCartLinker:
                     # frame longer accumulates more of it regardless of how well
                     # it matches anyone.
                     n_frames = max(candidates[best_pid][1], 1)
-                    proposals.append((best_score / n_frames, cart_id, best_pid))
+                    proposals.append((best_score / n_frames, cart_id, best_pid,
+                                      candidates[best_pid][3]))
             else:
                 # A frame with no qualifying candidate is not evidence that the
                 # accumulated ones were wrong. Popping it here made confirmation
@@ -725,18 +796,32 @@ class PersonCartLinker:
         # order. Sorting by mean IoU makes it one: the cart the person is actually
         # walking with wins, and the cart that merely overlapped them for a while
         # keeps looking for an owner.
-        for _score, cart_id, pid in sorted(proposals, key=lambda p: -p[0]):
+        for _score, cart_id, pid, _candpeak in sorted(proposals, key=lambda p: -p[0]):
             if cart_id in self._links or pid in claimed:
                 continue
             cd = gdi('cart', cart_id)
             self._links[cart_id] = pid
             self._link_start_frames[cart_id] = frame_idx
-            # Opens on the frame the link is made, and is updated from Step 0.5
-            # on every frame after it. The accumulated candidate evidence is not
-            # reused: it is a SUM over frames, and the question this answers is
-            # about one frame's best contact.
-            self._link_peak_iou[cart_id] = _iou(cart_bboxes[cart_id],
-                                                person_bboxes[pid])
+            # Seeded from the candidacy as well as this frame, and updated from
+            # Step 0.5 on every frame after it.
+            #
+            # `_candpeak` is the best SINGLE-frame contact this pair reached
+            # while the person was a candidate, not the cumulative IoU the
+            # proposal was scored on — that is a sum over frames and is not
+            # comparable to LINK_OWNED_PEAK_IOU. Taking the candidacy in is the
+            # whole point: on a cart pushed to a door and parked, the link
+            # confirms AFTER the push, so the formation frame is the weakest
+            # contact of the relationship rather than a representative one.
+            self._link_peak_iou[cart_id] = max(
+                _iou(cart_bboxes[cart_id], person_bboxes[pid]), _candpeak)
+            # Did the cart move while this person was claiming it? Answered here
+            # because _cand_extent stops being maintained the moment the link
+            # exists, and consumed here for the same reason.
+            _ce = self._cand_extent.pop(cart_id, None)
+            self._link_moved_under[cart_id] = bool(
+                _ce is not None
+                and math.hypot(_ce[3] - _ce[1], _ce[4] - _ce[2])
+                >= LINK_STATIC_SPREAD_PX)
             # Re-open the movement window at the link, so "has it moved" now
             # means "has it moved since this person took it" — the question the
             # parked-cart release in Step 0.5 asks.

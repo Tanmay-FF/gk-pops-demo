@@ -73,7 +73,12 @@ The tabs across the top fill in as the run finishes. In order of interest:
 - **Analytics** — traffic heatmap, busy periods, how long people lingered.
 - **Case Report** — a written account of the run in plain English.
 - **Zone Editor** — draw the entrance, exit and aisle areas onto a frame of the
-  clip if you want the alerts to be area-aware.
+  clip if you want the alerts to be area-aware. The **Saved zone sets** panel
+  at the bottom of that tab writes the polygons to a file per clip and lists
+  what is on disk, with **Load** and **Delete** on every row; the newest set
+  comes back on its own the next time you pick that clip, so a doorway only
+  has to be drawn once. Files live in `zone_presets/` and are named
+  `<clip>__<set name>__<when>.json` — the panel header shows the folder.
 
 The marked-up video and the full data file can be downloaded from the bottom of
 the left-hand panel.

@@ -29,10 +29,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.config import GRABRUN_MIN_RUN_OBS
+from engine.config import GRABRUN_MIN_RUN_OBS, GRABRUN_TRAILING_NOISE_OBS
 from engine.scoring import (
     HIGH_SCORE, LOGGABLE_EVENTS, MERCH_REMOVED_FLOOR, classify_event,
-    compute_pops, merchandise_removed, prune_event_log,
+    compute_pops, merchandise_removed, peak_sustained_fill, prune_event_log,
     sync_events_with_snapshots,
 )
 
@@ -127,6 +127,86 @@ check("an all-empty history is NOT removal",
 
 check("an empty history is NOT removal",
       merchandise_removed([], GRABRUN_MIN_RUN_OBS) is False)
+
+
+# ---------------------------------------------------------------------------
+section("a genuinely empty cart with a noisy loaded burst")
+# ---------------------------------------------------------------------------
+# Cart 1 of the 1763902526030 clip, from the Not_A_Pushout set. Ground truth:
+# the cart is EMPTY. The fill vote agrees by a landslide — empty 1129.36 over
+# 35 observations against partial 47.73 over 8, a 24x margin at mean partial
+# confidence 0.746 — but those 8 partials include one burst of exactly 4 in a
+# row, so a run gate of 4 promoted the cart to partial|unbagged, set
+# merch_removed, and filed an OUTBOUND 75 PUSHOUT ALERT on an empty cart.
+#
+# Fill order exactly as the [DEBUG] line recorded it.
+NOT_A_PUSHOUT_1763902526030_C1 = (
+    ["partial", "empty", "partial", "partial", "empty"]
+    + ["partial"] * 4
+    + ["empty", "partial"]
+    + ["empty"] * 32
+)
+check("43 observations", len(NOT_A_PUSHOUT_1763902526030_C1) == 43,
+      f"got {len(NOT_A_PUSHOUT_1763902526030_C1)}")
+check("8 partial / 35 empty, matching the logged vote counts",
+      (sum(1 for f in NOT_A_PUSHOUT_1763902526030_C1 if f == "partial"),
+       sum(1 for f in NOT_A_PUSHOUT_1763902526030_C1 if f == "empty")) == (8, 35))
+
+# The discriminator, asserted rather than assumed: the longest loaded burst on
+# this history is 4, and every confirmed removal in the corpus runs 9 or more.
+_longest, _cur = 0, 0
+for _f in NOT_A_PUSHOUT_1763902526030_C1:
+    _cur = _cur + 1 if _f != "empty" else 0
+    _longest = max(_longest, _cur)
+check("longest loaded burst is 4 observations", _longest == 4, f"got {_longest}")
+check("the run gate sits above it", GRABRUN_MIN_RUN_OBS > _longest,
+      f"gate {GRABRUN_MIN_RUN_OBS}")
+
+check("a noisy 4-observation burst is NOT removal",
+      merchandise_removed(NOT_A_PUSHOUT_1763902526030_C1,
+                          GRABRUN_MIN_RUN_OBS) is False)
+check("and the empty verdict stands, so the fill is not promoted",
+      peak_sustained_fill(NOT_A_PUSHOUT_1763902526030_C1,
+                          GRABRUN_MIN_RUN_OBS) is None)
+
+# The worst case once the override is off this cart. `abandoned` is computed
+# from lost person track and is unrelated to fill, so even with the flag set
+# OUTBOUND + empty takes the 60 floor and logs ABANDONED CART rather than the
+# 75 / PUSHOUT ALERT the promoted fill produced. Pinned as the ceiling on what
+# this history can now score.
+#
+# Re-running the clip itself lands lower still, at 0 with no event: the
+# finaliser reads its abandonment context off the best logged event, and with
+# the fill no longer promoted no abandoned row is logged at all.
+_noisy_score = compute_pops("OUTBOUND", "STATIC", True, "empty",
+                            bag_label="not_applicable", cart_detected=True,
+                            abandoned=True, linked=True, merch_removed=False)
+check("even with abandonment it is 60 / ABANDONED CART, not 75 / PUSHOUT ALERT",
+      (_noisy_score, _event(_noisy_score, direction="OUTBOUND"))
+      == (60, "ABANDONED CART"),
+      f"got {(_noisy_score, _event(_noisy_score, direction='OUTBOUND'))}")
+
+
+# ---------------------------------------------------------------------------
+section("the two run thresholds are independent knobs")
+# ---------------------------------------------------------------------------
+# GRABRUN_MIN_RUN_OBS and GRABRUN_TRAILING_NOISE_OBS both count consecutive
+# loaded observations, and wiring them to one number is a trap: raising the run
+# gate to reject noise would simultaneously widen the trailing-noise window and
+# convert the parked-cart negative above into a pushout. Pinned as arithmetic
+# so nobody re-merges them.
+_parked = (["partial"] * GRABRUN_MIN_RUN_OBS + ["empty"] * 5
+           + ["partial"] * GRABRUN_TRAILING_NOISE_OBS)
+check("a parked cart's trailing loaded run survives the noise strip",
+      merchandise_removed(_parked, GRABRUN_MIN_RUN_OBS) is False)
+# Stated as an invariant over run gates rather than as "passing the wrong
+# value gives the wrong answer": a trailing loaded run at the noise threshold
+# must survive for EVERY run gate, which is exactly what a shared constant
+# cannot deliver.
+check("a cart that ends loaded is not a removal at any run gate",
+      all(merchandise_removed(["partial"] * _g + ["empty"] * 5
+                              + ["partial"] * GRABRUN_TRAILING_NOISE_OBS, _g)
+          is False for _g in range(2, 12)))
 
 
 # ---------------------------------------------------------------------------

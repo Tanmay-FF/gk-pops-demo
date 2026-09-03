@@ -49,7 +49,7 @@ same procedure, written for someone who has never opened this folder.
 | 1 | Upload a clip, or pick a sample | Clips are **not** committed to git — see below |
 | 2 | Camera placement | Five options; this is what decides INBOUND vs OUTBOUND |
 | 2 | Pose estimation | On by default. Off is faster and changes nothing but the skeleton overlay |
-| 3 | Zones | Drawn in the **Zone Editor** tab; the sidebar shows a running summary |
+| 3 | Zones | Drawn in the **Zone Editor** tab; the sidebar shows a running summary. Saved sets reload on their own when you pick the same clip again |
 | 4 | Rule thresholds | Blocked-door, static-cart and unattended-cart timings |
 | ⚙ | VLM backend | Local model by default; switch to Claude and an API-key box appears |
 
@@ -63,7 +63,7 @@ analytics** re-applies zones and thresholds to the cached run with no GPU work.
 
 | Tab | What it holds |
 |:--|:--|
-| Zone Editor | Draw entrance/exit/aisle polygons on a frame of the clip |
+| Zone Editor | Draw entrance/exit/aisle polygons on a frame of the clip, then keep them. The **Saved zone sets** panel at the bottom saves the current zones, lists every set on disk for that clip (name, zone count, frame size, when it was made) and puts **Load** and **Delete** on each row. Files go to `zone_presets/` as `<clip>__<set name>__<when>.json`, and the newest set for a clip loads automatically when that clip is selected |
 | POPS | Final 0–100 risk score per cart, with the operational categories it fell into |
 | Events | Chronological event log — links, releases, direction changes, alerts |
 | Operational Alerts | Rule-engine outcomes: blocked doors, static carts, unattended carts, incoming empty carts. One row per incident, separate from the theft-risk event log on purpose |

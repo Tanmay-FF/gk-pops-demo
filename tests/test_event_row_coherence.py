@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.scoring import (  # noqa: E402
     compute_pops, classify_event, sync_events_with_snapshots, prune_event_log,
+    select_best_event,
     LOGGABLE_EVENTS, MEDIUM_SCORE, HIGH_SCORE, PUSHOUT_SCORE,
 )
 
@@ -187,6 +188,70 @@ for score in (MEDIUM_SCORE, HIGH_SCORE, PUSHOUT_SCORE):
     check(f"a row at exactly {score} is kept — the tiers are inclusive",
           len(kept) == 1)
 
+
+# ---------------------------------------------------------------------------
+section("select_best_event: the row the reconciliation reads context from")
+# ---------------------------------------------------------------------------
+# The 1763950636750 OUTSIDE clip. Events are logged on tier TRANSITIONS, so the
+# MEDIUM PRIORITY row sits on frame 307, the frame the tier was entered on,
+# where the cart was STATIC and scored 45. The same cart then held 55 for
+# frames 309-404. Ranking on (severity, frame) picked the 45, and the run
+# printed `orig=55 recomp=45` - a reconciliation carrying the weakest context
+# of the top tier.
+best = select_best_event([
+    _row(cart_id=1, event="MEDIUM PRIORITY", frame=307, pops_score=45,
+         speed_status="STATIC"),
+    _row(cart_id=1, event="MEDIUM PRIORITY", frame=309, pops_score=55,
+         speed_status="SLOW"),
+])
+check("the strongest frame of the tier wins, not the earliest",
+      (best[1]["frame"], best[1]["pops_score"]) == (309, 55),
+      str((best[1]["frame"], best[1]["pops_score"])))
+
+# ABANDONED CART and MEDIUM PRIORITY share severity 3, so a later MEDIUM
+# PRIORITY used to displace the abandoned row outright and take its
+# `abandoned` flag with it. Abandonment floors the score at 60 or 75 in
+# compute_pops(), so losing it costs a tier.
+best = select_best_event([
+    _row(cart_id=1, event="ABANDONED CART", frame=200, pops_score=65,
+         direction="UNKNOWN", abandoned=True, speed_status="STATIC"),
+    _row(cart_id=1, event="MEDIUM PRIORITY", frame=307, pops_score=45,
+         speed_status="STATIC"),
+])
+check("an equally-severe later row does not steal the abandonment",
+      best[1]["abandoned"] is True and best[1]["pops_score"] == 65,
+      str((best[1]["event"], best[1]["pops_score"], best[1]["abandoned"])))
+
+# Severity still outranks score: a PUSHOUT ALERT is the verdict even when a
+# lower tier happens to carry a bigger number, which the caps and floors make
+# possible.
+best = select_best_event([
+    _row(cart_id=1, event="PUSHOUT ALERT", frame=100, pops_score=75,
+         abandoned=True, speed_status="SLOW"),
+    _row(cart_id=1, event="MEDIUM PRIORITY", frame=300, pops_score=100,
+         speed_status="FAST"),
+])
+check("severity outranks score", best[1]["event"] == "PUSHOUT ALERT",
+      str(best[1]["event"]))
+
+# Same tier, same score: the later reading is the more recent description.
+best = select_best_event([
+    _row(cart_id=1, frame=100, pops_score=45, speed_status="STATIC"),
+    _row(cart_id=1, frame=300, pops_score=45, speed_status="STATIC"),
+])
+check("a genuine tie is still broken by the later frame",
+      best[1]["frame"] == 300, str(best[1]["frame"]))
+
+# Carts do not share a winner, and a row with an unknown event name still
+# ranks - below every named tier, but it is not dropped.
+best = select_best_event([
+    _row(cart_id=1, event="MEDIUM PRIORITY", frame=10, pops_score=45),
+    _row(cart_id=2, event="HIGH PRIORITY", frame=20, pops_score=75),
+    _row(cart_id=3, event="SOMETHING NEW", frame=30, pops_score=90),
+])
+check("one winner per cart", sorted(best) == [1, 2, 3], str(sorted(best)))
+check("an unnamed event still ranks", best[3]["frame"] == 30)
+check("an empty log selects nothing", select_best_event([]) == {})
 
 print(f"\n{_passed} passed, {_failed} failed")
 if _failed:

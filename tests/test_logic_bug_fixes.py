@@ -161,8 +161,10 @@ else:
     check("the rebuilt span matches real time (was 30s for a 240s block)",
           abs(got_span - true_span) < 0.05,
           f"true {true_span:.1f}s, rebuilt {got_span:.1f}s")
+    from engine.config import RULE_ABANDONED_CART_S
     check("thresholds are reachable again",
-          got_span >= 180.0, f"{got_span:.1f}s vs RULE_ABANDONED_CART_S=180")
+          got_span >= RULE_ABANDONED_CART_S,
+          f"{got_span:.1f}s vs RULE_ABANDONED_CART_S={RULE_ABANDONED_CART_S}")
     # The old fallback counted SAMPLES, so it also lied to the density gate in
     # the opposite direction — claiming 8x denser sampling than reality.
     mean_gap = got_span / (ts.size - 1)
@@ -240,8 +242,15 @@ section("6. suppressed sparse intervals are REPORTED, not swallowed")
 # intervals the density gate drops are disproportionately the SAFETY ones.
 diag: list[str] = []
 sparse = parked_cart(dur_s=60.0, gap=RULE_MAX_SAMPLE_GAP_S + 0.5)
+# The subject is ONE discarded blocked-door candidate, so every OTHER rule is
+# held above the 60s fixture rather than left on whatever config's default
+# happens to be — otherwise each contributes a candidate of its own and the
+# count below stops measuring what it names. static_cart is pinned even though
+# no aisle zone is drawn here: relying on the empty zone list would make the
+# count correct by geometry alone, one zone-list edit away from lying.
+LONG = {"static_cart_s": 600.0, "abandoned_cart_s": 600.0}
 f, reason = rules.evaluate_rules(bundle([sparse]), [door_zone()],
-                                 diagnostics=diag)
+                                 thresholds=LONG, diagnostics=diag)
 bd = [x for x in f if x.rule_id == "blocked_door"]
 check("the sparse interval is still (correctly) not asserted", len(bd) == 0)
 check("but the run now SAYS it discarded something",
@@ -253,7 +262,8 @@ check("it does not suppress findings via unavailable_reason",
 # Densely observed: no note, and the finding fires.
 diag2: list[str] = []
 dense = parked_cart(dur_s=60.0, gap=0.5)
-f2, _ = rules.evaluate_rules(bundle([dense]), [door_zone()], diagnostics=diag2)
+f2, _ = rules.evaluate_rules(bundle([dense]), [door_zone()],
+                             thresholds=LONG, diagnostics=diag2)
 check("a well-observed 60s block still fires",
       len([x for x in f2 if x.rule_id == "blocked_door"]) == 1)
 check("and reports no sparsity note",
@@ -267,8 +277,13 @@ section("7. 'clean' never hides a rule family that did not run")
 # RULE_STATIC_KINDS, which used to make `reason` None and the whole run read as
 # clean while the blocked-door rule had never been evaluated.
 diag: list[str] = []
+# Thresholds above the 60s fixture on purpose: "clean" here has to mean "the
+# rules ran and found nothing", so no rule may fire for a reason unrelated to
+# the missing door zone under test.
+QUIET = {"blocked_door_s": 600.0, "static_cart_s": 600.0,
+         "abandoned_cart_s": 600.0}
 f, reason = rules.evaluate_rules(bundle([parked_cart()]), [analytics_zone()],
-                                 diagnostics=diag)
+                                 thresholds=QUIET, diagnostics=diag)
 state, _shown, _rem = highlights.ops_findings_state(reason, f)
 check("state is still 'clean' (the zone-independent rules did run)",
       state == "clean", state)
@@ -277,7 +292,8 @@ check("but a note says the blocked-door rule did not run",
 
 # With a door zone drawn, no such note.
 diag2: list[str] = []
-rules.evaluate_rules(bundle([parked_cart()]), [door_zone()], diagnostics=diag2)
+rules.evaluate_rules(bundle([parked_cart()]), [door_zone()],
+                     thresholds=QUIET, diagnostics=diag2)
 check("drawing a door zone clears the note",
       not any("Blocked-door rule did not run" in d for d in diag2), repr(diag2))
 check("but the missing AISLE family is reported instead",

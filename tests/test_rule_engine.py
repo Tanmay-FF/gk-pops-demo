@@ -172,8 +172,13 @@ def test_jittering_cart_is_still_static():
 
 def test_moving_cart_not_static():
     section("Cart driving through a door zone must NOT fire")
-    n = int(60 * FPS)
-    pos = np.stack([np.linspace(600, 900, n), np.full(n, 360.0)], 1).astype(np.float32)
+    # The traverse has to be a real one: static_mask() reads POSITIONS, not the
+    # speeds array, so a fixture whose centroid creeps at 5 px/s while claiming
+    # 120 px/s is called static and correct behaviour looks like a failure.
+    # 120 px/s for 12s clears the 120px-wide door zone with room to spare.
+    n = int(12 * FPS)
+    pos = np.stack([np.linspace(540, 540 + 120.0 * 12.0, n),
+                    np.full(n, 360.0)], 1).astype(np.float32)
     ts = (np.arange(n) / FPS).astype(np.float32)
     mov = TrackRecord(raw_id=1, label="cart", display_id=11, positions=pos,
                       timestamps=ts, frames=np.rint(ts * FPS).astype(np.int32),
@@ -306,12 +311,17 @@ def test_short_clip_reports_unreachable_thresholds():
     section("Threshold longer than the clip must say so, not read as all-clear")
     # Clip length varies run to run, so this is measured against the bundle's
     # own observed span rather than any assumed duration.
+    # Thresholds are passed explicitly so the test asserts the MECHANISM and
+    # stays true whatever config.py's defaults are set to.
+    long_th = dict(rules.DEFAULT_THRESHOLDS,
+                   blocked_door_s=180.0, static_cart_s=180.0,
+                   abandoned_cart_s=180.0)
     n = int(25 * FPS)
     b = make_bundle([make_track(33, (350, 350), n)], {33: make_facts(n)})
     diag: list[str] = []
-    f, _ = rules.evaluate_rules(b, [], diagnostics=diag)
+    f, _ = rules.evaluate_rules(b, [], thresholds=long_th, diagnostics=diag)
     joined = " ".join(diag)
-    check("no findings at the 180s default",
+    check("no findings at a 180s threshold",
           len([x for x in f if x.rule_id == "abandoned_cart"]) == 0)
     check("diagnostics say the clip is shorter than the threshold",
           "shorter than the threshold" in joined, joined)
@@ -321,7 +331,7 @@ def test_short_clip_reports_unreachable_thresholds():
     n2 = int(200 * FPS)
     b2 = make_bundle([make_track(34, (350, 350), n2)], {34: make_facts(n2)})
     diag2: list[str] = []
-    rules.evaluate_rules(b2, [], diagnostics=diag2)
+    rules.evaluate_rules(b2, [], thresholds=long_th, diagnostics=diag2)
     check("not reported when the clip is long enough",
           "shorter than the threshold" not in " ".join(diag2), str(diag2))
 
@@ -520,6 +530,81 @@ def test_rule_crash_is_isolated():
         ab.rule_engine.evaluate_rules = orig
 
 
+def test_overlay_index_maps_findings_onto_frames():
+    section("Video overlay: each finding lands on the frames it covers")
+    n = int(60 * FPS)
+    door_cart  = make_track(7, (660, 360), n, raw=1)
+    aisle_cart = make_track(9, (350, 350), n, raw=2)
+    b = make_bundle([door_cart, aisle_cart],
+                    {7: make_facts(n), 9: make_facts(n)})
+    f, _ = rules.evaluate_rules(b, [door_zone(), AISLE])
+    idx = rules.overlay_index(b, f)
+
+    check("every finding frame is a real track frame",
+          set(idx).issubset(set(door_cart.frames) | set(aisle_cart.frames)),
+          f"{sorted(set(idx) - (set(door_cart.frames) | set(aisle_cart.frames)))[:5]}")
+    mid = sorted(idx)[len(idx) // 2]
+    texts = {bd["text"] for bd in idx[mid]}
+    check("the doorway cart carries BLOCKED DOOR", "BLOCKED DOOR" in texts, str(texts))
+    check("the aisle cart carries STATIC CART", "STATIC CART" in texts, str(texts))
+    check("both carry UNATTENDED CART (OPS)",
+          len([bd for bd in idx[mid] if bd["text"] == "UNATTENDED CART (OPS)"]) == 2,
+          str(texts))
+
+    # A badge is anchored to a box, and the elapsed counter has to be the time
+    # since the finding STARTED, not since the video did.
+    bd = [x for x in idx[mid] if x["text"] == "BLOCKED DOOR"][0]
+    start = [x for x in f if x.rule_id == "blocked_door"][0].start_t
+    ts = door_cart.timestamps[list(door_cart.frames).index(mid)]
+    check("elapsed counts from the finding's own start",
+          abs(bd["elapsed_s"] - (float(ts) - start)) < 0.05,
+          f"{bd['elapsed_s']:.2f} vs {float(ts) - start:.2f}")
+    check("the badge carries a bbox to anchor to", len(bd["bbox"]) == 4)
+    check("the door badge names its zone", bd["zone_name"] == "Main Door")
+
+    # Outside every interval there is nothing to draw.
+    first_start = min(x.start_t for x in f)
+    before = [fr for fr, t in zip(door_cart.frames, door_cart.timestamps)
+              if float(t) < first_start]
+    check("frames before the first finding carry no badge",
+          all(int(fr) not in idx for fr in before), f"{before[:5]}")
+
+
+def test_overlay_index_survives_a_track_without_boxes():
+    section("Video overlay: a boxless track is skipped, not crashed on")
+    n = int(60 * FPS)
+    rec = make_track(21, (350, 350), n)
+    b = make_bundle([rec], {21: make_facts(n)})
+    f, _ = rules.evaluate_rules(b, [])
+    check("the finding exists to begin with", len(f) >= 1)
+    rec.bboxes = np.empty((0, 4), dtype=np.float32)
+    idx = rules.overlay_index(b, f)
+    check("no badges, no exception", idx == {}, str(list(idx)[:3]))
+
+
+def test_overlay_index_reads_also_carts():
+    section("Video overlay: a finding's also_carts each get their own badge")
+    # _dedupe() no longer merges distinct carts, so also_carts is empty on a
+    # live run today. The fold-in is kept for parity with
+    # ui_builder.cart_flag_index(), which reads the same key — if merging ever
+    # comes back, the video and the flag chips must not disagree about it.
+    # Injected here rather than provoked, because provoking it is impossible.
+    n = int(60 * FPS)
+    a = make_track(31, (655, 355), n, raw=1)
+    c = make_track(32, (665, 365), n, raw=2)
+    b = make_bundle([a, c], {31: make_facts(n), 32: make_facts(n)})
+    f, _ = rules.evaluate_rules(b, [door_zone()])
+    bd = [x for x in f if x.rule_id == "blocked_door"
+          and x.cart_display_id == 31]
+    check("a blocked-door finding for cart 31 exists", len(bd) == 1,
+          f"got {[(x.rule_id, x.cart_display_id) for x in f]}")
+    if bd:
+        bd[0].evidence["also_carts"] = [32]
+        idx = rules.overlay_index(b, bd)
+        mid = sorted(idx)[len(idx) // 2]
+        check("both carts carry the badge", len(idx[mid]) == 2, str(len(idx[mid])))
+
+
 def test_validate_polygon():
     section("validate_polygon rejects unusable zone shapes")
     # fillPoly's even-odd rule punches holes where loops overlap, so membership
@@ -570,6 +655,9 @@ def main():
     test_alert_banner(res.rule_findings)
     test_operational_alerts_table(res.rule_findings)
     test_rule_crash_is_isolated()
+    test_overlay_index_maps_findings_onto_frames()
+    test_overlay_index_survives_a_track_without_boxes()
+    test_overlay_index_reads_also_carts()
     test_validate_polygon()
 
     print("\n" + "=" * 62)

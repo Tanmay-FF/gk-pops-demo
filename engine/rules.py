@@ -827,3 +827,72 @@ def _dedupe(findings: list[RuleFinding]) -> list[RuleFinding]:
         if f.cart_display_id != dup.cart_display_id and f.cart_display_id not in others:
             others.append(f.cart_display_id)
     return kept
+
+
+# ---------------------------------------------------------------------------
+# Video overlay index
+# ---------------------------------------------------------------------------
+def overlay_index(bundle: TrajectoryBundle, findings) -> dict[int, list[dict]]:
+    """Video frame number -> the rule badges to draw on that frame.
+
+    Findings are post-hoc: they are only known once the whole track exists, so
+    they cannot be drawn during the frame loop that writes the video. This maps
+    each finding back onto the frames it covers, for a second pass over the
+    already-written AVI (see video_io.reencode_to_mp4's frame_hook).
+
+    Deliberately re-derived from the SAME finding objects the panel renders,
+    rather than from a live approximation computed in the frame loop. A
+    forward-only static/attendance test cannot reproduce `_attendance_bar` or
+    the density gate, both of which read the whole track, so a live overlay
+    would contradict the operational-alerts table on the same run.
+
+    ``evidence["also_carts"]`` is folded in for parity with
+    ui_builder.cart_flag_index(), which reads the same key. _dedupe() no longer
+    merges distinct carts, so it is empty on a live run — but the two surfaces
+    must not be able to disagree about a cart if that ever changes.
+    """
+    by_display: dict[int, list[TrackRecord]] = {}
+    for rec in bundle.tracks.values():
+        if rec.label != "cart":
+            continue
+        by_display.setdefault(int(rec.display_id), []).append(rec)
+
+    out: dict[int, list[dict]] = {}
+    for f in findings or []:
+        rule_id = getattr(f, "rule_id", "") or ""
+        text = RULE_LABELS.get(rule_id, getattr(f, "label", "") or rule_id)
+        zone_name = getattr(f, "zone_name", None)
+        severity = getattr(f, "severity", "INFO")
+        degraded = getattr(f, "confidence", "high") != "high"
+        start_t = float(getattr(f, "start_t", 0.0))
+        end_t = float(getattr(f, "end_t", 0.0))
+        also = (getattr(f, "evidence", {}) or {}).get("also_carts") or []
+        carts = [getattr(f, "cart_display_id", None)] + list(also)
+        for cd in carts:
+            if cd is None:
+                continue
+            for rec in by_display.get(int(cd), []):
+                # A re-identified track can carry positions with no boxes; the
+                # badge is anchored to a box, so there is nothing to draw.
+                if rec.bboxes.shape[0] < rec.timestamps.shape[0]:
+                    continue
+                sel = np.flatnonzero((rec.timestamps >= start_t)
+                                     & (rec.timestamps <= end_t))
+                for i in sel:
+                    out.setdefault(int(rec.frames[i]), []).append({
+                        "bbox": rec.bboxes[i],
+                        # Which cart this is about. Two carts side by side in
+                        # one doorway both get badged, and once a badge has
+                        # been nudged clear of its neighbour it is no longer
+                        # obvious from position alone which one it names.
+                        "cart_display_id": int(cd),
+                        "text": text,
+                        "zone_name": zone_name,
+                        "severity": severity,
+                        "degraded": degraded,
+                        # Counts up while the badge is on screen, so a viewer
+                        # can see the threshold being crossed rather than being
+                        # told after the fact that it was.
+                        "elapsed_s": max(0.0, float(rec.timestamps[i]) - start_t),
+                    })
+    return out

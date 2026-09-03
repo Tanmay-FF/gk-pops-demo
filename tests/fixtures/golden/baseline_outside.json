@@ -86,7 +86,7 @@
     "abandoned": true,
     "bag": "unbagged",
     "cart_id": 1,
-    "direction": "UNKNOWN",
+    "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
     "fill": "partial",
     "frame": 11,
@@ -6934,7 +6934,7 @@
  "provenance": {
   "python": "3.12.9",
   "tracker_config_sha": "26104b659248",
-  "ultralytics": "8.4.40",
+  "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"
  },
  "settings": {

@@ -31,7 +31,7 @@ from .config import (
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES, STALE_CART_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
     WALKAWAY_GAP_FRAC, WALKAWAY_MIN_GAP_PX, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
-    DIRECTION_LATCH_FRAMES,
+    DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX,
     LINK_DRIFT_IOU,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
     POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
@@ -42,19 +42,20 @@ from . import ultralytics_compat as _ultralytics_compat
 from .cancellation import CancelToken, RunCancelled, RunSuperseded
 from .classifier import CartClassifier
 from .linker import PersonCartLinker
-from .motion import compute_motion, compute_direction_label, DirectionLatch
+from .motion import (compute_motion, compute_direction_label, DirectionLatch,
+                     outbound_axis_value)
 from .scoring import (
     compute_pops, classify_event, peak_sustained_fill, merchandise_removed,
     vote_classification,
     prune_event_log,
     inbound_suppression_note, unassessed_cart_note, vote_bag_for_loaded_cart,
-    sync_events_with_snapshots,
+    sync_events_with_snapshots, select_best_event,
     LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS, MEDIUM_SCORE,
 )
 from .renderer import (
     draw_bbox, draw_centroid_trail, draw_classification_overlay,
     draw_person_overlay, draw_link_lines, draw_hud, outlined_text,
-    draw_pose_skeleton,
+    draw_pose_skeleton, draw_rule_badges,
 )
 from .video_io import (open_video, create_writer, reencode_to_mp4,
                        discard_run_output)
@@ -184,6 +185,10 @@ class TrackingEngine:
         # when the user only changes zones.
         self._trajectory_cache = TrajectoryCache()
         self._last_bundle: TrajectoryBundle | None = None
+        #: The findings whose badges are baked into the annotated video, so a
+        #: later zero-GPU retune can tell the user the video no longer matches
+        #: the panel. None until a video has been encoded.
+        self._video_finding_signature: frozenset | None = None
         self._scene_elements: list = []
 
         self._reset()
@@ -229,7 +234,8 @@ class TrackingEngine:
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
         # cart display_id -> last sustained OUTBOUND heading, held through the
         # UNKNOWN frames a parked cart produces. See motion.DirectionLatch.
-        self._dir_latch         = DirectionLatch(DIRECTION_LATCH_FRAMES)
+        self._dir_latch         = DirectionLatch(DIRECTION_LATCH_FRAMES,
+                                                 LATCH_REVERSAL_PX)
         self._walkaway_frames   = {}  # cd -> consecutive frames person is far from cart
         # cd -> raw id of the last person the linker gave this cart. Abandonment
         # used to be readable ONLY while the link was live, so the moment a cart
@@ -575,6 +581,20 @@ class TrackingEngine:
             self._peak_pops_snapshot, camera_placement)
         if _inbound_note:
             result.rule_diagnostics.append(_inbound_note)
+        # The badges on the annotated video were painted during the encode and
+        # cannot be repainted from here — this path deliberately does no video
+        # work at all. Say so, rather than leaving the user to find the
+        # contradiction themselves: the table below is the current answer, the
+        # video still shows the one it was encoded with.
+        if (self._video_finding_signature is not None
+                and highlights.finding_signature(result.rule_findings)
+                != self._video_finding_signature):
+            result.rule_diagnostics.append(
+                "The annotated video still carries the badges from the run as "
+                "it was first evaluated. Retuning a threshold or redrawing a "
+                "zone re-evaluates the rules here without re-encoding the "
+                "video, so the table below is current and the video is not. "
+                "Re-run the analysis to redraw it.")
         summary = analytics_ui.build_analytics_summary(zones, result)
         spikes  = analytics_ui.build_queue_spikes_banner(result.queue_spikes)
         dwell   = analytics_ui.build_dwell_table(zones, result.dwell_summary, result.dwell_rows)
@@ -1023,6 +1043,7 @@ class TrackingEngine:
         else:
             self._trajectory_cache.clear()
         self._last_bundle = None
+        self._video_finding_signature = None
 
     # ------------------------------------------------------------------
     # Main pipeline
@@ -1464,13 +1485,31 @@ class TrackingEngine:
             # duplicate the deduper let through), and calling resolve() twice
             # would double-count that frame toward the latch run.
             _latched_dirs = {}
-            for raw, c, _, _ in frame_detections:
+            for raw, c, _, _bb_l in frame_detections:
                 if names[int(c)] != 'cart':
                     continue
                 cd = gdi('cart', raw)
                 if cd not in _latched_dirs:
+                    # Where the cart IS on the outbound axis, not which way it
+                    # is heading. The latch needs it to tell a cart that has
+                    # actually turned back from one that settled a few pixels
+                    # short of where it stopped. Inert when
+                    # config.LATCH_REVERSAL_PX is None.
+                    #
+                    # Read off the BBOX CENTRE, while the label the latch is
+                    # gating comes from differencing _obj_positions. Two series,
+                    # deliberately: this one is available here without a lookup,
+                    # and the two agree to about a pixel on measured clips
+                    # (1763950636750 frame 1: centre 709.0,304.0 against stored
+                    # 710.0,304.4) against a 40px bar. If _obj_positions ever
+                    # stops being the raw centre — smoothing, a filter, a
+                    # different anchor — this has to switch to it, because the
+                    # bar and the label should measure the same quantity.
+                    _axis = outbound_axis_value(
+                        (_bb_l[0] + _bb_l[2]) * 0.5,
+                        (_bb_l[1] + _bb_l[3]) * 0.5, camera_placement)
                     _latched_dirs[cd] = self._dir_latch.resolve(
-                        cd, self._motion_cache[raw][4])
+                        cd, self._motion_cache[raw][4], _axis)
                 old = self._motion_cache[raw]
                 self._motion_cache[raw] = (
                     old[0], old[1], old[2], old[3], _latched_dirs[cd])
@@ -1855,19 +1894,11 @@ class TrackingEngine:
         # --- Unified POPS summary reconciliation ---
         # Pick authoritative fill/bag, then RECOMPUTE score so everything
         # (score, event, fill, bag, direction) tells a coherent story.
-        _EVENT_SEVERITY = {
-            "PUSHOUT ALERT": 5, "HIGH PRIORITY": 4,
-            "ABANDONED CART": 3, "MEDIUM PRIORITY": 3,
-            "UNLINKED EXIT": 2, "LOW PRIORITY": 1,
-        }
-        _best_event = {}
-        for ev in self._event_log:
-            cd = ev["cart_id"]
-            sev = _EVENT_SEVERITY.get(ev["event"], 0)
-            prev = _best_event.get(cd)
-            prev_sev = _EVENT_SEVERITY.get(prev["event"], 0) if prev else -1
-            if sev > prev_sev or (sev == prev_sev and ev["frame"] > (prev or {}).get("frame", 0)):
-                _best_event[cd] = ev
+        # Which logged row the reconciliation reads CONTEXT (direction, pace,
+        # abandonment) from. Ranked by (severity, pops_score, frame) - see
+        # scoring.select_best_event() for why the score term decides tiers and
+        # is not a tiebreak, and tests/test_event_row_coherence.py for the pins.
+        _best_event = select_best_event(self._event_log)
 
         for cd in set(list(self._peak_pops_snapshot) + list(self._cart_cls_history)):
             if cd not in self._peak_pops_snapshot:
@@ -2091,6 +2122,55 @@ class TrackingEngine:
         # "stuck at 100%" report was. A bare float switches the readout from
         # "N/N steps" to a plain percentage, which is what we want now that
         # there are no frames left to count.
+
+        # --- Build TrajectoryBundle (for analytics + cache reuse) ---
+        # Ahead of the encode, not after it: the rule findings drawn onto the
+        # video below come out of run_analytics(), and they are post-hoc by
+        # construction — no frame in the loop above could know that a cart was
+        # about to stand in the doorway for long enough. Reconciliation has to
+        # come first either way, because the bundle carries
+        # _peak_pops_snapshot.
+        rep_frame = im0.copy() if isinstance(im0, np.ndarray) else None
+        bundle = self._build_trajectory_bundle(
+            source_path, w, h, fps, total_frames, rep_frame,
+        )
+        self._last_bundle = bundle
+        self._trajectory_cache.put(bundle)
+
+        # --- Run analytics over the bundle ---
+        progress(1.0, desc="Computing analytics")
+        analytics_result: AnalyticsResult = run_analytics(
+            bundle, list(zones), out_dir=analytics_out_dir,
+            heatmap_background=rep_frame,
+            camera_placement=camera_placement,
+            rule_thresholds=rule_thresholds,
+        )
+
+        # --- Rule badges for the annotated video ---
+        # Built from the findings the operational-alerts table renders, so the
+        # video and the panel cannot disagree. Isolated the same way
+        # analytics_builder isolates the rule engine itself: a bad index must
+        # cost the badges, never the video.
+        _rule_frames: dict[int, list[dict]] = {}
+        try:
+            _rule_frames = rule_engine.overlay_index(
+                bundle, analytics_result.rule_findings)
+        except Exception as e:                               # pragma: no cover
+            print(f"[WARN] rule overlays skipped: {e}")
+        if _rule_frames:
+            _n_badges = sum(len(v) for v in _rule_frames.values())
+            print(f"[RULES] drawing {_n_badges} badge(s) across "
+                  f"{len(_rule_frames)} frame(s) from "
+                  f"{len(analytics_result.rule_findings)} finding(s)")
+
+        def _draw_rule_badges(frame, frame_idx):
+            badges = _rule_frames.get(frame_idx)
+            if badges:
+                draw_rule_badges(frame, badges)
+
+        self._video_finding_signature = highlights.finding_signature(
+            analytics_result.rule_findings)
+
         progress(1.0, desc="Encoding video")
         # A broken encoder must not throw away a good run. reencode_to_mp4()
         # raises now instead of silently returning a path to a file it failed to
@@ -2100,7 +2180,9 @@ class TrackingEngine:
         # panel comes back empty, and the reason (ffmpeg's own last lines, and
         # where the raw AVI was kept) is already in the log above.
         try:
-            out_path = reencode_to_mp4(avi_path)
+            out_path = reencode_to_mp4(
+                avi_path,
+                frame_hook=_draw_rule_badges if _rule_frames else None)
         except Exception as e:
             print(f"[ERROR] the tracked video could not be encoded: {e}")
             print("[ERROR] the rest of the run is unaffected — POPS, analytics "
@@ -2174,22 +2256,6 @@ class TrackingEngine:
               f"{len(self._json_frames)} sampled frames (every {JSON_EVERY_N_FRAMES}) | "
               f"JSON size: {len(json_str) / 1024:.0f} KB")
 
-        # --- Build TrajectoryBundle (for analytics + cache reuse) ---
-        rep_frame = im0.copy() if isinstance(im0, np.ndarray) else None
-        bundle = self._build_trajectory_bundle(
-            source_path, w, h, fps, total_frames, rep_frame,
-        )
-        self._last_bundle = bundle
-        self._trajectory_cache.put(bundle)
-
-        # --- Run analytics over the bundle ---
-        progress(1.0, desc="Computing analytics")
-        analytics_result: AnalyticsResult = run_analytics(
-            bundle, list(zones), out_dir=analytics_out_dir,
-            heatmap_background=rep_frame,
-            camera_placement=camera_placement,
-            rule_thresholds=rule_thresholds,
-        )
         # Report carts the INBOUND kill switch scored out, on the same channel
         # as the rule-coverage notes. Appended HERE rather than inside
         # evaluate_rules() because this is POPS reasoning, and rules.py is

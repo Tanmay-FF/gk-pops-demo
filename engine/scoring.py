@@ -2,7 +2,10 @@
 """
 POPS (Push-Out Probability Score) computation and event classification.
 """
-from .config import COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLEAR
+from .config import (
+    COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLEAR,
+    GRABRUN_TRAILING_NOISE_OBS,
+)
 
 # ---------------------------------------------------------------------------
 # Score ranges (see MEDIUM_SCORE / HIGH_SCORE / PUSHOUT_SCORE):
@@ -281,6 +284,13 @@ def _strip_trailing_noise(fill_sequence, min_run: int):
     sitting at the very end is noise and does not describe what the cart ended
     up holding.
 
+    `min_run` here is GRABRUN_TRAILING_NOISE_OBS, NOT the GRABRUN_MIN_RUN_OBS
+    run gate, and the two are separate constants on purpose — see the note on
+    GRABRUN_TRAILING_NOISE_OBS in config.py. Raising the run gate asks for more
+    loaded evidence before calling a removal; raising this threshold throws
+    away more evidence that the cart ended up loaded. Sharing one number means
+    tightening one silently loosens the other.
+
     This is not hypothetical tuning. On the 1764092528600 OUTSIDE clip Cart 1
     reads 27 x partial, empty x4, partial x4, empty x4, and then ONE partial at
     fill confidence 0.502 on the final observation. The goods plainly left that
@@ -303,7 +313,8 @@ def _strip_trailing_noise(fill_sequence, min_run: int):
     return fill_sequence[:start] if (n - start) < min_run else fill_sequence
 
 
-def merchandise_removed(fill_sequence, min_run: int) -> bool:
+def merchandise_removed(fill_sequence, min_run: int,
+                        trailing_noise_obs: int = GRABRUN_TRAILING_NOISE_OBS) -> bool:
     """Did the goods leave a cart that was carrying them?
 
     True when `fill_sequence` holds a sustained run of loaded observations (the
@@ -323,9 +334,12 @@ def merchandise_removed(fill_sequence, min_run: int) -> bool:
 
     "Ends" tolerates one short burst of trailing noise — see
     _strip_trailing_noise(). A single low-confidence loaded re-read on the final
-    observation is the classifier, not the merchandise coming back.
+    observation is the classifier, not the merchandise coming back. That
+    tolerance is sized by `trailing_noise_obs` (GRABRUN_TRAILING_NOISE_OBS) and
+    NOT by `min_run`: the loaded-evidence gate and the trailing-noise gate move
+    in opposite directions, so they are separate knobs.
     """
-    trimmed = _strip_trailing_noise(fill_sequence, min_run)
+    trimmed = _strip_trailing_noise(fill_sequence, trailing_noise_obs)
     if not trimmed or trimmed[-1] != "empty":
         return False
     # The loaded evidence is read off the FULL sequence: trimming only decides
@@ -587,6 +601,54 @@ def unassessed_cart_note(total_cart_frames: int, unassessed_cart_frames: int,
     note += (" Treat the absence of findings for those carts as missing evidence, "
              "not as a clean result.")
     return note
+
+
+#: Tier ordering for select_best_event(). ABANDONED CART and MEDIUM PRIORITY
+#: share a rank on purpose: they are the same tier of concern reached two ways,
+#: and neither outranks the other on its name alone.
+EVENT_SEVERITY = {
+    "PUSHOUT ALERT": 5, "HIGH PRIORITY": 4,
+    "ABANDONED CART": 3, "MEDIUM PRIORITY": 3,
+    "UNLINKED EXIT": 2, "LOW PRIORITY": 1,
+}
+
+
+def select_best_event(event_log) -> dict:
+    """cart_id -> the one logged row the reconciliation should read CONTEXT from.
+
+    Ranked by (severity, pops_score, frame). Lives here rather than inline in
+    TrackingEngine.process_video() for the same reason
+    sync_events_with_snapshots() does: it decides a tier, and it must be
+    testable without decoding a video.
+
+    The score term is not a cosmetic tiebreak. Events are logged on tier
+    TRANSITIONS, so a row's frame is the one its tier was ENTERED on, not the
+    one the cart's peak score came from; ranking on frame alone therefore hands
+    the reconciliation the context of the weakest frame of the top tier. On the
+    1763950636750 OUTSIDE clip that picked frame 307 (STATIC, 45) over the same
+    cart's 55 at frames 309-404, and the run printed `orig=55 recomp=45`.
+
+    The frame term still breaks a genuine tie, and last-wins is deliberate
+    there: with the same tier at the same score, the later reading is the more
+    recent description of the cart.
+
+    Ranking rows of EQUAL severity by score also stops a later MEDIUM PRIORITY
+    displacing an equally-severe ABANDONED CART and taking its `abandoned`
+    flag with it — abandonment is the strongest term in compute_pops(), worth
+    a floor of 60 or 75, so losing it costs a tier outright.
+    """
+    best: dict = {}
+    for ev in (event_log or []):
+        cd = ev["cart_id"]
+        key = (EVENT_SEVERITY.get(ev["event"], 0),
+               ev.get("pops_score") or 0, ev["frame"])
+        prev = best.get(cd)
+        prev_key = ((EVENT_SEVERITY.get(prev["event"], 0),
+                     prev.get("pops_score") or 0, prev["frame"])
+                    if prev else (-1, -1, -1))
+        if key > prev_key:
+            best[cd] = ev
+    return best
 
 
 def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]:

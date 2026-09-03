@@ -27,8 +27,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.config import DIRECTION_LATCH_FRAMES
-from engine.motion import DirectionLatch
+from engine.config import DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX
+from engine.motion import DirectionLatch, outbound_axis_value
 from engine.scoring import classify_event, compute_pops
 
 _PASS: list[str] = []
@@ -209,6 +209,96 @@ check("no PUSHOUT frame after the cart is taken back in",
 check("the alert raised before the retrieval still stands",
       recovered.count("PUSHOUT ALERT") == 15 + (RETRIEVAL - 1 - 198 + 1),
       f"got {recovered.count('PUSHOUT ALERT')}")
+
+# ---------------------------------------------------------------------------
+section("the reversal bar (LATCH_REVERSAL_PX)")
+# ---------------------------------------------------------------------------
+# The 1763950636750 OUTSIDE clip. Cart 1 holds OUTBOUND for frames 10-84 (+66px
+# of dy toward the door), then settles about 25px back inside the doorway.
+# DIRECTION_MIN_DY is 20, so that settle RESOLVES INBOUND for 20 frames without
+# the cart having gone anywhere. Clearing the latch on it cost the cart the
+# OUTBOUND branch for its remaining 267 frames -- the +15 base, the loose-merch
+# term and the 75 abandonment floor -- and it finalised 45 / MEDIUM PRIORITY
+# instead of 75 / PUSHOUT ALERT.
+DOOR_Y = 350.0          # where the cart got to, on the outbound axis
+SETTLE_PX = 25.0        # what it drifted back: not a reversal
+RETREAT_PX = 120.0      # a staff member wheeling it back inside: a reversal
+
+check("the reversal bar clears the 25px settle with room",
+      SETTLE_PX < LATCH_REVERSAL_PX < RETREAT_PX,
+      f"LATCH_REVERSAL_PX={LATCH_REVERSAL_PX}")
+
+
+def latched_with_bar():
+    """A cart latched OUTBOUND at DOOR_Y, on a latch that has the bar set."""
+    lat = DirectionLatch(DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX)
+    for i in range(DIRECTION_LATCH_FRAMES):
+        lat.resolve("C1", "OUTBOUND", DOOR_Y - (DIRECTION_LATCH_FRAMES - i))
+    lat.resolve("C1", "OUTBOUND", DOOR_Y)
+    return lat
+
+
+lat = latched_with_bar()
+check("a settle inside the doorway still RETURNS INBOUND on its own frame",
+      lat.resolve("C1", "INBOUND", DOOR_Y - SETTLE_PX) == "INBOUND",
+      "the kill switch has to keep working on the frame it happens")
+check("...but does NOT clear the latch, so the UNKNOWN frames after it hold",
+      lat.resolve("C1", "UNKNOWN", DOOR_Y - SETTLE_PX) == "OUTBOUND")
+
+lat = latched_with_bar()
+lat.resolve("C1", "INBOUND", DOOR_Y - RETREAT_PX)
+check("travelling back past the bar DOES clear the latch",
+      lat.resolve("C1", "UNKNOWN", DOOR_Y - RETREAT_PX) == "UNKNOWN",
+      "staff retrieval must still drop to the UNKNOWN branch")
+
+# The retreat is measured from the FURTHEST OUT the cart got, not from the
+# previous frame: a cart that creeps back 25px over ten frames has retreated
+# 25px, not ten separate nothings.
+lat = latched_with_bar()
+for step in range(1, 11):
+    lat.resolve("C1", "INBOUND", DOOR_Y - step * 2.5)
+check("a slow creep back accumulates against the peak, not frame-to-frame",
+      lat.resolve("C1", "UNKNOWN", DOOR_Y - 25.0) == "OUTBOUND")
+lat.resolve("C1", "INBOUND", DOOR_Y - RETREAT_PX)
+check("...and clears once the creep passes the bar",
+      lat.resolve("C1", "UNKNOWN", DOOR_Y - RETREAT_PX) == "UNKNOWN")
+
+# Without a bar, or without a position, the original rule is what runs. Both
+# matter: "Inside (exit on both sides)" has no single outbound axis, so
+# outbound_axis_value() returns None there and every frame calls resolve()
+# with pos=None.
+lat = DirectionLatch(DIRECTION_LATCH_FRAMES)
+replay(lat, ["OUTBOUND"] * DIRECTION_LATCH_FRAMES)
+lat.resolve("C1", "INBOUND", DOOR_Y - SETTLE_PX)
+check("with no bar configured, the first resolved INBOUND still clears it",
+      lat.resolve("C1", "UNKNOWN", DOOR_Y - SETTLE_PX) == "UNKNOWN")
+
+lat = DirectionLatch(DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX)
+replay(lat, ["OUTBOUND"] * DIRECTION_LATCH_FRAMES)
+lat.resolve("C1", "INBOUND")
+check("with the bar but no position (both-sides placement), likewise",
+      lat.resolve("C1", "UNKNOWN") == "UNKNOWN")
+
+# The axis the bar is measured on has to agree with the label function about
+# which way "out" is, or the settle test reads the wrong sign.
+check("outbound axis: Outside (facing entrance) grows with y",
+      outbound_axis_value(0.0, 300.0, "Outside (facing entrance)") == 300.0)
+check("outbound axis: Inside (facing exit) grows as y SHRINKS",
+      outbound_axis_value(0.0, 300.0, "Inside (facing exit)") == -300.0)
+check("outbound axis: exit on right grows with x",
+      outbound_axis_value(400.0, 0.0, "Inside (exit on right)") == 400.0)
+check("outbound axis: exit on left grows as x SHRINKS",
+      outbound_axis_value(400.0, 0.0, "Inside (exit on left)") == -400.0)
+check("outbound axis: exit on both sides has no single axis",
+      outbound_axis_value(400.0, 300.0, "Inside (exit on both sides)") is None)
+
+# What the bar is worth on that clip, at the tier level.
+check("the settled cart reads 75 / PUSHOUT ALERT with the latch held",
+      score_frame("OUTBOUND", True) == (75, "PUSHOUT ALERT"),
+      f"got {score_frame('OUTBOUND', True)}")
+check("...and 65 / ABANDONED CART once the settle clears it",
+      score_frame("UNKNOWN", True) == (65, "ABANDONED CART"),
+      f"got {score_frame('UNKNOWN', True)}")
 
 print(f"\n{len(_PASS)} passed, {len(_FAIL)} failed")
 if _FAIL:

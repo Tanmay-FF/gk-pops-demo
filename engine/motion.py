@@ -120,6 +120,30 @@ def compute_direction_label(positions: list, camera_placement: str,
         return "OUTBOUND" if dy < 0 else "INBOUND"
 
 
+def outbound_axis_value(cx: float, cy: float, camera_placement: str):
+    """Signed scalar that GROWS as an object moves toward the exit.
+
+    Mirrors compute_direction_label()'s placement branches, so the two cannot
+    disagree about which way "out" is. Returns None when the placement has no
+    single outbound axis - "exit on both sides" is genuinely two axes, and a
+    cart there can retreat from one exit while advancing on the other.
+
+    Read by DirectionLatch, which needs a POSITION and not a heading: a heading
+    says which way the cart is pointing this instant, and the question the latch
+    asks on a resolved INBOUND frame is whether the cart has actually travelled
+    back from where it got to.
+    """
+    if camera_placement == "Inside (exit on right)":
+        return cx
+    if camera_placement == "Inside (exit on left)":
+        return -cx
+    if camera_placement == "Inside (exit on both sides)":
+        return None
+    if camera_placement == "Outside (facing entrance)":
+        return cy
+    return -cy
+
+
 class DirectionLatch:
     """Holds a cart's last SUSTAINED outbound heading through UNKNOWN frames.
 
@@ -169,14 +193,31 @@ class DirectionLatch:
     compute_direction_label(); the label function stays pure.
     """
 
-    def __init__(self, min_frames: int):
+    def __init__(self, min_frames: int, reversal_px: float = None):
+        """reversal_px: how far back along the outbound axis a cart must have
+        travelled before a resolved INBOUND frame is allowed to clear its latch.
+        None (the default) keeps the original rule: the first resolved INBOUND
+        clears it. config.LATCH_REVERSAL_PX ships as 40.
+
+        The distinction matters for a cart that reaches a doorway and settles.
+        DIRECTION_MIN_DY is 20 px, so a 25 px drift back inside resolves INBOUND
+        without the cart having gone anywhere, and clearing the latch on that
+        costs the cart the OUTBOUND branch of compute_pops() - the +15 base, the
+        loose-merchandise term and the 75 abandonment floor - for the rest of
+        the run.
+        """
         self._min_frames = min_frames
+        self._reversal_px = reversal_px
         #: key -> consecutive resolved-OUTBOUND frames seen so far
         self._run: dict = {}
         #: keys whose run reached _min_frames
         self._latched: set = set()
+        #: key -> furthest-out axis value the key reached while OUTBOUND,
+        #: on the axis outbound_axis_value() defines. Only consulted when
+        #: _reversal_px is set.
+        self._peak_pos: dict = {}
 
-    def resolve(self, key, label: str) -> str:
+    def resolve(self, key, label: str, pos: float = None) -> str:
         """Return the heading to score `key` with this frame.
 
         Pass the label AFTER any other adjustment the caller makes (tracker.py
@@ -188,12 +229,23 @@ class DirectionLatch:
             self._run[key] = run
             if run >= self._min_frames:
                 self._latched.add(key)
+            if pos is not None and pos > self._peak_pos.get(key, float("-inf")):
+                self._peak_pos[key] = pos
             return "OUTBOUND"
 
         if label == "INBOUND":
-            # Resolved reversal — forget everything about the outbound leg.
+            # Resolved reversal - forget everything about the outbound leg,
+            # but, when a reversal distance is configured, only once the cart
+            # has actually TRAVELLED back that far. A cart with no recorded peak
+            # never latched in the first place, so there is nothing to protect.
+            retreated = True
+            if (self._reversal_px is not None and pos is not None
+                    and key in self._peak_pos):
+                retreated = (self._peak_pos[key] - pos) >= self._reversal_px
             self._run.pop(key, None)
-            self._latched.discard(key)
+            if retreated:
+                self._latched.discard(key)
+                self._peak_pos.pop(key, None)
             return "INBOUND"
 
         # UNKNOWN. The run must be CONSECUTIVE, so an outbound/unknown flicker

@@ -37,6 +37,7 @@ WHAT THIS PINS
    is abandonment, and it is the invariant tests/test_abandonment_after_release.py
    exists to protect.
 """
+import math
 import sys
 import os
 
@@ -56,6 +57,7 @@ from fixtures.parked_cart_geometry import (  # noqa: E402
     P4_WALKING_AWAY, LINKED_ON_FRAME, OVERLAP_FRAMES,
 )
 from fixtures import door_side_owner_geometry as DOOR  # noqa: E402
+from fixtures import doorway_cart_geometry as DOORWAY  # noqa: E402
 
 _passed = _failed = 0
 
@@ -495,6 +497,110 @@ check("and nothing disowns it later in the slice",
       not lk.disowned_carts, f"disowned={lk.disowned_carts}")
 check("the cart is ownerless once released, so a new owner could still claim it",
       lk.links.get(1) is None, f"links={lk.links}")
+
+
+# ---------------------------------------------------------------------------
+section("possession measured over the candidacy, not the formation frame")
+# ---------------------------------------------------------------------------
+# 1764029361010, Cart 1 and P2, frames 1-100 as the pipeline saw them. A loaded
+# cart stands in the doorway; P2 walks up to it, stands at it, and walks off
+# inward. The cart is CONTESTED - other people overlap it too - so confirmation
+# takes LINK_CONTESTED_FRAMES and the link lands on frame 35, after the best
+# contact is already over. Seeding the peak from that one frame read 0.1388,
+# called a real owner never-real, disowned the cart, and cost the run its
+# PUSHOUT ALERT.
+_dw_frames = sorted(DOORWAY.CART_BY_FRAME)
+_dw_ious = {
+    f: L._iou(DOORWAY.CART_BY_FRAME[f][0],
+              DOORWAY.PEOPLE_BY_FRAME[f][DOORWAY.OWNER_ID][0])
+    for f in _dw_frames
+    if DOORWAY.OWNER_ID in DOORWAY.PEOPLE_BY_FRAME.get(f, {})
+}
+_dw_peak_frame = max(_dw_ious, key=_dw_ious.get)
+
+check("the formation frame alone would NOT have proved possession",
+      _dw_ious[DOORWAY.LINKED_ON_FRAME] < LINK_OWNED_PEAK_IOU,
+      f"IoU {_dw_ious[DOORWAY.LINKED_ON_FRAME]:.4f} vs bar {LINK_OWNED_PEAK_IOU}")
+check("...and the fixture records that number",
+      abs(_dw_ious[DOORWAY.LINKED_ON_FRAME] - DOORWAY.LINK_FRAME_IOU) < 0.001,
+      f"{_dw_ious[DOORWAY.LINKED_ON_FRAME]:.4f} vs {DOORWAY.LINK_FRAME_IOU}")
+check("the candidacy peak does prove it",
+      max(_dw_ious.values()) >= LINK_OWNED_PEAK_IOU,
+      f"peak IoU {max(_dw_ious.values()):.4f} vs bar {LINK_OWNED_PEAK_IOU}")
+check("...and the fixture records that number too",
+      abs(max(_dw_ious.values()) - DOORWAY.CANDIDATE_PEAK_IOU) < 0.001,
+      f"{max(_dw_ious.values()):.4f} vs {DOORWAY.CANDIDATE_PEAK_IOU}")
+check("the peak is BEHIND the link - that is the whole defect",
+      _dw_peak_frame < DOORWAY.LINKED_ON_FRAME,
+      f"peak on frame {_dw_peak_frame}, link on {DOORWAY.LINKED_ON_FRAME}")
+check("every frame after the link is weaker, so growing the peak cannot save it",
+      max(v for f, v in _dw_ious.items() if f >= DOORWAY.LINKED_ON_FRAME)
+      < LINK_OWNED_PEAK_IOU,
+      f"best post-link IoU "
+      f"{max(v for f, v in _dw_ious.items() if f >= DOORWAY.LINKED_ON_FRAME):.4f}")
+
+_dw_xs = [c[1][0] for c in DOORWAY.CART_BY_FRAME.values()]
+_dw_ys = [c[1][1] for c in DOORWAY.CART_BY_FRAME.values()]
+_dw_span = math.hypot(max(_dw_xs) - min(_dw_xs), max(_dw_ys) - min(_dw_ys))
+check("the cart never moves, so the movement half of the test cannot carry it",
+      _dw_span < LINK_STATIC_SPREAD_PX,
+      f"centroid span {_dw_span:.1f} px vs bar {LINK_STATIC_SPREAD_PX}")
+
+
+def _replay_doorway(seed_from_formation_frame=False):
+    """Replay the slice. Optionally re-seed the peak the way the bug did."""
+    lk = _linker()
+    sc = Scene(lk, first_frame=_dw_frames[0])
+    out = {"linked_on": None, "released_on": None, "seed": None,
+           "parked_at_release": None, "disowned_ever": set()}
+    for f in _dw_frames:
+        cart_box, cart_centroid = DOORWAY.CART_BY_FRAME[f]
+        people = {pid: box for pid, (box, _c)
+                  in DOORWAY.PEOPLE_BY_FRAME.get(f, {}).items()}
+        centroids = {1000: cart_centroid}
+        centroids.update({pid: c for pid, (_b, c)
+                          in DOORWAY.PEOPLE_BY_FRAME.get(f, {}).items()})
+        sc.step(f, people, {1000: cart_box}, centroids)
+        out["disowned_ever"] |= set(lk.disowned_carts)
+        if out["linked_on"] is None and lk.links.get(1000) == DOORWAY.OWNER_ID:
+            out["linked_on"] = f
+            out["seed"] = lk._link_peak_iou.get(1000)
+            if seed_from_formation_frame:
+                lk._link_peak_iou[1000] = L._iou(
+                    cart_box, DOORWAY.PEOPLE_BY_FRAME[f][DOORWAY.OWNER_ID][0])
+        if (out["linked_on"] is not None and out["released_on"] is None
+                and lk.links.get(1000) is None):
+            out["released_on"] = f
+            out["parked_at_release"] = lk._is_parked(1000, f)
+    return out
+
+
+_dw = _replay_doorway()
+check("P2 gets the cart", _dw["linked_on"] is not None,
+      f"linked_on={_dw['linked_on']}")
+check("...on the run's own link frame, so the contest is reproduced",
+      _dw["linked_on"] == DOORWAY.LINKED_ON_FRAME,
+      f"linked_on={_dw['linked_on']} vs {DOORWAY.LINKED_ON_FRAME}")
+check("the link is seeded with the candidacy peak, not this frame's contact",
+      _dw["seed"] is not None and _dw["seed"] >= LINK_OWNED_PEAK_IOU,
+      f"seed={_dw['seed']}")
+check("and loses it while P2 is still in frame - the release itself is right",
+      _dw["released_on"] is not None, f"released_on={_dw['released_on']}")
+check("...on the run's own release frame",
+      _dw["released_on"] == DOORWAY.RELEASED_ON_FRAME,
+      f"released_on={_dw['released_on']} vs {DOORWAY.RELEASED_ON_FRAME}")
+check("...on the parked branch, which is the one under test",
+      _dw["parked_at_release"] is True,
+      f"_is_parked={_dw['parked_at_release']}")
+check("the cart is NOT disowned: this person really did have it",
+      _dw["disowned_ever"] == set(), f"disowned={_dw['disowned_ever']}")
+
+_dw_bug = _replay_doorway(seed_from_formation_frame=True)
+check("with the old formation-frame seed the same replay DOES disown it",
+      _dw_bug["disowned_ever"] == {1000}, f"disowned={_dw_bug['disowned_ever']}")
+check("...from the same release, so the seed is the only thing that changed",
+      _dw_bug["released_on"] == _dw["released_on"],
+      f"{_dw_bug['released_on']} vs {_dw['released_on']}")
 
 # ---------------------------------------------------------------------------
 print(f"\n{_passed} passed, {_failed} failed")

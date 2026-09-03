@@ -154,3 +154,25 @@ def spike_to_dict(s) -> dict:
         "avg_speed_px_s": getattr(s, "avg_speed_px_s", 0.0),
         "reasons": list(getattr(s, "reasons", None) or []),
     }
+
+
+def finding_signature(rule_findings) -> frozenset:
+    """A comparable fingerprint of a run's findings.
+
+    The annotated video has the badges of ONE evaluation baked into its pixels.
+    Retuning a threshold or redrawing a zone re-evaluates the rules over the
+    cached trajectories with no GPU work — and no re-encode — so from that
+    moment the panel and the video can be describing different runs. Comparing
+    two of these says whether that has happened, which is the difference
+    between a caveat worth printing and noise on every slider nudge.
+
+    Times are rounded to a tenth of a second: an interval is only redrawn when
+    it moves visibly, and float equality on a re-derived timestamp is not a
+    question worth asking.
+    """
+    return frozenset(
+        (getattr(f, "rule_id", ""), getattr(f, "cart_display_id", None),
+         round(float(getattr(f, "start_t", 0.0)), 1),
+         round(float(getattr(f, "end_t", 0.0)), 1))
+        for f in (rule_findings or [])
+    )

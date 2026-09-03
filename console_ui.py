@@ -24,6 +24,7 @@ processes (---VERIFY---, ---FETCH-OK---, ::venv_name::) must stay unstyled
 plain prints; a colour code inside one breaks the match silently.
 """
 import os
+import platform
 import sys
 import textwrap
 
@@ -129,6 +130,42 @@ MARK_W = max(len(G[k]) for k in ("ok", "warn", "fail", "info", "dot"))
 #: What a rendered badge occupies on screen: "[", the mark, "]".
 BADGE_W = MARK_W + 2
 
+
+def os_label() -> str:
+    """`Windows 11 build 22631`, or `Linux 6.8.0-51-generic`.
+
+    platform.release() is not usable on its own here. Windows 11 kept the
+    10.0 kernel version, so it reports "10" -- and so does the registry's
+    ProductName. The build number is the only thing that separates them:
+    22000 is the first Windows 11 build. The product-type check keeps a
+    Server release off that rewrite (Server 2025 is build 26100, and it is
+    not Windows 11).
+    """
+    system = platform.system()
+    if system != "Windows":
+        return f"{system} {platform.release()}".strip()
+
+    release = platform.release()
+    build = 0
+    workstation = True
+    try:
+        version = sys.getwindowsversion()
+        build = version.build
+        # 1 is VER_NT_WORKSTATION; 2 and 3 are the domain-controller and
+        # server types.
+        workstation = getattr(version, "product_type", 1) == 1
+    except AttributeError:
+        # Not CPython on Windows, or a build without getwindowsversion.
+        # platform.version() is "10.0.22631" on the same machine.
+        parts = platform.version().split(".")
+        if len(parts) >= 3 and parts[2].isdigit():
+            build = int(parts[2])
+
+    if release == "10" and workstation and build >= 22000:
+        release = "11"
+
+    label = f"Windows {release}"
+    return f"{label} build {build}" if build else label
 
 def banner(title: str, subtitle: str = "", right: str = "") -> None:
     """The one title block. Fixed text only — never a path; the frame has a

@@ -1343,6 +1343,145 @@ body.gk-zone-fs { overflow: hidden !important; }
    no longer the bottom edge. */
 .zone-toolbar-row-secondary { border-radius: 0 !important; }
 
+/* ── Saved zone sets ──────────────────────────────────────────────────────
+   The panel that answers "where did my zones go": a header carrying the
+   folder, a save bar, and one row per file on disk. Same fixed-pool
+   construction as the zone manager above — an unused row is hidden by the
+   EMPTY marker in its meta cell, never by Gradio's `visible` flag. */
+.gk-preset-hdr {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 16px 6px; margin: 0;
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border); border-top: none;
+}
+.gk-preset-title {
+    font-size: 0.7rem; font-weight: 800; letter-spacing: 0.7px;
+    text-transform: uppercase; color: var(--gk-ink-2);
+}
+.gk-preset-count {
+    font-size: 0.68rem; font-weight: 700; color: var(--gk-accent);
+    background: var(--gk-accent-bg); border-radius: 999px; padding: 1px 8px;
+}
+.gk-preset-live {
+    font-size: 0.68rem; font-weight: 700; color: #16803d;
+    background: rgba(34,197,94,0.14); border-radius: 999px; padding: 1px 8px;
+}
+.gk-preset-folder {
+    margin-left: auto; font-size: 0.7rem; color: var(--gk-ink-3);
+    min-width: 0; overflow-wrap: anywhere;
+}
+.gk-preset-folder code, .gk-preset-empty code {
+    font-size: 0.7rem; padding: 1px 5px; border-radius: 4px;
+    background: var(--gk-row-alt); color: var(--gk-ink-2);
+}
+
+/* Save bar — [name] [Save current zones] [Refresh] */
+.gk-preset-savebar {
+    display: flex !important; align-items: center !important;
+    gap: 10px !important; flex-wrap: nowrap !important;
+    padding: 4px 16px 10px; margin: 0;
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border); border-top: none;
+}
+.gk-preset-savebar > * { min-width: 0 !important; }
+.gk-preset-savebar .zone-field-pair {
+    display: flex !important; flex-direction: row !important;
+    align-items: center !important; gap: 10px !important;
+    flex: 1 1 auto !important; min-width: 0 !important;
+    background: transparent !important; border: none !important;
+    padding: 0 !important; margin: 0 !important;
+}
+.gk-preset-savebar .zone-field-pair .zone-field-label {
+    flex: 0 0 auto !important;
+    font-size: 0.66rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--gk-ink-2); white-space: nowrap;
+}
+.gk-preset-savebar .zone-field-pair > div:not(:first-child) {
+    flex: 1 1 auto !important; min-width: 0 !important;
+}
+.gk-preset-savebar .gk-preset-save,
+.gk-preset-savebar .gk-preset-refresh { flex: none !important; }
+.gk-preset-savebar button {
+    height: 38px !important; padding: 0 14px !important;
+    font-size: 0.78rem !important; font-weight: 600 !important;
+    border-radius: 8px !important; white-space: nowrap !important;
+}
+.gk-preset-savebar .gk-preset-save button {
+    background: var(--gk-accent) !important; color: #fff !important;
+    border-color: var(--gk-accent) !important;
+}
+.gk-preset-savebar .gk-preset-save button:hover {
+    background: var(--gk-accent-2) !important;
+}
+
+/* One row per saved file. Occupancy is CONTENT, not `visible` — see the
+   zone-manager note above; the same Gradio behaviour applies here. */
+.gk-preset-row {
+    display: flex !important; align-items: center !important;
+    gap: 8px !important; flex-wrap: nowrap !important;
+    padding: 6px 16px !important; margin: 0 !important;
+    background: var(--gk-card) !important;
+    border: 1px solid var(--gk-border) !important; border-top: none !important;
+    border-radius: 0 !important;
+}
+.gk-preset-row:has(.gk-preset-slot-empty) { display: none !important; }
+.gk-preset-row:hover { background: var(--gk-row-alt) !important; }
+.gk-preset-row > * { min-width: 0 !important; }
+.gk-preset-meta {
+    flex: 1 1 auto !important; width: auto !important; min-width: 0 !important;
+}
+.gk-preset-meta-in {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    min-width: 0;
+}
+.gk-preset-name {
+    font-size: 0.82rem; font-weight: 700; color: var(--gk-ink);
+    overflow-wrap: anywhere;
+}
+.gk-preset-badge-live {
+    font-size: 0.62rem; font-weight: 800; letter-spacing: 0.5px;
+    text-transform: uppercase; color: #16803d;
+    background: rgba(34,197,94,0.14); border-radius: 999px; padding: 1px 7px;
+}
+.gk-preset-sub { font-size: 0.72rem; color: var(--gk-ink-2); }
+.gk-preset-file {
+    font-size: 0.66rem; color: var(--gk-ink-3);
+    font-family: ui-monospace, Consolas, monospace;
+    overflow-wrap: anywhere;
+}
+.gk-preset-row .gk-preset-load, .gk-preset-row .gk-preset-del {
+    flex: none !important;
+}
+.gk-preset-row button {
+    height: 30px !important; min-width: 66px !important;
+    padding: 0 10px !important;
+    font-size: 0.72rem !important; font-weight: 600 !important;
+    border-radius: 7px !important;
+}
+.gk-preset-row .gk-preset-del button {
+    color: var(--gk-bad, #b91c1c) !important;
+    border-color: var(--gk-border) !important; background: transparent !important;
+}
+.gk-preset-row .gk-preset-del button:hover {
+    background: rgba(185,28,28,0.08) !important;
+}
+
+/* Empty state. An empty gr.HTML collapses to nothing, so this needs no
+   visibility toggle — the value is "" when there is something to list. */
+.gk-preset-empty {
+    margin: 0; padding: 10px 16px 14px;
+    font-size: 0.78rem; color: var(--gk-ink-3); line-height: 1.6;
+    background: var(--gk-card);
+    border: 1px solid var(--gk-border); border-top: none;
+}
+.gk-preset-empty b { color: var(--gk-ink-2); }
+
+@media (max-width: 760px) {
+    .gk-preset-savebar { flex-wrap: wrap !important; }
+    .gk-preset-folder { margin-left: 0; }
+}
+
 /* ── Saved-zone manager (one editable row per zone) ───────────────────────
    Rows are Gradio Rows, and Gradio puts `min-width: min(160px, 100%)` on every
    direct child of one. Five children at that floor is an 800px row before any

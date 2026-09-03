@@ -232,7 +232,10 @@ def test_a_failed_encode_does_not_lose_the_rest_of_the_run():
     # `try:` being the statement immediately enclosing the call, and the handler
     # leaving out_path unset rather than re-raising.
     src = inspect.getsource(TrackingEngine._process_video)
-    call = "out_path = reencode_to_mp4(avi_path)"
+    # Matched on the opening of the call, not the whole line: the arguments
+    # grow (the rule-badge frame_hook was the first), and pinning them here
+    # only makes this fail for an edit it is not policing.
+    call = "out_path = reencode_to_mp4("
     i = src.index(call)
     assert src[:i].rstrip().endswith("try:"), (
         "the encode is not inside a try: " + src[:i].rstrip()[-120:])

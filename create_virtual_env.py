@@ -39,7 +39,6 @@ should not modify the checkout.
 import argparse
 import json
 import os
-import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -398,7 +397,7 @@ def main(argv=None) -> int:
     if not args.ensure:
         ui.banner("POPS demo   environment setup",
                   "torch, ultralytics, and everything the demo imports",
-                  f"{platform.system()} {platform.release()}")
+                  ui.os_label())
     try:
         if args.ensure:
             # Deliberately before check_python: --ensure asks whether a
