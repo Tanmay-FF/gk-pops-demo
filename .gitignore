@@ -51,6 +51,12 @@ zone_presets/
 *.mkv
 *.webm
 
+# ...except the five demo clips in sample_videos/, which are tracked via LFS
+# (see .gitattributes) so a clone can run the demo without a separate handoff.
+# The blanket rules above still cover every other path, including the clips at
+# the repo root and tests/fixtures/golden/.
+!sample_videos/*.mp4
+
 # The golden-regression clip. tests/test_golden_clip.py LOOKS for a clip here,
 # so without this line the next person to put one where the test tells them to
 # would commit real store CCTV with identifiable people in it. Only the
