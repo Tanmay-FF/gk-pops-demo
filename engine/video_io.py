@@ -145,11 +145,97 @@ def discard_run_output(avi_path: str) -> None:
         print(f"[WARN] could not remove the cancelled run's partial video: {e}")
 
 
-def reencode_to_mp4(avi_path: str) -> str:
+def _encode_through_hook(avi_path: str, out_path: str, frame_hook):
+    """Decode the AVI, run every frame through `frame_hook`, pipe to ffmpeg.
+
+    Returns (returncode, stderr_text) so the caller's existing failure
+    reporting handles both encode paths identically.
+
+    stderr goes to a temp FILE rather than a pipe on purpose: nothing reads the
+    pipe until after stdin is closed, and a chatty ffmpeg filling the OS pipe
+    buffer would block it forever while we sat waiting to finish writing
+    frames. A file cannot deadlock.
+    """
+    cap = cv2.VideoCapture(avi_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not reopen the tracked video ({avi_path})")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    cmd = [
+        FFMPEG_EXE, "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}", "-r", f"{fps:g}", "-i", "-",
+    ] + _encoder_args() + [out_path]
+
+    err_file = tempfile.TemporaryFile()
+    try:
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=err_file)
+        except OSError as e:
+            raise RuntimeError(
+                f"could not run ffmpeg ({FFMPEG_EXE}): {e}") from e
+        idx = 0
+        try:
+            try:
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    idx += 1
+                    # 1-based to match the frame loop that wrote this AVI, so a
+                    # hook can index the same numbers the findings carry.
+                    frame_hook(frame, idx)
+                    proc.stdin.write(frame.tobytes())
+            except (BrokenPipeError, OSError):
+                # ffmpeg died mid-stream. Its exit code and stderr below say
+                # why; re-raising here would replace that with a less useful
+                # error.
+                pass
+        except BaseException:
+            # A hook that raises is a bug worth surfacing, but ffmpeg is still
+            # sitting on a half-written file waiting for stdin. Kill it here or
+            # it outlives the run holding a lock on its own output.
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            cap.release()
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        rc = proc.wait()
+        err_file.seek(0)
+        return rc, err_file.read().decode("utf-8", "replace")
+    finally:
+        err_file.close()
+
+
+def _encoder_args() -> list[str]:
+    """The codec half of the ffmpeg command, shared by both encode paths."""
+    if _check_nvenc():
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+                "-cq", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+    return ["-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+
+
+def reencode_to_mp4(avi_path: str, frame_hook=None) -> str:
     """Re-encode AVI to H.264 MP4. Uses NVENC if available, else CPU.
 
     The MP4 lands beside its own AVI — see _run_dir() for why that is not a
     fixed path any more.
+
+    `frame_hook(frame, frame_idx)` — when given, every decoded frame is passed
+    through it (mutated in place, 1-based index to match the frame loop's
+    numbering) before being encoded. This exists for overlays that can only be
+    computed once the whole run is known, the operational rule findings being
+    the case in hand. Frames are piped straight into ffmpeg rather than written
+    to a second AVI: an intermediate would cost a whole extra XVID generation
+    on the only copy of the run's video.
     """
     out_path = os.path.join(os.path.dirname(avi_path), "pops_demo_output.mp4")
     if os.path.exists(out_path):
@@ -164,41 +250,32 @@ def reencode_to_mp4(avi_path: str) -> str:
                 f"cannot replace the previous output video ({out_path}): {e}. "
                 f"Close any tab still playing it and run again.") from e
 
-    if _check_nvenc():
-        cmd = [
-            FFMPEG_EXE, "-y", "-i", avi_path,
-            "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
-            "-cq", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            out_path,
-        ]
+    if frame_hook is not None:
+        rc, stderr_text = _encode_through_hook(avi_path, out_path, frame_hook)
     else:
-        cmd = [
-            FFMPEG_EXE, "-y", "-i", avi_path,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            out_path,
-        ]
+        cmd = [FFMPEG_EXE, "-y", "-i", avi_path] + _encoder_args() + [out_path]
+        # The return code was ignored here, and the AVI deleted regardless. A
+        # failed encode therefore destroyed the only copy of the run's video and
+        # handed back a path to a file that does not exist — the UI then
+        # rendered an empty player on a run that otherwise succeeded, with
+        # nothing in the log to say why. Check, keep the source, name the
+        # reason.
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError as e:
+            raise RuntimeError(
+                f"could not run ffmpeg ({FFMPEG_EXE}): {e}") from e
+        rc, stderr_text = proc.returncode, proc.stderr
 
-    # The return code was ignored here, and the AVI deleted regardless. A
-    # failed encode therefore destroyed the only copy of the run's video and
-    # handed back a path to a file that does not exist — the UI then rendered an
-    # empty player on a run that otherwise succeeded, with nothing in the log to
-    # say why. Check, keep the source, and name the reason.
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError as e:
-        raise RuntimeError(
-            f"could not run ffmpeg ({FFMPEG_EXE}): {e}") from e
-
-    if proc.returncode != 0 or not os.path.exists(out_path):
-        tail = (proc.stderr or "").strip().splitlines()[-4:]
-        print(f"[ERROR] ffmpeg failed (exit {proc.returncode}); the raw AVI is "
+    if rc != 0 or not os.path.exists(out_path):
+        tail = (stderr_text or "").strip().splitlines()[-4:]
+        print(f"[ERROR] ffmpeg failed (exit {rc}); the raw AVI is "
               f"kept at {avi_path}")
         for line in tail:
             print(f"[ERROR]   {line}")
         raise RuntimeError(
             "video encoding failed (ffmpeg exit "
-            f"{proc.returncode}): {' / '.join(tail) or 'no output'}")
+            f"{rc}): {' / '.join(tail) or 'no output'}")
 
     # Only once the MP4 is known to exist: until then the AVI is the run's only
     # video.

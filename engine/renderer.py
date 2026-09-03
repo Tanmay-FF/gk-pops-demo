@@ -131,6 +131,148 @@ def draw_classification_overlay(im0, bbox, cls_result, pops_info):
         outlined_text(im0, f"POPS:{score} {event}", (x1, oy), 0.45, color)
 
 
+#: Rule-badge fill per severity, BGR. Solid chip, dark text — the same shape
+#: draw_bbox() gives a "cart:N" label, because these ARE labels and an overlay
+#: that draws one kind of label as a dark card and another as a colour chip
+#: reads as two unrelated systems.
+#:
+#: Sharing the shape means the COLOUR has to carry the whole distinction, so
+#: the family sits in a band nothing else in the frame occupies: rose to
+#: violet to sky. POPS runs red / dark-orange / yellow / green, carts are
+#: orange, people green, links magenta — a solid amber chip beside a solid
+#: orange "cart:1" chip is the one pairing a viewer will misread, and this
+#: avoids it outright rather than hoping the shade is far enough apart.
+#:
+#: Warm to cool still ranks them: rose demands a person, violet wants one,
+#: sky is a note, slate is background. Every stop is light enough for dark
+#: text, which is what keeps them readable over bright store footage.
+_RULE_SEVERITY_COLORS = {
+    "SAFETY": (133, 113, 251),    # rose-400    #fb7185
+    "ACTION": (250, 139, 167),    # violet-400  #a78bfa
+    "WATCH":  (252, 211, 125),    # sky-300     #7dd3fc
+    "INFO":   (225, 213, 203),    # slate-300   #cbd5e1
+}
+#: Near-black rather than pure: matches the text draw_bbox puts on its own
+#: chips, and a hard 0 on a lossy encode fringes worse.
+_RULE_BADGE_FG = (20, 20, 20)
+_RULE_BADGE_H = 24
+
+
+def _darkened(color, amount=0.35):
+    return tuple(int(c * amount) for c in color)
+
+
+def _overlaps(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return not (ax2 <= bx1 or ax1 >= bx2 or ay2 <= by1 or ay1 >= by2)
+
+
+def draw_rule_badges(im0, badges):
+    """Draw operational rule findings ABOVE a cart's bbox.
+
+    Above, because everything below a cart box is taken: fill/bag, POPS, and
+    the link label already stack down from y2+18 (see
+    draw_classification_overlay and the cart loop in tracker.process_video).
+    draw_bbox's own "cart:N" chip sits immediately above y1, so these start
+    above that and stack upwards.
+
+    Placement is collision-driven, not per-cart. Two carts parked side by side
+    in one doorway are the normal case for these rules, not the exception, and
+    their badges are wide enough to overlap even when the carts barely do —
+    whichever drew last simply erased the other, so one of two flagged carts
+    silently had no label at all. Each badge instead climbs until it finds
+    clear air.
+
+    `badges` is the per-frame list built by rules.overlay_index(), already
+    ordered most-severe-first, so the badge a viewer most needs is the one that
+    gets the row closest to its cart.
+    """
+    im_h, im_w = im0.shape[:2]
+    # Seeded with the "cart:N" chip of every badged cart: a badge that climbs
+    # clear of its neighbour's badge must not land on its neighbour's label.
+    placed = [(int(b["bbox"][0]), int(b["bbox"][1]) - 26,
+               int(b["bbox"][0]) + 110, int(b["bbox"][1]))
+              for b in badges]
+
+    for b in badges:
+        bbox = b["bbox"]
+        x1, y1 = int(bbox[0]), int(bbox[1])
+
+        severity = b.get("severity")
+        accent = _RULE_SEVERITY_COLORS.get(severity,
+                                           _RULE_SEVERITY_COLORS["INFO"])
+        label = b["text"]
+        zone = b.get("zone_name")
+        if zone:
+            # Colon, not a dash. FONT_HERSHEY_SIMPLEX draws a hyphen long
+            # enough to read as an em dash on the frame, and it sat between two
+            # names where a separator is all that was wanted. Matches the
+            # "Cart:N" form the rest of the overlay already uses.
+            label = f"{label}: {zone}"
+        cart = b.get("cart_display_id")
+        if cart is not None:
+            # Same vocabulary the link labels use ("-> Cart:2"), so a displaced
+            # badge still says who it is about without a leader line.
+            label = f"Cart:{cart}  {label}"
+        # Split so the two halves can be weighted differently: WHAT is wrong
+        # reads first at full contrast, HOW LONG follows in a darkened tint of
+        # the fill. One undifferentiated string makes the reader parse the
+        # whole chip to find the rule name.
+        tail = f"  {b.get('elapsed_s', 0.0):.0f}s"
+        if b.get("degraded"):
+            # Sparsely observed, or a synthesised clock. The finding still
+            # stands, but it must not read as identical to a clean one.
+            tail += " (?)"
+
+        (lw, _th), _ = cv2.getTextSize(label, _FONT, 0.5, 1)
+        (tw, _th2), _ = cv2.getTextSize(tail, _FONT, 0.5, 1)
+        w_px = lw + tw + 18
+        # A cart at the frame edge is exactly the cart worth badging — one
+        # parked half out of a doorway — so the badge slides back into frame
+        # rather than being clipped to "UNATTENDED CAR". The 2px inset keeps
+        # the chip's own border visible instead of merging into the edge.
+        x = max(2, min(x1, im_w - w_px - 2))
+
+        rect = None
+        # Climb above the cart first, then hang below it, then sit inside it.
+        # Each candidate is one badge-height further from the box.
+        for y_bot in ([y1 - 26 - r * (_RULE_BADGE_H + 3) for r in range(8)]
+                      + [int(bbox[3]) + 4 + r * (_RULE_BADGE_H + 3) + _RULE_BADGE_H
+                         for r in range(4)]
+                      + [min(im_h, int(bbox[3])) - 2 - r * (_RULE_BADGE_H + 3)
+                         for r in range(4)]):
+            y_top = y_bot - _RULE_BADGE_H
+            if y_top < 0 or y_bot > im_h:
+                continue
+            cand = (x, y_top, x + w_px, y_bot)
+            if not any(_overlaps(cand, q) for q in placed):
+                rect = cand
+                break
+        if rect is None:
+            # Nowhere clear anywhere on the frame. Better an overlapped badge
+            # than a cart the video never flags at all, so take the first slot
+            # that at least fits, and only give up if even that is impossible.
+            y_bot = max(_RULE_BADGE_H, min(im_h, y1 - 26))
+            if y_bot - _RULE_BADGE_H < 0:
+                continue
+            rect = (x, y_bot - _RULE_BADGE_H, x + w_px, y_bot)
+        placed.append(rect)
+
+        bx1, y_top, bx2, y_bot = rect
+        cv2.rectangle(im0, (bx1, y_top), (bx2, y_bot), accent, -1)
+        # A heavier border for SAFETY. Severity is then legible even to a
+        # viewer who cannot separate the hues — a blocked fire exit should not
+        # depend on colour vision to stand out from a parked cart.
+        cv2.rectangle(im0, (bx1, y_top), (bx2, y_bot), _RULE_BADGE_FG,
+                      2 if severity == "SAFETY" else 1)
+        tx = bx1 + 9
+        cv2.putText(im0, label, (tx, y_bot - 8), _FONT, 0.5,
+                    _RULE_BADGE_FG, 1, cv2.LINE_AA)
+        cv2.putText(im0, tail, (tx + lw, y_bot - 8), _FONT, 0.5,
+                    _darkened(accent), 1, cv2.LINE_AA)
+
+
 def draw_person_overlay(im0, bbox, speed_status, dir_label, link_label):
     """Draw speed / direction / link info below person bbox."""
     if dir_label == "OUTBOUND" and speed_status in ("MEDIUM", "FAST"):

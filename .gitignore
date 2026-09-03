@@ -30,6 +30,12 @@ engine.zip
 temp/
 tmp/
 
+# Saved zone sets. engine/config.py:710 points the Zone Editor's Save button
+# here, so this folder is app output, not source: one JSON per set, named after
+# the clip it was drawn on. The app recreates it on demand, and the filenames
+# carry store-recording names, so nothing in it belongs in the repo.
+zone_presets/
+
 # ---------------------------------------------------------------------------
 # Video. No clip belongs in this repo, at any path.
 #

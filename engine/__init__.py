@@ -7,7 +7,7 @@ from .analytics_models import (
     AnalyticsResult, DwellRow, JourneyEdge, QueueSpike,
     TrackRecord, TrajectoryBundle, Zone,
 )
-from . import analytics_builder, analytics_ui, zone_editor
+from . import analytics_builder, analytics_ui, zone_editor, zone_presets
 from .scene_detector import SceneElement, detect_scene_elements
 
 __all__ = [
@@ -16,6 +16,6 @@ __all__ = [
     "SAMPLE_VIDEOS",
     "Zone", "TrajectoryBundle", "AnalyticsResult",
     "DwellRow", "JourneyEdge", "QueueSpike", "TrackRecord",
-    "analytics_builder", "analytics_ui", "zone_editor",
+    "analytics_builder", "analytics_ui", "zone_editor", "zone_presets",
     "SceneElement", "detect_scene_elements",
 ]

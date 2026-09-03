@@ -166,11 +166,39 @@ EMPTY_OVERRIDE_THRESH = 0.5
 # final "empty" verdict is overridden back to loaded.
 #
 # Contiguity is the noise guard, not confidence: a stray single-frame "partial"
-# on a genuinely empty cart cannot reach four consecutive observations, while a
-# cart that really held merchandise trivially does. At
-# CLASSIFY_EVERY_N_FRAMES=8 and 20 fps, 4 observations is ~1.6s of sustained
+# on a genuinely empty cart cannot reach several consecutive observations,
+# while a cart that really held merchandise trivially does. At
+# CLASSIFY_EVERY_N_FRAMES=8 and 20 fps, 5 observations is ~2.0s of sustained
 # merchandise.
-GRABRUN_MIN_RUN_OBS = 4
+#
+# Why 5 and not 4. On the 1763902526030 Not_A_Pushout clip Cart 1 is a
+# genuinely EMPTY cart: 43 observations voting empty 1129.36 against partial
+# 47.73, a 24x landslide. Its loaded observations are 8 scattered reads at mean
+# confidence 0.746, arranged partial / empty / partial x2 / empty /
+# partial x4 / empty / partial / empty..., and that one 4-long burst was enough
+# to clear a gate of 4 — so the cart finalised as partial|unbagged OUTBOUND 75
+# with merch_removed set, i.e. a PUSHOUT ALERT on an empty cart.
+#
+# Every confirmed pushout in the pinned fixtures clears 5 with room to spare:
+# the 2026-08-13 HANNAFORD clip runs 9 and 12 (tests/test_grabrun_override.py),
+# the 1764099569430 OUTSIDE clip runs 15 (tests/test_outside_clip_bag_label.py),
+# the 1764120540680 clip runs 21 (tests/test_stray_full_observation.py) and the
+# 1764092528600 golden clip runs 27. The separation is 4 against >= 9, so this
+# is not a knife-edge retune; there is simply no real removal in the corpus
+# that a classifier misread can imitate at 5 consecutive observations.
+GRABRUN_MIN_RUN_OBS = 5
+
+# How long a LOADED run sitting at the very END of the history is still treated
+# as classifier noise rather than as merchandise (see
+# engine/scoring.py:_strip_trailing_noise). Deliberately a SEPARATE constant
+# from GRABRUN_MIN_RUN_OBS even though both count consecutive loaded
+# observations, because the two thresholds move in opposite directions: raising
+# the run gate demands MORE loaded evidence to call a removal, while raising
+# this one discards MORE trailing evidence that the cart ended up loaded. Wired
+# to one constant, the fix above would have loosened this in the same edit and
+# turned the parked-cart negative in tests/test_grabrun_pushout.py — a loaded
+# run of 4 at the end of the history — into a pushout.
+GRABRUN_TRAILING_NOISE_OBS = 4
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------
@@ -326,6 +354,13 @@ LINK_STATIC_MIN_IOU = 0.15
 #: clips, but NOT the same quantity: that one gates one frame's co-movement
 #: evidence for a candidate, this one judges a whole established link. They are
 #: free to be retuned apart.
+#:
+#: The peak is measured over the CANDIDATE window as well as the link itself —
+#: see linker.py, where the link seeds it with max(this frame, candidate peak).
+#: Do not compensate for a missed case by lowering this number: the third clip
+#: it is calibrated on, 1764029361010, formed its link at IoU 0.1388 and would
+#: need 0.13 to pass on the formation frame alone, which is inside the grazing
+#: band above. Its real contact, 0.3139, is in the candidacy window.
 LINK_OWNED_PEAK_IOU = 0.15
 
 ABANDON_FRAMES      = 30      # person gone N frames → abandonment
@@ -414,14 +449,18 @@ ZONE_CONGESTION_BACKED_UP_SCORE     = 70.0
 #
 # All durations are in SECONDS and converted to sample counts at runtime from
 # the video's own timestamps. ABANDON_FRAMES above is deliberately NOT reused:
-# 30 frames is ~1s at 30fps, which is link bookkeeping, whereas operational
-# abandonment is a minutes-scale question.
+# 30 frames is ~1s at 30fps, which is link bookkeeping, whereas the operational
+# thresholds here are a duration the operator picks and re-picks per site.
+#
+# The values below are the demo defaults, each one the minimum of its slider in
+# app_poc_v2.py. An operator raises them per site from those sliders; nothing
+# here needs editing to run a longer fuse.
 RULE_ENGINE_ENABLED          = True
 
 # Duration thresholds (seconds)
-RULE_BLOCKED_DOOR_S          = 45.0    # egress compliance — shortest fuse
-RULE_STATIC_CART_S           = 120.0   # housekeeping / dwell
-RULE_ABANDONED_CART_S        = 180.0   # retrieval workflow
+RULE_BLOCKED_DOOR_S          = 5.0     # egress compliance — shortest fuse
+RULE_STATIC_CART_S           = 10.0    # housekeeping / dwell
+RULE_ABANDONED_CART_S        = 10.0    # retrieval workflow
 
 # Static test — two signals, not just speed. compute_motion() derives speed
 # from a first-to-last delta over the last <=5 positions, so bbox jitter on a
@@ -606,6 +645,37 @@ DIRECTION_WINDOW_S       = 4.0
 # at a shelf and steps away from ABANDONED CART to PUSHOUT ALERT.
 DIRECTION_LATCH_FRAMES   = 20
 
+#: How far back along the outbound axis a cart must actually TRAVEL before a
+#: resolved INBOUND clears its OUTBOUND latch. `None` disables the test, and
+#: DirectionLatch then clears the latch on the first resolved INBOUND frame, as
+#: it always did.
+#:
+#: ON at 40 px. Sized against the case it exists for: on the 1763950636750
+#: OUTSIDE clip Cart 1 holds OUTBOUND for frames 10-84 (+66 px of dy), then
+#: settles about 25 px back inside the doorway. DIRECTION_MIN_DY is 20, so that
+#: settle resolves INBOUND for 20 frames and used to clear the latch outright,
+#: leaving the cart UNKNOWN for its last 267 frames and capping it at the
+#: UNKNOWN branch's 65 instead of MERCH_REMOVED_FLOOR's 75. 40 clears the
+#: settle with room and is far under a real reversal — a staff member wheeling
+#: a cart back inside retreats hundreds of px. Every INBOUND frame of that
+#: retreat still scores the kill switch as it always did, because resolve()
+#: RETURNS INBOUND either way and only the latch is withheld; what the bar
+#: delays is the UNKNOWN frames interleaved with them, which keep reading
+#: OUTBOUND until the cart has gone 40px back. That is a handful of frames at
+#: the start of a real retrieval, and the cart is attended throughout them.
+#:
+#: Flat pixels, not a fraction of the cart's box: DirectionLatch takes one
+#: scalar for every cart, and a perspective-scaled bar (the shape
+#: WALKAWAY_GAP_FRAC uses) would have to be passed per call. Worth doing if a
+#: clip ever lands where 40 is wrong at one end of the frame; nothing measured
+#: needs it yet.
+#:
+#: Turning this on moved a GOLDEN clip: 1764099569430 OUTSIDE Cart 1 finalises
+#: OUTBOUND instead of UNKNOWN — the same 75 PUSHOUT ALERT either way, because
+#: the abandonment floor swallows the difference. tests/fixtures/golden/
+#: baseline_outside.json was regenerated in the same change.
+LATCH_REVERSAL_PX        = 40
+
 # ---------------------------------------------------------------------------
 # Fixed classifier weights
 # ---------------------------------------------------------------------------
@@ -624,3 +694,17 @@ if os.path.isdir(TEST_VIDEO_DIR):
     for f in sorted(os.listdir(TEST_VIDEO_DIR)):
         if f.endswith(('.mp4', '.avi', '.mov')):
             SAMPLE_VIDEOS.append(os.path.join(TEST_VIDEO_DIR, f))
+
+
+# ---------------------------------------------------------------------------
+# Saved zone presets
+# ---------------------------------------------------------------------------
+#: Where the Zone Editor writes its saved polygon sets. One JSON file per
+#: preset, named "<video stem>__<label>.json", so a clip's zones survive a
+#: restart and can be reloaded the moment that clip is selected again.
+#:
+#: Deliberately inside the repo rather than in %TEMP% next to the trajectory
+#: cache: a trajectory bundle is a derived artifact that can always be
+#: recomputed, while a hand-drawn doorway polygon is hand work nobody wants to
+#: redo, and keeping it here lets a useful set be committed and shared.
+ZONE_PRESET_DIR = str(_REPO_ROOT / "zone_presets")

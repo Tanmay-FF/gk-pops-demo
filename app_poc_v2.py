@@ -27,7 +27,8 @@ import gradio as gr
 
 import console_noise
 import console_ui as ui
-from engine import TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor
+from engine import (TrackingEngine, SAMPLE_VIDEOS, analytics_ui, zone_editor,
+                    zone_presets)
 from engine.cancellation import RunCancelled, RunSuperseded
 from engine import theme as T
 from engine import ui_builder
@@ -581,32 +582,53 @@ def finalize_case_report_handler():
 # Zone editor handlers
 # ---------------------------------------------------------------------------
 def on_video_upload(video_path, prev_zones_state, prev_video_key):
-    """When the user picks a video, reset zones (if it's a new file) and
-    extract the first frame so they can draw zones on it."""
+    """When the user picks a video, load or reset its zones (if it's a new
+    file) and extract the first frame so they can draw zones on it.
+
+    Seven outputs, and every return site emits all seven — a short tuple is
+    silent in Gradio and maps the values it does have onto the wrong
+    components. The seventh is which saved set the zones came from; the
+    saved-set panel itself is redrawn by the refresh_preset_ui() chained onto
+    this event, not from here.
+    """
     if not video_path:
         # The zone canvas slot must be None, NOT "". gr.Image treats any string
         # as a filepath, and Gradio resolves a relative one against the process
         # cwd: "" becomes the project directory, which it then tries to open and
         # hash. On Windows that is PermissionError [Errno 13] on a directory,
         # raised inside postprocess, so clearing the video killed the event.
-        return None, prev_zones_state or [], [], None, None, _zone_summary_html([])
+        # `prev_video_key` is carried through, NOT cleared. This branch keeps
+        # the zones on purpose, and dropping the key would make the very next
+        # pick of that same clip look like a new video to the branch below -
+        # which would auto-load the saved preset over the zones just preserved,
+        # discarding every edit made since the last save.
+        return (None, prev_zones_state or [], [], prev_video_key, None,
+                _zone_summary_html([]), None)
 
     new_key = make_video_key(video_path)
-    if new_key != prev_video_key:
-        zones_state = []
-        if prev_video_key is not None:
-            gr.Info("New video - zones reset.")
-    else:
-        zones_state = list(prev_zones_state or [])
+    is_new_video = new_key != prev_video_key
+    zones_state = [] if is_new_video else list(prev_zones_state or [])
 
     frame = zone_editor.extract_first_frame(video_path)
     if frame is None:
         gr.Warning("Could not decode the first frame of this video.")
-        return None, zones_state, [], new_key, None, _zone_summary_html(zones_state)
+        return (None, zones_state, [], new_key, None,
+                _zone_summary_html(zones_state), None)
+
+    # The newest saved set for this clip is loaded here rather than behind a
+    # button: picking the clip IS the request for its zones. The saved-set
+    # list under the canvas still loads any older set, and Clear all still
+    # empties the editor. Only on a NEW clip — a rerun of the same file keeps
+    # whatever is on screen, edits included.
+    loaded_path = None
+    if is_new_video:
+        zones_state, loaded_path, loaded = _autoload_preset(video_path, frame)
+        if not loaded and prev_video_key is not None:
+            gr.Info("New video - zones reset.")
 
     overlay = zone_editor.render_zone_overlay(frame, zones_state, in_progress=[])
     return (frame, zones_state, [], new_key, _bgr_to_rgb(overlay),
-            _zone_summary_html(zones_state))
+            _zone_summary_html(zones_state), loaded_path)
 
 
 def on_canvas_click(evt: gr.SelectData, current_poly, first_frame, zones_state):
@@ -675,6 +697,251 @@ def clear_all_zones(zones_state, first_frame):
     overlay = _redraw_canvas(first_frame, [], [])
     undo = _undo_slot(f"{len(prev)} zones", prev) if prev else None
     return [], [], overlay, _zone_summary_html([]), undo
+
+
+# ---------------------------------------------------------------------------
+# Saved zone sets
+#
+# Gradio wrappers over engine/zone_presets.py. Every set is per-clip and lives
+# in ZONE_PRESET_DIR as one JSON file named
+# "<clip>__<set name>__<when>.json", so the folder is readable on its own.
+#
+# The panel is a FIXED POOL of rows, occupancy expressed in the meta cell's
+# HTML rather than Gradio's `visible` flag — same construction as the zone
+# manager below, and for the same reason: `visible` updates on a Row inside a
+# gr.Tab did not land, while an HTML value update always does.
+# ---------------------------------------------------------------------------
+#: Rows in the saved-set list. Older sets past this stay on disk and the
+#: header says how many are not shown.
+MAX_PRESET_ROWS = 8
+
+#: Emitted into an unused slot's meta cell. CSS hides any row containing it.
+PRESET_EMPTY_SLOT = "<span class='gk-preset-slot-empty'></span>"
+
+#: Head of the tuple `_preset_ui` returns, before the per-row values.
+_PRESET_HEAD_N = 4
+
+
+def _preset_folder_label():
+    """The folder, shown relative to the repo when it is inside it — an
+    absolute Windows path is the one thing that makes this header wrap."""
+    folder = str(zone_presets.preset_dir())
+    try:
+        rel = os.path.relpath(folder, os.path.dirname(os.path.abspath(__file__)))
+        return folder if rel.startswith("..") else rel
+    except ValueError:                      # different drive
+        return folder
+
+
+def _preset_hdr(video_path, infos, loaded_path, total=None):
+    """Title row: where the files are, how many this clip has, which one is on
+    screen. This is the answer to "where did my zones go", and it is on the
+    page rather than in a toast that has already faded.
+
+    `total` is the number of files on disk, which is NOT len(infos) - the rows
+    are capped at MAX_PRESET_ROWS. Counting the truncated list would report
+    "8 saved" while 13 sat in the folder, and the older ones would look lost.
+    """
+    folder = T.esc(_preset_folder_label())
+    total = len(infos) if total is None else total
+    if not video_path:
+        count = "no clip selected"
+    elif not total:
+        count = "none saved for this clip yet"
+    else:
+        count = f"{total} saved for this clip"
+        if len(infos) < total:
+            count += f" - showing the {len(infos)} newest"
+    live = ""
+    for i in infos:
+        if loaded_path and i.path == loaded_path:
+            live = (f"<span class='gk-preset-live'>on screen: "
+                    f"{T.esc(i.label)}</span>")
+            break
+    return (f"<div class='gk-preset-hdr'>"
+            f"<span class='gk-preset-title'>Saved zone sets</span>"
+            f"<span class='gk-preset-count'>{T.esc(count)}</span>"
+            f"{live}"
+            f"<span class='gk-preset-folder'>folder: <code>{folder}</code>"
+            f"</span></div>")
+
+
+def _preset_empty_html(video_path, infos):
+    """Shown instead of the rows when there is nothing to list. Says what to
+    press and where the file will land — an empty list otherwise reads as a
+    broken feature."""
+    if infos:
+        return ""
+    if not video_path:
+        return ("<div class='gk-preset-empty'>Pick a clip first - a zone set "
+                "belongs to one video.</div>")
+    return ("<div class='gk-preset-empty'>Nothing saved for this clip yet. "
+            "Draw your zones on the frame above, type a name in "
+            "<b>Set name</b> and press <b>Save current zones</b>. The file "
+            f"lands in <code>{T.esc(_preset_folder_label())}</code> as "
+            "<code>clip__name__when.json</code>, and the newest set is "
+            "loaded back automatically the next time you pick this clip."
+            "</div>")
+
+
+def _preset_row_meta(info, is_loaded):
+    """One saved set, described the way its filename is: name, size, when."""
+    plural = "" if info.n_zones == 1 else "s"
+    size = (f"{info.frame_w}x{info.frame_h}"
+            if info.frame_w and info.frame_h else "size unknown")
+    live = "<span class='gk-preset-badge-live'>loaded</span>" if is_loaded else ""
+    return (f"<div class='gk-preset-meta-in'>"
+            f"<span class='gk-preset-name'>{T.esc(info.label)}</span>{live}"
+            f"<span class='gk-preset-sub'>{info.n_zones} zone{plural} - "
+            f"{size} - {T.esc(info.when)}</span>"
+            f"<span class='gk-preset-file'>{T.esc(info.filename)}</span>"
+            f"</div>")
+
+
+def _preset_rows_update(infos, loaded_path):
+    """One `gr.update` per row slot — always exactly MAX_PRESET_ROWS long."""
+    out = []
+    for i in range(MAX_PRESET_ROWS):
+        if i < len(infos):
+            out.append(gr.update(
+                value=_preset_row_meta(infos[i],
+                                       infos[i].path == loaded_path)))
+        else:
+            out.append(gr.update(value=PRESET_EMPTY_SLOT))
+    return out
+
+
+def _preset_ui(video_path, loaded_path=None):
+    """The single return shape every preset action emits.
+
+    `paths` is the slot -> file mapping the row buttons act through: the pool
+    is rebuilt from the folder on every action, so the row a button sits in
+    and the file it loads or deletes cannot drift apart.
+    """
+    all_infos = zone_presets.list_presets(video_path) if video_path else []
+    infos = all_infos[:MAX_PRESET_ROWS]
+    paths = [i.path for i in infos]
+    if loaded_path not in paths:
+        # A set can be on screen while its row is off the end of the pool, or
+        # after its file was deleted. Neither is a row the buttons can act on,
+        # so the mark simply is not shown.
+        loaded_path = None
+    return (paths, loaded_path,
+            _preset_hdr(video_path, infos, loaded_path, total=len(all_infos)),
+            _preset_empty_html(video_path, infos),
+            *_preset_rows_update(infos, loaded_path))
+
+
+def refresh_preset_ui(video_path, loaded_path):
+    """Re-list the folder. Chained after a video change, and wired to the
+    Refresh button for a folder that changed outside the app."""
+    return _preset_ui(video_path, loaded_path)
+
+
+def _autoload_preset(video_path, frame):
+    """Newest saved set for this clip, as (zones, path, loaded).
+
+    Returns an empty list and `loaded=False` for every failure — a clip with
+    no sets, a set drawn on a different frame size, a corrupt file. The caller
+    carries on with an empty editor either way; losing the auto-load is not a
+    reason to fail the video selection.
+    """
+    infos = zone_presets.list_presets(video_path)
+    if not infos:
+        return [], None, False
+    info = infos[0]
+    try:
+        zones, notes = zone_presets.load_preset(
+            info.path, frame_shape=frame.shape, max_zones=MAX_ZONE_ROWS)
+    except zone_presets.PresetError as e:
+        gr.Warning(f"Saved zones not loaded: {e}")
+        return [], None, False
+    for note in notes:
+        gr.Warning(note)
+    gr.Info(f'Loaded saved zone set "{info.label}" - {len(zones)} '
+            f'zone{"" if len(zones) == 1 else "s"}.')
+    return zones, info.path, True
+
+
+def save_zone_set(video_path, label, zones_state, first_frame, loaded_path):
+    """Write the zones on screen to a new file for this clip."""
+    if not video_path:
+        gr.Warning("Pick a clip before saving zones - a zone set belongs to "
+                   "one video.")
+        return _preset_ui(video_path, loaded_path)
+    zones = list(zones_state or [])
+    try:
+        path = zone_presets.save_preset(
+            video_path, label or zone_presets.DEFAULT_LABEL, zones,
+            # The frame size the polygons were drawn against. Recorded so a
+            # reload onto a differently-sized re-encode is refused instead of
+            # putting every zone in the wrong place.
+            frame_shape=None if first_frame is None else first_frame.shape,
+        )
+    except zone_presets.PresetError as e:
+        gr.Warning(str(e))
+        return _preset_ui(video_path, loaded_path)
+    gr.Info(f'Saved {len(zones)} zone{"" if len(zones) == 1 else "s"} to '
+            f'{_preset_folder_label()}{os.sep}{path.name}')
+    # The set just written is what is on screen, so it is the one marked
+    # "loaded" in the list.
+    return _preset_ui(video_path, str(path))
+
+
+def load_zone_set(slot, paths, zones_state, first_frame, loaded_path):
+    """Replace the zone list with the saved set in row `slot`.
+
+    The zones on screen go into the one-level undo slot first, so a Load fired
+    over unsaved work is recoverable through the same Restore button as a
+    Remove or a Clear all.
+    """
+    path = paths[slot] if paths and 0 <= slot < len(paths) else None
+    # A refused load leaves the zones alone, so it has to leave the "loaded"
+    # mark alone too - marking the set that FAILED would put the badge on a
+    # row the zones on screen did not come from.
+    keep = (list(zones_state or []), None, loaded_path)
+    if not path:
+        gr.Warning("That row is empty - press Refresh.")
+        return keep
+    if first_frame is None:
+        gr.Warning("Load a clip first - zones are drawn on its frame.")
+        return keep
+    try:
+        zones, notes = zone_presets.load_preset(
+            path, frame_shape=first_frame.shape, max_zones=MAX_ZONE_ROWS)
+    except zone_presets.PresetError as e:
+        gr.Warning(str(e))
+        return keep
+    for note in notes:
+        gr.Warning(note)
+    prev = list(zones_state or [])
+    undo = _undo_slot(f"{len(prev)} zones", prev) if prev else None
+    gr.Info(f'Loaded {len(zones)} zone{"" if len(zones) == 1 else "s"} from '
+            f'"{os.path.basename(path)}".')
+    return zones, undo, path
+
+
+def delete_zone_set(slot, paths, video_path, loaded_path):
+    """Delete the file in row `slot`. The zones stay in the editor, which is
+    what makes this recoverable — the toast says so, because the file itself
+    is gone for good."""
+    path = paths[slot] if paths and 0 <= slot < len(paths) else None
+    if not path:
+        gr.Warning("That row is empty - press Refresh.")
+        return _preset_ui(video_path, loaded_path)
+    name = os.path.basename(str(path))
+    try:
+        gone = zone_presets.delete_preset(path)
+    except zone_presets.PresetError as e:
+        gr.Warning(str(e))
+        return _preset_ui(video_path, loaded_path)
+    if gone:
+        gr.Info(f'Deleted "{name}". The zones are still in the editor - '
+                f'press "Save current zones" to write them back.')
+    else:
+        gr.Warning(f'"{name}" was already gone.')
+    return _preset_ui(video_path,
+                      None if path == loaded_path else loaded_path)
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1256,10 @@ with gr.Blocks(
     video_key_state   = gr.State(value=None)
     # One-level undo for Remove / Clear all.
     zone_undo         = gr.State(value=None)
+    # Saved zone sets: slot -> file path for the row buttons, and which file
+    # the zones on screen came from (marked "loaded" in the list).
+    preset_paths      = gr.State(value=[])
+    preset_loaded     = gr.State(value=None)
 
     # ── top bar ─────────────────────────────────────────────────────────
     gr.HTML("""
@@ -1083,7 +1354,7 @@ with gr.Blocks(
             # suffix was what pushed every label onto a second line.
             with gr.Group(elem_classes=["sb-pad", "sb-thresholds"]):
                 # The unit lives in `info` as well as in the CSS suffix: if the
-                # stylesheet ever fails to load, "Blocked door / 45" with no unit
+                # stylesheet ever fails to load, "Blocked door / 5" with no unit
                 # anywhere is a worse panel than a slightly wordier caption.
                 blocked_door_s = gr.Slider(
                     5, 300, value=DEFAULT_THRESHOLDS["blocked_door_s"], step=5,
@@ -1252,6 +1523,7 @@ with gr.Blocks(
                             clear_all_btn = gr.Button("Clear all", size="sm",
                                                       variant="stop")
 
+
                         # ── Saved zones: rename / retype / remove ─────────
                         # A FIXED POOL of rows, shown and hidden with
                         # `visible=`. This started out as an @gr.render block
@@ -1300,6 +1572,7 @@ with gr.Blocks(
                                               "name": _name, "kind": _kind,
                                               "applies": _applies, "rm": _rm})
 
+
                         # Undo strip — one level, covers a single Remove and a
                         # Clear all through the same path.
                         with gr.Row(
@@ -1308,6 +1581,49 @@ with gr.Blocks(
                             zone_restore_btn = gr.Button(
                                 "Restore", size="sm",
                                 elem_classes=["gk-zone-restore"])
+
+                        # ── Saved zone sets ──────────────────────────────
+                        # Where a clip's polygons are kept between runs. The
+                        # header carries the folder, so "where did it save?"
+                        # is answered on the page and not only in a toast.
+                        preset_hdr = gr.HTML(_preset_hdr(None, [], None))
+                        with gr.Row(elem_classes=["gk-preset-savebar"]):
+                            with gr.Column(elem_classes=["zone-field-pair"]):
+                                gr.HTML('<span class="zone-field-label">Set name</span>')
+                                preset_name_in = gr.Textbox(
+                                    show_label=False,
+                                    value=zone_presets.DEFAULT_LABEL,
+                                    placeholder="e.g. doorway-v2",
+                                    elem_classes=["zone-name-box"],
+                                )
+                            preset_save_btn = gr.Button(
+                                "\U0001F4BE  Save current zones", size="sm",
+                                variant="primary",
+                                elem_classes=["gk-preset-save"])
+                            preset_refresh_btn = gr.Button(
+                                "\u21BB  Refresh", size="sm",
+                                elem_classes=["gk-preset-refresh"])
+
+                        # Same fixed-pool construction as the zone manager
+                        # above: every slot is always mounted and the EMPTY
+                        # marker in its meta cell is what CSS hides it by,
+                        # because `visible` updates on a Row inside a gr.Tab
+                        # did not land.
+                        preset_rows = []
+                        for _pslot in range(MAX_PRESET_ROWS):
+                            with gr.Row(elem_classes=["gk-preset-row"]):
+                                _pmeta = gr.HTML(
+                                    PRESET_EMPTY_SLOT,
+                                    elem_classes=["gk-preset-meta"])
+                                _pload = gr.Button(
+                                    "Load", size="sm", scale=0,
+                                    elem_classes=["gk-preset-load"])
+                                _pdel = gr.Button(
+                                    "Delete", size="sm", scale=0,
+                                    elem_classes=["gk-preset-del"])
+                            preset_rows.append({"meta": _pmeta,
+                                                "load": _pload, "rm": _pdel})
+                        preset_empty = gr.HTML(_preset_empty_html(None, []))
 
                         # Zones feed the rule engine, so any edit above makes a
                         # finished run stale. The button that fixes that lives
@@ -1494,12 +1810,63 @@ with gr.Blocks(
     # The flush is wired at the bottom of this block, once FLUSH_OUTPUTS exists —
     # picking a different clip makes the panels on screen belong to a video the
     # user is no longer looking at.
+    # Everything the saved-set panel needs to redraw itself. Built from the
+    # row list rather than typed out, so a row gaining a control cannot leave
+    # the outputs list one short — that mismatch is silent in Gradio.
+    PRESET_UI_OUT = [preset_paths, preset_loaded, preset_hdr, preset_empty]
+    PRESET_UI_OUT += [w["meta"] for w in preset_rows]
+    assert len(PRESET_UI_OUT) == _PRESET_HEAD_N + MAX_PRESET_ROWS
+
     _video_change_event = video_input.change(
         fn=on_video_upload,
         inputs=[video_input, zones_state, video_key_state],
         outputs=[first_frame_state, zones_state, current_poly,
-                 video_key_state, zone_canvas, zones_summary_html],
-    ).then(refresh_zone_ui, ZONE_UI_IN, ZONE_UI_OUT)
+                 video_key_state, zone_canvas, zones_summary_html,
+                 preset_loaded],
+    ).then(refresh_zone_ui, ZONE_UI_IN, ZONE_UI_OUT
+    ).then(refresh_preset_ui, [video_input, preset_loaded], PRESET_UI_OUT)
+
+    # ── Saved zone sets ──────────────────────────────────────────────────
+    # Row `slot` always acts on `paths[slot]`: the pool is rebuilt from the
+    # folder on every action, so the position a button sits at and the file it
+    # loads or deletes cannot drift apart.
+    #
+    # Load writes zones_state and the undo slot, then hands off to
+    # refresh_zone_ui for the canvas, the summary and the zone row pool — the
+    # same chain every other zone mutation goes through, because setting
+    # zones_state alone leaves the manager rows showing the previous list. The
+    # second .then() re-marks which set is on screen.
+    for _pslot, _pw in enumerate(preset_rows):
+        _pw["load"].click(
+            fn=partial(load_zone_set, _pslot),
+            inputs=[preset_paths, zones_state, first_frame_state,
+                    preset_loaded],
+            outputs=[zones_state, zone_undo, preset_loaded],
+        ).then(refresh_zone_ui, ZONE_UI_IN, ZONE_UI_OUT
+        ).then(refresh_preset_ui, [video_input, preset_loaded], PRESET_UI_OUT)
+
+        _pw["rm"].click(
+            fn=partial(delete_zone_set, _pslot),
+            inputs=[preset_paths, video_input, preset_loaded],
+            outputs=PRESET_UI_OUT,
+        )
+
+    preset_save_btn.click(
+        fn=save_zone_set,
+        inputs=[video_input, preset_name_in, zones_state, first_frame_state,
+                preset_loaded],
+        outputs=PRESET_UI_OUT,
+    )
+
+    # For a folder changed outside the app — another window, or a file dropped
+    # in by hand. Deliberately a button rather than a refresh on dropdown
+    # focus: writing values back into a control the user is interacting with
+    # is the same class of Gradio-6 behaviour as the `visible` toggle that
+    # never repaints and the render block that wedges a tab.
+    preset_refresh_btn.click(
+        fn=refresh_preset_ui, inputs=[video_input, preset_loaded],
+        outputs=PRESET_UI_OUT,
+    )
 
     zone_canvas.select(
         fn=on_canvas_click,
