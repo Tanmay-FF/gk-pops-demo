@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "label": "default",
+  "video": "1764208097900_B8A44FDB8496-medium.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1788422362.1025484,
+  "zones": [
+    {
+      "name": "Doorway",
+      "polygon": [
+        [
+          590,
+          160
+        ],
+        [
+          891,
+          198
+        ],
+        [
+          885,
+          402
+        ],
+        [
+          430,
+          353
+        ],
+        [
+          585,
+          176
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "door",
+      "color": [
+        94,
+        197,
+        34
+      ]
+    }
+  ],
+  "camera_placement": "Inside (facing exit)"
+}

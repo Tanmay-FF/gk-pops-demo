@@ -68,6 +68,12 @@ _KEEP_RUN_DIRS = 3
 #: the same directory even within the same clock second.
 _run_seq = 0
 
+#: The run directories THIS process created, oldest first. The pruner works off
+#: this list rather than off a listing of tempdir, because a listing cannot tell
+#: our directories from those of a dead process that happened to have the same
+#: pid — see _prune_run_dirs().
+_my_run_dirs: list[str] = []
+
 
 def _run_dir() -> str:
     """A fresh directory for one run's video files.
@@ -89,25 +95,32 @@ def _run_dir() -> str:
     base = tempfile.gettempdir()
     path = os.path.join(base, f"pops_run_{os.getpid()}_{_run_seq}")
     os.makedirs(path, exist_ok=True)
-    _prune_run_dirs(base)
+    _my_run_dirs.append(path)
+    _prune_run_dirs()
     return path
 
 
-def _prune_run_dirs(base: str) -> None:
+def _prune_run_dirs() -> None:
     """Drop this process's oldest run directories. Never raises, and never
-    touches another process's — a second app instance is serving those."""
-    prefix = f"pops_run_{os.getpid()}_"
-    try:
-        mine = sorted(
-            (int(name[len(prefix):]), os.path.join(base, name))
-            for name in os.listdir(base)
-            if name.startswith(prefix) and name[len(prefix):].isdigit()
-        )
-    except OSError:
+    touches another process's — a second app instance is serving those.
+
+    Works off `_my_run_dirs`, which this process appended to as it created each
+    one. It used to LIST tempdir for `pops_run_<our pid>_*` instead, and that is
+    wrong on Windows, where pids are recycled within a session: an interpreter
+    that inherits a dead process's pid inherits its leftover directories too.
+    The counter restarts at 1 for the new process, so the sort put the
+    directory it had JUST created first and `[:-_KEEP_RUN_DIRS]` deleted it —
+    observed with three stale `pops_run_21712_{6,7,8}` beside a live
+    `pops_run_21712_1`. cv2.VideoWriter does not raise when its directory
+    vanishes; it silently opens nothing, so the whole run wrote 401 frames into
+    the void and only the re-encode noticed, as "could not reopen the tracked
+    video". A list of what we actually made cannot misidentify anything.
+    """
+    if len(_my_run_dirs) <= _KEEP_RUN_DIRS:
         return
-    if len(mine) <= _KEEP_RUN_DIRS:
-        return
-    for _seq, path in mine[:-_KEEP_RUN_DIRS]:
+    stale = _my_run_dirs[:-_KEEP_RUN_DIRS]
+    del _my_run_dirs[:-_KEEP_RUN_DIRS]
+    for path in stale:
         shutil.rmtree(path, ignore_errors=True)
 
 

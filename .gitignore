@@ -30,11 +30,35 @@ engine.zip
 temp/
 tmp/
 
-# Saved zone sets. engine/config.py:710 points the Zone Editor's Save button
-# here, so this folder is app output, not source: one JSON per set, named after
-# the clip it was drawn on. The app recreates it on demand, and the filenames
-# carry store-recording names, so nothing in it belongs in the repo.
-zone_presets/
+# Saved zone sets. engine/config.py:794 points the Zone Editor's Save button
+# here, so this folder is mostly app output: one JSON per set, named after the
+# clip it was drawn on, and the app recreates it on demand.
+#
+# The exception is the presets for the clips in sample_videos/, which are
+# re-included by name below. README.md and RUN_WITHOUT_THE_APP.md both tell a
+# new user to run `--auto-zones`, and that flag reads this folder; without
+# these files checked in, every documented command fails on a fresh clone with
+# "no saved zone preset for ...". The store-recording names were the original
+# reason to exclude the whole folder, but the clips those names refer to are
+# themselves tracked here via LFS (see .gitattributes), so withholding the
+# polygons drawn on top of them protects nothing.
+#
+# `zone_presets/*` rather than `zone_presets/`: git cannot re-include a file
+# whose parent DIRECTORY is excluded, so a directory-level rule would make
+# every "!" below silently do nothing.
+zone_presets/*
+!zone_presets/1763942423220_B8A44F5B742E-medium__*.json
+!zone_presets/1763942945490_B8A44F9B7582-medium-OUTSIDE__*.json
+!zone_presets/1764032916150_B8A44F72BE86-medium__*.json
+!zone_presets/1764208097900_B8A44FDB8496-medium__*.json
+!zone_presets/1765967670150_B8A44FDCC0BF-medium__*.json
+!zone_presets/FF1763940475070_E827250FC2BA-medium-INSIDE__*.json
+
+# Run output. gk_pops.py's --json-path/--video-path default here, and the
+# examples in RUN_WITHOUT_THE_APP.md all write to it. out/*.mp4 was already
+# caught by the unanchored *.mp4 below, but the JSON documents and the heatmap
+# PNGs beside it were not, and those are the large ones.
+out/
 
 # ---------------------------------------------------------------------------
 # Video. No clip belongs in this repo, at any path.
@@ -51,7 +75,7 @@ zone_presets/
 *.mkv
 *.webm
 
-# ...except the five demo clips in sample_videos/, which are tracked via LFS
+# ...except the six demo clips in sample_videos/, which are tracked via LFS
 # (see .gitattributes) so a clone can run the demo without a separate handoff.
 # The blanket rules above still cover every other path, including the clips at
 # the repo root and tests/fixtures/golden/.

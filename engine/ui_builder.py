@@ -802,6 +802,81 @@ def build_config_info(link_confirm, link_grace, camera, quality_pt, fill_pt,
     return styled_table("Model Configuration", rows, tone="INFO")
 
 
+#: POPS-side vocabulary, as opposed to _CATEGORY_DOCS' rule-engine categories.
+#: Kept apart on purpose: the two tabs use different words for different
+#: things, and one combined glossary would invite reading a POPS risk score as
+#: an operational task or the reverse.
+#:
+#: Entries are keyed to what the POPS table actually PRINTS. `merch_removed` is
+#: a scoring input and has no column of its own, so it is documented under the
+#: two event labels it decides between — which is the form the question
+#: actually arrives in ("why is that abandoned cart a PUSHOUT ALERT and this
+#: one not").
+_POPS_DOCS = [
+    ("PUSHOUT ALERT vs ABANDONED CART",
+     "Both mean a loaded cart whose owner left. They differ by whether the "
+     "<b>merchandise</b> left too. This only decides anything when the cart's "
+     "direction never resolved: a cart heading OUT is already floored at 75 "
+     "on abandonment alone. On an UNKNOWN heading, a cart that carried goods "
+     "and ends up empty takes the same 75 floor and reads PUSHOUT ALERT, "
+     "while one still holding its goods lands at 65 and reads ABANDONED CART "
+     "- a shopper parking a cart to reach a shelf trips the same owner-left "
+     "test and must not read as a theft.",
+     "Recorded per cart as <code>merch_removed</code> in the tracking JSON. "
+     "It needs all three: the owner track is lost long enough to count as "
+     "abandoned, the cart showed a <b>run of 5 consecutive</b> loaded "
+     "readings of the same label earlier in the clip, AND its history ends "
+     "empty. One short trailing loaded run (under 4 readings, one run only) "
+     "is tolerated as classifier noise. Lifting 65 to 75 additionally needs "
+     "the cart to read <b>unbagged</b>."),
+    ("A cart that was empty all along",
+     "Never merchandise-removed, and that is not an oversight - nothing was "
+     "in it to take. An empty cart wheeled in and left standing is an "
+     "INCOMING CART WITHOUT ITEMS or an unattended cart, not a pushout.",
+     "The loaded-run test above finds no run to satisfy it, so "
+     "<code>merch_removed</code> stays false however empty the cart ends."),
+    ("Fill and Bag",
+     "What the cart was assessed as carrying across the WHOLE clip, not what "
+     "it looked like in any one frame. A confidence-weighted vote over every "
+     "readable observation decides it, so a cart briefly misread at the door "
+     "does not change its verdict.",
+     "Frames the classifier could not read are excluded from the vote "
+     "entirely. <b>Proxy:</b> fill comes from a whole-cart classifier, not "
+     "from counting merchandise, so a single small item may not register."),
+]
+
+
+def build_pops_reference() -> str:
+    """Collapsed reference for the POPS vocabulary, mounted on the POPS tab.
+
+    Sibling of build_category_reference() and deliberately not merged into it:
+    that one documents rule-engine categories on the Operational Alerts tab and
+    badges each row with an ops severity, which a POPS scoring input does not
+    have. Static, so it renders before any run - the reader needs it at the
+    moment they are looking at a label they do not recognise.
+    """
+    rows = "".join(
+        f"<tr class='gk-tr'>"
+        f"<td style='width:230px;'><span class='gk-strong'>{T.esc(name)}</span></td>"
+        f"<td>{what}</td>"
+        f"<td style='width:38%;' class='gk-dim'>{how}</td>"
+        f"</tr>"
+        for name, what, how in _POPS_DOCS
+    )
+    return (
+        f"<details class='gk-details'>"
+        f"<summary>What these POPS terms mean "
+        f"<span class='gk-section-sub'>{len(_POPS_DOCS)} entries &middot; "
+        f"scoring vocabulary, not the operational categories</span></summary>"
+        f"<div class='gk-table-wrap' style='margin-top:8px;'>"
+        f"<div class='gk-table-scroll'>"
+        f"<table class='gk-table'>"
+        f"<thead><tr><th>Term</th><th>What it means</th>"
+        f"<th>How it is decided</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div></div></details>"
+    )
+
+
 def build_legend():
     def sw(c):
         return (f'<span class="gk-swatch" style="background:{c};'

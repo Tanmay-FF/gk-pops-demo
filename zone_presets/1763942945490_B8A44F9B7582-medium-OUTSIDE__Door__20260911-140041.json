@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "label": "Door",
+  "video": "1763942945490_B8A44F9B7582-medium-OUTSIDE.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1789115441.4287517,
+  "zones": [
+    {
+      "name": "Entry/Exit Door",
+      "polygon": [
+        [
+          550,
+          95
+        ],
+        [
+          864,
+          98
+        ],
+        [
+          837,
+          366
+        ],
+        [
+          574,
+          371
+        ],
+        [
+          547,
+          107
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "door",
+      "color": [
+        94,
+        197,
+        34
+      ]
+    }
+  ],
+  "camera_placement": "Outside (facing entrance)"
+}

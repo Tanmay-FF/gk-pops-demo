@@ -321,8 +321,11 @@ def test_a_startup_failure_prints_no_traceback():
                            "normally permitted"))
     printed = out.getvalue()
     assert "Traceback" not in printed, f"a raw traceback reached the console:\n{printed}"
-    assert "could not start" in printed
-    assert "Port 7860" in printed, (
+    assert "could not start" in printed.lower(), (
+        "console_ui upper-cases a problem() heading; what matters here is "
+        "that the words reach the reader, not their casing"
+    )
+    assert "port 7860" in printed.lower(), (
         "the address-in-use case should say so in words rather than leave the "
         "reader to decode errno 10048"
     )
@@ -349,7 +352,7 @@ def test_report_fatal_survives_an_unwritable_log():
         out = _io.StringIO()
         with contextlib.redirect_stdout(out):
             console_noise.report_fatal(RuntimeError("boom"))
-        assert "could not start" in out.getvalue()
+        assert "could not start" in out.getvalue().lower()
     finally:
         console_noise.ERROR_LOG = real
 

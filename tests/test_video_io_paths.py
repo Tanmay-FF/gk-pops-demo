@@ -53,13 +53,21 @@ class _Sandbox:
         self.base = tempfile.mkdtemp(prefix="pops_vio_test_")
         self._real_gettempdir = video_io.tempfile.gettempdir
         self._real_seq = video_io._run_seq
+        # The pruner's own record of what this process made. Saved and cleared
+        # alongside the counter: they are one piece of state, and a sandbox that
+        # reset the counter but inherited the previous sandbox's paths would
+        # have the pruner deleting directories under a tempdir that is already
+        # gone.
+        self._real_dirs = list(video_io._my_run_dirs)
         video_io.tempfile.gettempdir = lambda: self.base
         video_io._run_seq = 0
+        video_io._my_run_dirs.clear()
         return self.base
 
     def __exit__(self, *exc):
         video_io.tempfile.gettempdir = self._real_gettempdir
         video_io._run_seq = self._real_seq
+        video_io._my_run_dirs[:] = self._real_dirs
         shutil.rmtree(self.base, ignore_errors=True)
         return False
 
@@ -198,11 +206,28 @@ def main():
         check("the oldest run dir is gone", made[0] not in surviving)
         check("another process's run dir is untouched", os.path.isdir(foreign))
 
+    section("A recycled pid's leftovers cannot prune the live run")
+    with _Sandbox() as base:
+        # Exactly the shape observed in tempdir: three directories named for
+        # OUR pid, left by a dead process that held it earlier, with higher
+        # sequence numbers than the run about to start. The pruner used to list
+        # tempdir by pid, count four, and delete the lowest -- which is the one
+        # _run_dir() had just created and is about to hand to cv2.VideoWriter.
+        for seq in (6, 7, 8):
+            os.makedirs(os.path.join(base, f"pops_run_{os.getpid()}_{seq}"))
+        live = video_io._run_dir()
+        check("the directory this run just created still exists",
+              os.path.isdir(live), live)
+        check("the dead process's leftovers are not adopted",
+              all(os.path.isdir(os.path.join(base, f"pops_run_{os.getpid()}_{s}"))
+                  for s in (6, 7, 8)))
+
     section("Pruning never takes the run down with it")
     with _Sandbox() as base:
+        video_io._run_dir()
         shutil.rmtree(base)  # tempdir vanished under us
         try:
-            video_io._prune_run_dirs(base)
+            video_io._prune_run_dirs()
             ok = True
         except Exception as e:
             ok = False

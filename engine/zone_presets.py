@@ -16,6 +16,14 @@ the frame size it was drawn against because `Zone.polygon` is in source-video
 pixel coordinates: reloading a 1080p polygon set onto a 720p re-encode of the
 same clip would put every zone in the wrong place, which is worse than
 refusing, so a size mismatch is reported instead of silently rescaled.
+
+A file also records the camera placement the zones were drawn under, when the
+caller knew it. Zones and placement are one answer to one question - where the
+door is in this picture, and which side of it the camera is on - and splitting
+them across two places is how a clip ends up analysed with the right doorway
+and the wrong direction of travel. The field is optional because presets
+written before it existed are still valid; `None` there means "not recorded"
+and is never silently read as a placement.
 """
 from __future__ import annotations
 
@@ -80,6 +88,11 @@ class PresetInfo:
     frame_w: int
     frame_h: int
     video: str                       # basename of the clip it was drawn on
+    #: Where the camera was, as one of `config.CAMERA_PLACEMENTS`, or None for
+    #: a file written before placement was recorded. None means "not recorded",
+    #: never "outside" - see `camera_placement_of()` for why that distinction
+    #: has to survive all the way to the caller.
+    camera_placement: Optional[str] = None
 
     @property
     def when(self) -> str:
@@ -133,6 +146,31 @@ def video_stem(video_path: str) -> str:
     """
     stem = Path(str(video_path or "")).stem
     return _sanitize(stem) or "video"
+
+
+def resolve_placement(value: Optional[str]) -> Optional[str]:
+    """One of `config.CAMERA_PLACEMENTS`, or raise PresetError saying so.
+
+    `None` in, `None` out: "not recorded" is a legitimate state for a preset
+    written before this field existed, and it has to stay distinguishable from
+    a recorded placement all the way to the caller.
+
+    Anything else is resolved through `config.resolve_camera_placement()`, so
+    both the display string and the command line's slug are accepted and the
+    display string is what comes back. A value that resolves to nothing raises
+    rather than falling back to the default, for the reason spelled out at
+    `config.CAMERA_PLACEMENTS`: the INBOUND kill switch treats an unrecognised
+    placement as "outside", so guessing here would score the clip from the
+    wrong side of the door and produce a quiet run rather than a failed one.
+    """
+    if value is None:
+        return None
+    resolved = config.resolve_camera_placement(str(value))
+    if resolved is None:
+        raise PresetError(
+            f'"{value}" is not a camera placement. Expected one of: '
+            + ", ".join(config.CAMERA_PLACEMENT_SLUGS))
+    return resolved
 
 
 def preset_dir(directory: Optional[str] = None) -> Path:
@@ -196,8 +234,25 @@ def _zone_to_dict(z: Zone) -> dict:
 
 def save_preset(video_path: str, label: str, zones: Iterable[Zone],
                 frame_shape: Optional[tuple] = None,
-                directory: Optional[str] = None) -> Path:
-    """Write `zones` as a new preset named `label` for `video_path`."""
+                directory: Optional[str] = None,
+                camera_placement: Optional[str] = None) -> Path:
+    """Write `zones` as a new preset named `label` for `video_path`.
+
+    Args:
+        camera_placement: Where the camera was, as a display string or a slug
+            from `config.CAMERA_PLACEMENT_SLUGS`. Resolved to the display
+            string before it is written, so the file never holds a spelling
+            the scoring layer would not recognise. Omitted from the payload
+            entirely when None, which keeps a file written without it
+            byte-identical to one written by the previous build.
+
+    Raises:
+        PresetError: No zones, an unusable label, or a `camera_placement` that
+            is not one of the five. Refusing is the whole point: the INBOUND
+            kill switch reads an unknown placement as "outside", so a bad value
+            would not fail, it would score the clip from the wrong side of the
+            door and look quiet rather than wrong.
+    """
     zones = list(zones or [])
     if not zones:
         raise PresetError("Nothing to save - draw at least one zone first.")
@@ -218,6 +273,8 @@ def save_preset(video_path: str, label: str, zones: Iterable[Zone],
         "saved_at": created_at,
         "zones": [_zone_to_dict(z) for z in zones],
     }
+    if camera_placement is not None:
+        payload["camera_placement"] = resolve_placement(camera_placement)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Write-then-replace: a crash mid-write would otherwise leave a truncated
     # file that reads as "this clip's zones are corrupt".
@@ -264,33 +321,81 @@ def list_presets(video_path: Optional[str] = None,
     out: list[PresetInfo] = []
     for p in sorted(folder.glob(pattern)):
         try:
-            payload = _read_payload(p)
+            info = read_preset_info(p)
         except PresetError:
             continue                       # a stray file is not an error here
-        video = str(payload.get("video") or "")
         # Two different clips can sanitize to the same stem, so the recorded
         # basename is what actually decides whether a file belongs to this one.
-        if wanted_video and video and video != wanted_video:
+        if wanted_video and info.video and info.video != wanted_video:
             continue
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        # The label in the payload wins; the filename's middle part is the
-        # fallback for a file written before the label was recorded.
-        parts = p.stem.split(_SEP)
-        out.append(PresetInfo(
-            label=str(payload.get("label")
-                      or (parts[1] if len(parts) > 1 else p.stem)),
-            path=str(p),
-            n_zones=len(payload["zones"]),
-            saved_at=float(payload.get("saved_at") or mtime),
-            frame_w=int(payload.get("frame_w") or 0),
-            frame_h=int(payload.get("frame_h") or 0),
-            video=video,
-        ))
+        out.append(info)
     out.sort(key=lambda i: i.saved_at, reverse=True)
     return out
+
+
+def read_preset_info(path) -> PresetInfo:
+    """Describe one preset file, without rebuilding its polygons.
+
+    The same `PresetInfo` `list_presets` yields - it is built here, so the two
+    cannot describe the same file differently - but reachable for a path that
+    did not come out of a listing. `--zones SOMEFILE.json` is the case: it
+    names a file directly, so nothing has checked which clip it was drawn on.
+
+    Raises:
+        PresetError: The file will not read or is not a preset.
+    """
+    p = Path(path)
+    payload = _read_payload(p)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    # The label in the payload wins; the filename's middle part is the
+    # fallback for a file written before the label was recorded.
+    parts = p.stem.split(_SEP)
+    return PresetInfo(
+        label=str(payload.get("label")
+                  or (parts[1] if len(parts) > 1 else p.stem)),
+        path=str(p),
+        n_zones=len(payload["zones"]),
+        saved_at=float(payload.get("saved_at") or mtime),
+        frame_w=int(payload.get("frame_w") or 0),
+        frame_h=int(payload.get("frame_h") or 0),
+        video=str(payload.get("video") or ""),
+        # Hand-edited, or written by a build whose placement list has since
+        # changed: dropped to None rather than raising. Describing a file is a
+        # browse, and one unreadable field should grey out a row rather than
+        # make the whole folder unlistable. Everything that ACTS on the value
+        # goes through `camera_placement_of()`, which does raise.
+        camera_placement=_placement_or_none(payload),
+    )
+
+
+def _placement_or_none(payload: dict) -> Optional[str]:
+    """The payload's placement, or None if it is absent or unrecognisable."""
+    try:
+        return resolve_placement(payload.get("camera_placement"))
+    except PresetError:
+        return None
+
+
+def camera_placement_of(path) -> Optional[str]:
+    """The camera placement recorded in one preset file, or None.
+
+    Separate from `load_preset` on purpose. `load_preset` returns
+    `(zones, notes)` and four callers unpack exactly that pair, so widening it
+    to carry a third value would break every one of them to serve a caller
+    that usually wants the placement WITHOUT rebuilding the polygons -
+    `gk_pops.py` resolving `--camera-placement` before it has a frame to check
+    the zones against, for one.
+
+    Raises:
+        PresetError: The file will not read, or its placement is not one of
+            the five. Unlike the listing path this refuses rather than
+            shrugging: a caller asking this question is about to score a clip
+            with the answer.
+    """
+    return resolve_placement(_read_payload(path).get("camera_placement"))
 
 
 def load_preset(path, frame_shape: Optional[tuple] = None,

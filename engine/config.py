@@ -6,7 +6,6 @@ Import from here instead of scattering magic numbers across modules.
 import os
 from pathlib import Path
 
-from torchvision import transforms
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -78,6 +77,74 @@ BEV_LABEL_SCALE     = 0.45
 BEV_LEGEND_BG       = (40, 40, 45)
 
 # ---------------------------------------------------------------------------
+# Camera placement
+# ---------------------------------------------------------------------------
+#: The angles the sidebar dropdown offers, and the only strings the scoring
+#: layer recognises. Here rather than in app_poc_v2.py because gk_pops.py needs
+#: the same list for its --camera-placement choices, and importing the demo to
+#: read it would build the whole Gradio app.
+#:
+#: Validated as a closed set on both sides, never free text: the INBOUND kill
+#: switch treats anything it does not recognise as "outside", so a typo does not
+#: fail -- it silently scores the clip from the wrong side of the door and the
+#: run looks quiet rather than wrong.
+#:
+#: The first entry is the default for both callers.
+CAMERA_PLACEMENTS = [
+    "Outside (facing entrance)",
+    "Inside (facing exit)",
+    "Inside (exit on right)",
+    "Inside (exit on left)",
+    "Inside (exit on both sides)",
+]
+CAMERA_PLACEMENT_DEFAULT = CAMERA_PLACEMENTS[0]
+
+#: Typeable aliases for the same five angles, for callers that live on a
+#: command line. `--camera-placement inside_facing_exit` is the same argument as
+#: `--camera-placement "Inside (facing exit)"`; only the typing is different,
+#: and the display string above is what every layer downstream still sees.
+#:
+#: The tokens are the ones gk-pops-api accepts on its `camera_placement` form
+#: field (`pops_api_v1/api_engine/config.py`), so somebody moving between the
+#: HTTP service and this CLI types the same word in both. Note
+#: `inside_exit_on_both`, without a trailing `_sides` -- that is the API's
+#: spelling and matching it is the whole point.
+#:
+#: A plain dict literal on purpose: run_headless.py reads this file with `ast`
+#: rather than importing it, because on a first run torchvision does not exist
+#: yet. A comprehension here would be invisible to that reader.
+CAMERA_PLACEMENT_SLUGS = {
+    "outside_facing_entrance": "Outside (facing entrance)",
+    "inside_facing_exit":      "Inside (facing exit)",
+    "inside_exit_on_right":    "Inside (exit on right)",
+    "inside_exit_on_left":     "Inside (exit on left)",
+    "inside_exit_on_both":     "Inside (exit on both sides)",
+}
+
+#: Loud at import rather than silent at scoring time. An angle added to
+#: CAMERA_PLACEMENTS without a slug would otherwise be reachable from the
+#: dropdown and unreachable from the command line; a slug pointing at a string
+#: the scoring layer does not know would be treated as "outside".
+if set(CAMERA_PLACEMENT_SLUGS.values()) != set(CAMERA_PLACEMENTS):
+    raise RuntimeError(
+        "CAMERA_PLACEMENT_SLUGS and CAMERA_PLACEMENTS have drifted apart: "
+        f"{sorted(set(CAMERA_PLACEMENT_SLUGS.values()) ^ set(CAMERA_PLACEMENTS))}")
+
+
+def resolve_camera_placement(value: str) -> str | None:
+    """The display string for `value`, or None when it is not one of the five.
+
+    Accepts either spelling -- the sidebar's display string, or the typeable
+    slug -- and normalises case and dashes on the slug side, so
+    `Inside_Facing_Exit` and `inside-facing-exit` both land. Never guesses: a
+    near miss returns None so the caller can refuse, because the INBOUND kill
+    switch treats an unrecognised placement as "outside" instead of failing.
+    """
+    if value in CAMERA_PLACEMENTS:
+        return value
+    return CAMERA_PLACEMENT_SLUGS.get(value.strip().lower().replace("-", "_"))
+
+# ---------------------------------------------------------------------------
 # VLM / Case Report
 # ---------------------------------------------------------------------------
 VLM_BACKENDS = [
@@ -147,11 +214,28 @@ VLM_NO_REPEAT_NGRAM      = 12
 _MEAN = (0.485, 0.456, 0.406)
 _STD  = (0.229, 0.224, 0.225)
 
-CLS_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(_MEAN, _STD),
-])
+#: Built on first access rather than at import, via the module __getattr__ at
+#: the bottom of this file. `from torchvision import transforms` up here cost
+#: 2.2 s, and it was the ONLY heavy import in a module that is otherwise plain
+#: constants -- so every reader of a threshold or a placement name paid for a
+#: tensor pipeline it was never going to touch. engine/classifier.py is the
+#: only consumer and it still writes `from .config import CLS_TRANSFORM`
+#: unchanged; PEP 562 resolves that through __getattr__ and torchvision loads
+#: exactly then, on the path that is about to classify a crop anyway.
+_CLS_TRANSFORM = None
+
+
+def _build_cls_transform():
+    """The 224x224 ImageNet-normalised crop pipeline the classifiers expect."""
+    global _CLS_TRANSFORM
+    if _CLS_TRANSFORM is None:
+        from torchvision import transforms
+        _CLS_TRANSFORM = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(_MEAN, _STD),
+        ])
+    return _CLS_TRANSFORM
 
 BAG_CLASSES = ("bagged", "unbagged", "not_applicable")
 BAG_NA_IDX  = BAG_CLASSES.index("not_applicable")
@@ -708,3 +792,17 @@ if os.path.isdir(TEST_VIDEO_DIR):
 #: recomputed, while a hand-drawn doorway polygon is hand work nobody wants to
 #: redo, and keeping it here lets a useful set be committed and shared.
 ZONE_PRESET_DIR = str(_REPO_ROOT / "zone_presets")
+
+
+def __getattr__(name: str):
+    """Module-level lazy attributes (PEP 562).
+
+    Only CLS_TRANSFORM. Python calls this for a name this module does not
+    already define, which includes `from .config import CLS_TRANSFORM`, so
+    nothing that reads it had to change. Anything else still raises
+    AttributeError with the usual message -- a typo'd constant must not come
+    back as None.
+    """
+    if name == "CLS_TRANSFORM":
+        return _build_cls_transform()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

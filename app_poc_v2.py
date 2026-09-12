@@ -33,8 +33,10 @@ from engine.cancellation import RunCancelled, RunSuperseded
 from engine import theme as T
 from engine import ui_builder
 from engine.config import TEST_VIDEO_DIR
+from engine.config import CAMERA_PLACEMENTS, CAMERA_PLACEMENT_DEFAULT
 from engine.config import VLM_BACKENDS, VLM_DEFAULT_BACKEND
 from engine.rules import DEFAULT_THRESHOLDS
+from engine.run_outputs import ENGINE_OUTPUT_NAMES
 from engine.trajectory_cache import make_video_key
 
 # Third-party console noise, muted before the server starts. Same intent as the
@@ -85,16 +87,12 @@ LAYOUT_KINDS = zone_editor.LAYOUT_KINDS
 #: Output slots of run_analysis, in order. Keeping the names next to the
 #: component list below is what stops the two drifting — the phase-2 yield
 #: has to pad with exactly the right number of no-ops.
-RUN_OUTPUT_NAMES = [
-    "video_output", "json_download", "json_output",
-    "video_info_html", "detection_html", "config_html", "legend_html",
-    "pops_html", "events_html",
-    "case_report_html", "case_report_download",
-    "analytics_summary_html", "spikes_html", "dwell_html", "journey_html",
-    "heatmap_image", "heatmap_file",
-    "alert_banner_html", "ops_alerts_html",
-    "run_summary_html", "tab_counts_html", "result_tabs",
-]
+#:
+#: The engine's own slots now live in engine/run_outputs.py, so a headless
+#: caller can read them without importing this module — which would build the
+#: entire Blocks tree at line 1248. `result_tabs` is the one slot the UI adds
+#: and the engine never produces, and it stays last (asserted below).
+RUN_OUTPUT_NAMES = list(ENGINE_OUTPUT_NAMES) + ["result_tabs"]
 N_RUN_OUTPUTS = len(RUN_OUTPUT_NAMES)
 
 #: name -> position in the engine's return tuple. Valid ONLY because
@@ -603,7 +601,7 @@ def on_video_upload(video_path, prev_zones_state, prev_video_key):
         # which would auto-load the saved preset over the zones just preserved,
         # discarding every edit made since the last save.
         return (None, prev_zones_state or [], [], prev_video_key, None,
-                _zone_summary_html([]), None)
+                _zone_summary_html([]), None, gr.update())
 
     new_key = make_video_key(video_path)
     is_new_video = new_key != prev_video_key
@@ -613,7 +611,7 @@ def on_video_upload(video_path, prev_zones_state, prev_video_key):
     if frame is None:
         gr.Warning("Could not decode the first frame of this video.")
         return (None, zones_state, [], new_key, None,
-                _zone_summary_html(zones_state), None)
+                _zone_summary_html(zones_state), None, gr.update())
 
     # The newest saved set for this clip is loaded here rather than behind a
     # button: picking the clip IS the request for its zones. The saved-set
@@ -621,14 +619,16 @@ def on_video_upload(video_path, prev_zones_state, prev_video_key):
     # empties the editor. Only on a NEW clip — a rerun of the same file keeps
     # whatever is on screen, edits included.
     loaded_path = None
+    placement = gr.update()
     if is_new_video:
-        zones_state, loaded_path, loaded = _autoload_preset(video_path, frame)
+        zones_state, loaded_path, loaded, placement = _autoload_preset(
+            video_path, frame)
         if not loaded and prev_video_key is not None:
             gr.Info("New video - zones reset.")
 
     overlay = zone_editor.render_zone_overlay(frame, zones_state, in_progress=[])
     return (frame, zones_state, [], new_key, _bgr_to_rgb(overlay),
-            _zone_summary_html(zones_state), loaded_path)
+            _zone_summary_html(zones_state), loaded_path, placement)
 
 
 def on_canvas_click(evt: gr.SelectData, current_poly, first_frame, zones_state):
@@ -838,33 +838,62 @@ def refresh_preset_ui(video_path, loaded_path):
     return _preset_ui(video_path, loaded_path)
 
 
+def _placement_update(info):
+    """The camera-angle dropdown update a just-loaded preset implies.
+
+    `gr.update()` - a no-op - when the file records no placement, which is
+    every preset written before the field existed. Moving the dropdown on
+    those would mean inventing an angle, and an angle nobody chose is the one
+    wrong value that produces a quiet run instead of a failed one.
+
+    When it does record one the dropdown is moved and the caller says so in
+    the toast. Silently changing a control that decides how the clip is scored
+    is worse than the two extra words.
+    """
+    placement = getattr(info, "camera_placement", None)
+    return gr.update(value=placement) if placement else gr.update()
+
+
 def _autoload_preset(video_path, frame):
-    """Newest saved set for this clip, as (zones, path, loaded).
+    """Newest saved set for this clip, as (zones, path, loaded, placement).
 
     Returns an empty list and `loaded=False` for every failure — a clip with
     no sets, a set drawn on a different frame size, a corrupt file. The caller
     carries on with an empty editor either way; losing the auto-load is not a
     reason to fail the video selection.
+
+    `placement` is an update for the camera-angle dropdown, and is a no-op
+    unless the preset recorded one. See `_placement_update`.
     """
     infos = zone_presets.list_presets(video_path)
     if not infos:
-        return [], None, False
+        return [], None, False, gr.update()
     info = infos[0]
     try:
         zones, notes = zone_presets.load_preset(
             info.path, frame_shape=frame.shape, max_zones=MAX_ZONE_ROWS)
     except zone_presets.PresetError as e:
         gr.Warning(f"Saved zones not loaded: {e}")
-        return [], None, False
+        return [], None, False, gr.update()
     for note in notes:
         gr.Warning(note)
+    angle = (f' Camera angle set to "{info.camera_placement}".'
+             if info.camera_placement else "")
     gr.Info(f'Loaded saved zone set "{info.label}" - {len(zones)} '
-            f'zone{"" if len(zones) == 1 else "s"}.')
-    return zones, info.path, True
+            f'zone{"" if len(zones) == 1 else "s"}.{angle}')
+    return zones, info.path, True, _placement_update(info)
 
 
-def save_zone_set(video_path, label, zones_state, first_frame, loaded_path):
-    """Write the zones on screen to a new file for this clip."""
+def save_zone_set(video_path, label, zones_state, first_frame, loaded_path,
+                  camera_placement):
+    """Write the zones on screen to a new file for this clip.
+
+    The camera angle goes in with the polygons. Zones and placement are one
+    answer to one question - where the door is in this picture, and which side
+    of it the camera is on - and the CLI's `--auto-zones` reads both back, so
+    whoever draws the doorway here also settles the angle for every later
+    headless run on the same clip.
+    """
     if not video_path:
         gr.Warning("Pick a clip before saving zones - a zone set belongs to "
                    "one video.")
@@ -877,11 +906,16 @@ def save_zone_set(video_path, label, zones_state, first_frame, loaded_path):
             # reload onto a differently-sized re-encode is refused instead of
             # putting every zone in the wrong place.
             frame_shape=None if first_frame is None else first_frame.shape,
+            # Whatever the sidebar says right now. A stale dropdown is the one
+            # way this records the wrong thing, which is why the toast below
+            # names the angle it saved rather than only the file.
+            camera_placement=camera_placement or None,
         )
     except zone_presets.PresetError as e:
         gr.Warning(str(e))
         return _preset_ui(video_path, loaded_path)
-    gr.Info(f'Saved {len(zones)} zone{"" if len(zones) == 1 else "s"} to '
+    gr.Info(f'Saved {len(zones)} zone{"" if len(zones) == 1 else "s"} and the '
+            f'camera angle "{camera_placement}" to '
             f'{_preset_folder_label()}{os.sep}{path.name}')
     # The set just written is what is on screen, so it is the one marked
     # "loaded" in the list.
@@ -894,12 +928,16 @@ def load_zone_set(slot, paths, zones_state, first_frame, loaded_path):
     The zones on screen go into the one-level undo slot first, so a Load fired
     over unsaved work is recoverable through the same Restore button as a
     Remove or a Clear all.
+
+    Returns `(zones, undo, path, placement)`, where `placement` updates the
+    camera-angle dropdown and is a no-op for a set that recorded no angle.
     """
     path = paths[slot] if paths and 0 <= slot < len(paths) else None
     # A refused load leaves the zones alone, so it has to leave the "loaded"
     # mark alone too - marking the set that FAILED would put the badge on a
-    # row the zones on screen did not come from.
-    keep = (list(zones_state or []), None, loaded_path)
+    # row the zones on screen did not come from. The trailing gr.update() is
+    # the same refusal applied to the camera angle.
+    keep = (list(zones_state or []), None, loaded_path, gr.update())
     if not path:
         gr.Warning("That row is empty - press Refresh.")
         return keep
@@ -916,9 +954,17 @@ def load_zone_set(slot, paths, zones_state, first_frame, loaded_path):
         gr.Warning(note)
     prev = list(zones_state or [])
     undo = _undo_slot(f"{len(prev)} zones", prev) if prev else None
+    # Read from the file rather than the row, so a folder changed on disk
+    # since the last Refresh cannot move the dropdown to a stale angle.
+    try:
+        info = zone_presets.read_preset_info(path)
+    except zone_presets.PresetError:
+        info = None
+    angle = (f' Camera angle set to "{info.camera_placement}".'
+             if info is not None and info.camera_placement else "")
     gr.Info(f'Loaded {len(zones)} zone{"" if len(zones) == 1 else "s"} from '
-            f'"{os.path.basename(path)}".')
-    return zones, undo, path
+            f'"{os.path.basename(path)}".{angle}')
+    return zones, undo, path, _placement_update(info)
 
 
 def delete_zone_set(slot, paths, video_path, loaded_path):
@@ -1311,15 +1357,11 @@ with gr.Blocks(
             # ── Step 2: Camera ───────────────────────────────────────────
             gr.HTML('<div class="sb-hdr"><span class="sb-hdr-step">2</span>CAMERA PLACEMENT</div>')
             with gr.Group(elem_classes=["sb-pad"]):
+                # The list lives in engine/config.py so gk_pops.py's
+                # --camera-placement choices cannot drift from this dropdown.
                 camera_placement = gr.Dropdown(
-                    choices=[
-                        "Outside (facing entrance)",
-                        "Inside (facing exit)",
-                        "Inside (exit on right)",
-                        "Inside (exit on left)",
-                        "Inside (exit on both sides)",
-                    ],
-                    value="Outside (facing entrance)",
+                    choices=list(CAMERA_PLACEMENTS),
+                    value=CAMERA_PLACEMENT_DEFAULT,
                     label="Camera angle / orientation",
                 )
                 # Defaults ON, which is what the pipeline did before this was
@@ -1638,6 +1680,10 @@ with gr.Blocks(
 
                 # ── POPS ────────────────────────────────────────────────
                 with gr.Tab("POPS", id="tab_pops"):
+                    # Same treatment the Operational Alerts tab gives its own
+                    # vocabulary: the glossary sits where the labels are read,
+                    # collapsed, and renders before any run.
+                    gr.HTML(ui_builder.build_pops_reference())
                     pops_html = gr.HTML(_INITIAL["pops_html"])
 
                 # ── Events ──────────────────────────────────────────────
@@ -1822,7 +1868,7 @@ with gr.Blocks(
         inputs=[video_input, zones_state, video_key_state],
         outputs=[first_frame_state, zones_state, current_poly,
                  video_key_state, zone_canvas, zones_summary_html,
-                 preset_loaded],
+                 preset_loaded, camera_placement],
     ).then(refresh_zone_ui, ZONE_UI_IN, ZONE_UI_OUT
     ).then(refresh_preset_ui, [video_input, preset_loaded], PRESET_UI_OUT)
 
@@ -1841,7 +1887,7 @@ with gr.Blocks(
             fn=partial(load_zone_set, _pslot),
             inputs=[preset_paths, zones_state, first_frame_state,
                     preset_loaded],
-            outputs=[zones_state, zone_undo, preset_loaded],
+            outputs=[zones_state, zone_undo, preset_loaded, camera_placement],
         ).then(refresh_zone_ui, ZONE_UI_IN, ZONE_UI_OUT
         ).then(refresh_preset_ui, [video_input, preset_loaded], PRESET_UI_OUT)
 
@@ -1854,7 +1900,7 @@ with gr.Blocks(
     preset_save_btn.click(
         fn=save_zone_set,
         inputs=[video_input, preset_name_in, zones_state, first_frame_state,
-                preset_loaded],
+                preset_loaded, camera_placement],
         outputs=PRESET_UI_OUT,
     )
 

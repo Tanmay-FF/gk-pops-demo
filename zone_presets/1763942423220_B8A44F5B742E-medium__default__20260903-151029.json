@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "label": "default",
+  "video": "1763942423220_B8A44F5B742E-medium.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1788428429.5369554,
+  "zones": [
+    {
+      "name": "Door-way",
+      "polygon": [
+        [
+          512,
+          376
+        ],
+        [
+          544,
+          55
+        ],
+        [
+          842,
+          35
+        ],
+        [
+          830,
+          329
+        ],
+        [
+          517,
+          384
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "door",
+      "color": [
+        94,
+        197,
+        34
+      ]
+    },
+    {
+      "name": "Monitoring Zone",
+      "polygon": [
+        [
+          498,
+          432
+        ],
+        [
+          1091,
+          261
+        ],
+        [
+          1278,
+          505
+        ],
+        [
+          1277,
+          591
+        ],
+        [
+          1216,
+          670
+        ],
+        [
+          1110,
+          717
+        ],
+        [
+          623,
+          719
+        ],
+        [
+          500,
+          441
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "analytics",
+      "color": [
+        0,
+        200,
+        255
+      ]
+    }
+  ],
+  "camera_placement": "Outside (facing entrance)"
+}

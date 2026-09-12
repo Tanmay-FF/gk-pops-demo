@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "label": "default",
+  "video": "1764032916150_B8A44F72BE86-medium.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1788443819.5340881,
+  "zones": [
+    {
+      "name": "Door",
+      "polygon": [
+        [
+          509,
+          84
+        ],
+        [
+          612,
+          71
+        ],
+        [
+          625,
+          314
+        ],
+        [
+          527,
+          337
+        ],
+        [
+          511,
+          92
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "door",
+      "color": [
+        94,
+        197,
+        34
+      ]
+    }
+  ],
+  "camera_placement": "Inside (exit on right)"
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "label": "entry-exit-door",
+  "video": "FF1763940475070_E827250FC2BA-medium-INSIDE.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1789109773.000069,
+  "zones": [
+    {
+      "name": "Entry/Exit Door",
+      "polygon": [
+        [
+          677,
+          14
+        ],
+        [
+          833,
+          12
+        ],
+        [
+          817,
+          176
+        ],
+        [
+          676,
+          198
+        ],
+        [
+          677,
+          20
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "door",
+      "color": [
+        94,
+        197,
+        34
+      ]
+    }
+  ],
+  "camera_placement": "Inside (facing exit)"
+}

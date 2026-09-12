@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "label": "Monitoring-Zone",
+  "video": "1765967670150_B8A44FDCC0BF-medium.mp4",
+  "frame_w": 1280,
+  "frame_h": 720,
+  "saved_at": 1789147590.671157,
+  "zones": [
+    {
+      "name": "Monitoring Zone",
+      "polygon": [
+        [
+          403,
+          244
+        ],
+        [
+          999,
+          277
+        ],
+        [
+          952,
+          716
+        ],
+        [
+          152,
+          716
+        ],
+        [
+          398,
+          252
+        ]
+      ],
+      "applies_to": "both",
+      "kind": "analytics",
+      "color": [
+        255,
+        152,
+        0
+      ]
+    }
+  ],
+  "camera_placement": "Outside (facing entrance)"
+}

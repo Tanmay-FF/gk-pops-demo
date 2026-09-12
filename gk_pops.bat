@@ -1,0 +1,127 @@
+@echo off
+rem ==========================================================================
+rem  POPS without the app - analyse one video and get a report file.
+rem
+rem  Double-click this file and it will ask you a few questions and build the
+rem  command for you. Or type the command yourself, e.g.
+rem
+rem      gk_pops.bat sample_videos\myclip.mp4 --auto-zones --video-path out\
+rem
+rem  Either way it needs nothing installed beforehand. In order, it looks for:
+rem    1. an environment a previous run already built  (instant)
+rem    2. a Python 3.12 or 3.11 already on this machine
+rem    3. uv, which downloads a private Python 3.12 that touches nothing else
+rem       (and installs uv itself, into your user folder, if it is missing)
+rem
+rem  Then it hands over to run_headless.py, which finishes building the
+rem  environment if it has to and then runs the analysis.
+rem
+rem  This is the same search run_demo.bat does, deliberately: the two share an
+rem  environment, so whichever you run first pays for it and the other is
+rem  instant. See RUN_WITHOUT_THE_APP.md.
+rem ==========================================================================
+setlocal
+cd /d "%~dp0"
+title POPS - analyse a video
+
+echo.
+echo    Looking for a Python to run this on...
+echo.
+set "PY="
+set "UV="
+
+rem --- 1. an environment a previous run already built -----------------------
+for /d %%D in ("venv_*" "venv" ".venv") do call :try_venv "%%~fD"
+if defined PY goto run
+
+rem --- 2. a supported Python already installed ------------------------------
+call :try_py 3.12
+if defined PY goto found_python
+call :try_py 3.11
+if defined PY goto found_python
+
+rem --- 3. uv, installing it first if this machine does not have it ----------
+echo   [!]  python                none suitable on this machine
+echo                               3.11 or 3.12 is required. Fetching a private copy
+echo                               with uv; nothing else on this machine is affected.
+echo.
+
+for /f "delims=" %%P in ('where uv 2^>nul') do set "UV=%%P"
+if not defined UV if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
+
+if not defined UV (
+    echo   [-]  uv                    installing from https://astral.sh/uv
+    echo.
+    rem The pipe is inside the quoted -Command argument, so cmd never sees it
+    rem and it must NOT be escaped - see run_demo.bat for the full note.
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
+)
+
+if not defined UV (
+    echo.
+    echo   [x]  uv                    could not be installed automatically
+    echo.
+    echo    Install Python 3.12 from https://www.python.org/downloads/ -
+    echo    tick "Add python.exe to PATH" in the installer - then run this
+    echo    file again.
+    goto fail
+)
+
+echo   [-]  python                downloading 3.12
+"%UV%" python install 3.12
+for /f "delims=" %%P in ('"%UV%" python find 3.12 2^>nul') do set "PY=%%P"
+
+if not defined PY (
+    echo.
+    echo   [x]  python                could not obtain a 3.12
+    echo                               Check that this machine can reach the internet,
+    echo                               then try again.
+    goto fail
+)
+
+:found_python
+echo   [-]  python                %PY%
+echo.
+
+:run
+"%PY%" run_headless.py %*
+set "RC=%ERRORLEVEL%"
+
+rem Exit codes are run_headless.py's, passed straight through so a scheduled
+rem task or another script can read them. 0 worked; 2 something about the
+rem command was wrong; 3 the analysis failed; 130 someone pressed Ctrl-C.
+if "%RC%"=="0" goto end
+if "%RC%"=="130" goto end
+goto fail
+
+:fail
+echo.
+echo   ======================================================================
+echo    That did not finish. The messages above explain why.
+echo    If it is not obvious, send a photo of this window to whoever gave
+echo    you this folder.
+echo   ======================================================================
+
+:end
+echo.
+rem Only pause when there is a person watching. A double-click gets a window
+rem that would otherwise vanish before it could be read; a scheduled task or a
+rem script must never hang waiting for a keypress nobody will press.
+if "%GK_NO_PAUSE%"=="" if "%~1"=="" pause
+exit /b %RC%
+
+rem --------------------------------------------------------------------------
+rem  Helpers. Called, not jumped to, so a failure inside one does not abort the
+rem  search - the next candidate still gets a turn.
+rem --------------------------------------------------------------------------
+
+:try_venv
+if defined PY exit /b
+if exist "%~1\Scripts\python.exe" set "PY=%~1\Scripts\python.exe"
+exit /b
+
+:try_py
+if defined PY exit /b
+for /f "delims=" %%P in ('py -%~1 -c "import sys; print(sys.executable)" 2^>nul') do set "PY=%%P"
+exit /b

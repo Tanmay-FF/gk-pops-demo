@@ -39,9 +39,89 @@ run_demo.bat
 ```
 
 Handing this to someone non-technical: give them
-[RUN_THIS_DEMO.md](RUN_THIS_DEMO.md). A shorter overview of this build is in
+[RUN_THIS_DEMO.md](RUN_THIS_DEMO.md) for the browser demo, or
+[RUN_WITHOUT_THE_APP.md](RUN_WITHOUT_THE_APP.md) if they want a report file
+rather than a screen. A shorter overview of this build is in
 [QUICKSTART.md](QUICKSTART.md). Details of what `run_demo.bat` does are under
 [Running it](#running-it-no-setup-knowledge-required) below.
+
+---
+
+## Run it without the UI
+
+**Double-click `gk_pops.bat`.** It prepares the machine the same way
+`run_demo.bat` does — they share one environment, so whichever you run first
+pays for it — then asks a handful of plain questions, shows you the command it
+built, and runs it. [RUN_WITHOUT_THE_APP.md](RUN_WITHOUT_THE_APP.md) is that
+path written out for someone who has never used a command line.
+
+The rest of this section is the tool underneath it.
+
+`gk_pops.py` runs the same pipeline with no browser and no server, and writes
+one JSON document containing everything the run produced:
+
+```bash
+python gk_pops.py sample_videos/1763942423220_B8A44F5B742E-medium.mp4 \
+    --camera-placement inside_facing_exit \
+    --zones zone_presets/1763942423220_B8A44F5B742E-medium__default__20260903-151029.json \
+    --blocked-door-s 5 --static-cart-s 10 --abandoned-cart-s 10 \
+    --json-path out/ --video-path out/
+```
+
+It is a caller, not a second pipeline — it invokes `TrackingEngine.process_video()`
+with the same arguments the demo does, so the numbers are the demo's numbers.
+`tests/test_cli_parity.py` runs one clip both ways and compares them.
+
+Three things worth knowing before the first run.
+
+**The threshold flags do nothing without zones.** The rule engine reads
+`door`-kind zones for the blocked-door family and `aisle`/`analytics` for
+static-cart; with no monitored zones it reports nothing and records why. A run
+like that still exits 0, so the CLI warns on stderr and the reason is in the
+JSON under `tracking.rule_engine.unavailable_reason`. Supply zones with
+`--zones` (a preset saved from the demo's **Save zone set** button),
+`--auto-zones` (the newest preset saved for this clip), or `--zone` inline:
+
+```bash
+python gk_pops.py clip.mp4 \
+    --zone "Main door:door:both:512,376 544,55 842,35 830,329" \
+    --save-zones northgate        # write it to zone_presets/ for next time
+```
+
+**The default output is the JSON alone, named after the clip.** Leave
+`--json-path` off and it lands beside the clip as `<clip stem>.json`.
+`--video-path` is how to also keep the annotated MP4, `--heatmap-path` the heat
+map. A directory is accepted anywhere a path is.
+
+The two behave differently, because they cost differently. The heat map is
+produced on every run and naming a path only *keeps* it — an unasked-for one is
+tidied away and listed under `artifacts.not_kept`. The annotated MP4 is
+**encoded only when `--video-path` asks for one**, and so is the pose
+estimation that draws the skeletons into it: pose is a second model per frame
+whose only consumers are that video and the case report's evidence images, so it
+runs exactly when one of those is wanted. A JSON-only run skips both and is
+about a third faster for it, with identical findings, events and per-frame
+records — `--pose` / `--no-pose` force the issue either way.
+
+**The case report is off by default.** `--case-report` turns on the VLM pass,
+which is multiple minutes per clip with the local backend, and both generates
+and saves the report. It takes an optional path the way the other outputs do:
+bare writes `<clip stem>_case_report.html` beside the clip, `--case-report out/`
+puts it there instead.
+
+The document is complete by default and that costs size: a 20-second clip is
+about 2 MB, most of it the per-frame array. `--frames none` replaces that array
+with its count and `--no-html` drops the rendered panels, which together take
+the same clip to roughly 16 KB. Neither changes what the pipeline does — every
+frame is still processed and still logged.
+
+Exit codes: **0** the run completed and the JSON was written; **2** bad usage,
+nothing ran; **3** the run started and failed, and an envelope was *still*
+written with `cli.exit = "error"` and the traceback in it; **130** interrupted.
+A failure envelope is a tombstone rather than a result, so re-running over one
+does not need `--force`.
+
+`python gk_pops.py --help` has the full flag list.
 
 ---
 
@@ -182,8 +262,12 @@ The linker uses a multi-stage state machine per frame:
 ```
 gk-pops-code/
 ├── app_poc_v2.py               # Gradio web UI entry point
+├── gk_pops.py                  # Headless CLI -- same pipeline, no browser, one JSON out
+├── gk_pops.bat                 # Double-click entry point for the CLI (finds Python, then run_headless.py)
+├── run_headless.py             # Prepares the environment, then runs or helps you write the command
 ├── create_virtual_env.py       # Generate the virutal env that can run the demo
 ├── run_demo.py.py              # Overall orchestrator for demo (creates environment and activates demo)
+├── console_ui.py               # Shared console formatting for the launchers and the CLI
 ├── requirements.txt            # Python dependencies
 ├── README.md
 │
@@ -199,6 +283,9 @@ gk-pops-code/
 │   ├── scoring.py              # POPS score computation + event classification
 │   ├── renderer.py             # OpenCV drawing primitives
 │   ├── ui_builder.py           # HTML table/dashboard generation for Gradio
+│   ├── run_outputs.py          # Name -> position map for process_video()'s return tuple
+│   ├── zone_editor.py          # Pure zone helpers -- make_zone, applies_to coercion, overlay
+│   ├── zone_presets.py         # Saved zone sets on disk, shared by the UI and the CLI
 │   └── video_io.py             # Video read/write + NVENC/x264 encoding
 │
 ├── weights/                    # Pre-trained model weights
@@ -228,6 +315,8 @@ gk-pops-code/
 | `ui_builder.py` | Generates styled HTML tables for the Gradio dashboard tabs |
 | `video_io.py` | Handles video input, AVI writing, and MP4 re-encoding with GPU acceleration (NVENC) or CPU fallback (libx264) |
 | `config.py` | Single source of truth for all paths, thresholds, colors, and hyperparameters |
+| `run_outputs.py` | The one name-to-position map for `process_video()`'s return tuple, so the UI and the CLI cannot drift from it |
+| `gk_pops.py` | Headless entry point: validates the inputs, calls `process_video()`, and wraps everything it produced in one JSON envelope |
 
 ---
 

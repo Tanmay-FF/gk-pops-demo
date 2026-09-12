@@ -18,7 +18,6 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 import cv2
-import gradio as gr
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -90,6 +89,25 @@ from .analytics_models import (
     FACTS_SCHEMA_VERSION,
 )
 from .trajectory_cache import TrajectoryCache, make_video_key
+
+
+def _default_progress():
+    """A `gr.Progress()`, imported at the call rather than at module scope.
+
+    `import gradio` costs 2.24 s -> 4.81 s on the engine package (measured, this
+    machine, warm cache), and it is the single largest item in the headless
+    CLI's start-up: gk_pops.py reads eight plain constants out of engine/config
+    while building its parser, which imports the package, which imported the
+    whole web UI framework here. Every caller that has a UI already passes its
+    own `progress=`, and the CLI passes a PhaseReporter, so this fallback is the
+    only line that ever needed gradio and it fires only when nothing was passed.
+
+    Not a stub: an in-process caller that genuinely wants Gradio's tracker still
+    gets the real one, and a missing gradio raises here instead of at import,
+    where it would take the whole engine down for a headless run.
+    """
+    import gradio as gr
+    return gr.Progress()
 
 
 class TrackingEngine:
@@ -189,6 +207,10 @@ class TrackingEngine:
         #: later zero-GPU retune can tell the user the video no longer matches
         #: the panel. None until a video has been encoded.
         self._video_finding_signature: frozenset | None = None
+        #: Set at the end of every run; see the assignment in _process_video.
+        #: Declared here for the type as well as in _reset(), which is what
+        #: actually clears it between runs.
+        self._last_analytics: AnalyticsResult | None = None
         self._scene_elements: list = []
 
         self._reset()
@@ -259,6 +281,9 @@ class TrackingEngine:
         # reading, so neither can say how much of the run was unreadable.
         self._cart_frames_total = 0
         self._cart_frames_unassessed = 0
+        # Cleared at the top of every run, so a caller that reads it after a
+        # run which RAISED gets None rather than the previous run's analytics.
+        self._last_analytics    = None
         self._scene_elements    = []
 
     def _get_display_id(self, label, raw_id):
@@ -1007,7 +1032,11 @@ class TrackingEngine:
             return
         self._run_handles = None
         cap, writer, avi_path = handles
+        # `writer` is None for a run started with write_video=False — there is
+        # no AVI, so there is nothing to release and nothing to discard.
         for name, handle in (("capture", cap), ("writer", writer)):
+            if handle is None:
+                continue
             try:
                 handle.release()
             except Exception as e:
@@ -1088,7 +1117,7 @@ class TrackingEngine:
             print(f"[CANCEL] run {run_seq} supersedes work at seq <= "
                   f"{_superseded}; it will stop at its next checkpoint")
         if self._gpu_lock.locked():
-            progress = progress if progress is not None else gr.Progress()
+            progress = progress if progress is not None else _default_progress()
             progress(0, desc="Waiting for the previous case report to finish…")
         with self._gpu_lock:
             # The wait is the most likely place for a cancel to land: it is the
@@ -1115,6 +1144,7 @@ class TrackingEngine:
                       defer_case_report: bool = False,
                       rule_thresholds=None,
                       enable_pose: bool = True,
+                      write_video: bool = True,
                       progress=None,
                       run_seq: int | None = None):
         # A FRESH progress tracker per run, never a default argument.
@@ -1130,7 +1160,7 @@ class TrackingEngine:
         # gave up on. Gradio only injects a bound tracker for a parameter it
         # sees on the EVENT function, and this is not one, so nothing was ever
         # replacing it. Instantiating here costs nothing and cannot accumulate.
-        progress = progress if progress is not None else gr.Progress()
+        progress = progress if progress is not None else _default_progress()
         self._reset()
         self._camera_placement = camera_placement
         self._classifier.set_quality_threshold(QUALITY_THRESHOLD)
@@ -1186,7 +1216,15 @@ class TrackingEngine:
         self._scene_elements = []
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind before main loop
         # Tracked output is camera-only.
-        writer, avi_path = create_writer(w, h, fps)
+        #
+        # `write_video=False` skips the encode entirely: no XVID writer, no
+        # per-frame write, and no second decode-and-re-encode pass at the end.
+        # Measured on the 401-frame sample clip that is 1.6 s in the loop plus a
+        # 2.1 s encode, and the headless CLI throws the file away unless
+        # --video-path asked for it. Everything else is unchanged — the frame is
+        # still fully drawn, because FrameCapturer's evidence images for the
+        # case report are that drawn frame.
+        writer, avi_path = create_writer(w, h, fps) if write_video else (None, None)
         # Registered so the wrapper's finally can close both on ANY exit path.
         # Before this, `cap` and `writer` were released at exactly two points —
         # the end of the loop and the cancel branch — so every other way out of
@@ -1854,7 +1892,8 @@ class TrackingEngine:
 
             _t_draw += time.perf_counter() - _t0
 
-            writer.write(im0)
+            if writer is not None:
+                writer.write(im0)
             # Build per-frame JSON every N frames (configured in config.py)
             if frame_idx % JSON_EVERY_N_FRAMES == 0 or frame_idx == 1:
                 _t0 = time.perf_counter()
@@ -1883,7 +1922,8 @@ class TrackingEngine:
             self._pops_cache, self._cart_cls_cache)
 
         cap.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
         # Deregistered, so the finally does not delete an AVI the re-encode
         # below still needs. Everything after this point is post-processing:
         # an exception there leaves a complete AVI and its MP4 in a run
@@ -2151,49 +2191,61 @@ class TrackingEngine:
         # video and the panel cannot disagree. Isolated the same way
         # analytics_builder isolates the rule engine itself: a bad index must
         # cost the badges, never the video.
-        _rule_frames: dict[int, list[dict]] = {}
-        try:
-            _rule_frames = rule_engine.overlay_index(
-                bundle, analytics_result.rule_findings)
-        except Exception as e:                               # pragma: no cover
-            print(f"[WARN] rule overlays skipped: {e}")
-        if _rule_frames:
-            _n_badges = sum(len(v) for v in _rule_frames.values())
-            print(f"[RULES] drawing {_n_badges} badge(s) across "
-                  f"{len(_rule_frames)} frame(s) from "
-                  f"{len(analytics_result.rule_findings)} finding(s)")
+        #
+        # The whole block is inside `write_video`: overlay_index() walks every
+        # finding against the bundle to produce a per-frame badge map whose only
+        # reader is the encode hook below it, so a run with no video would build
+        # the index and then discard it.
+        out_path = None
+        if write_video:
+            _rule_frames: dict[int, list[dict]] = {}
+            try:
+                _rule_frames = rule_engine.overlay_index(
+                    bundle, analytics_result.rule_findings)
+            except Exception as e:                           # pragma: no cover
+                print(f"[WARN] rule overlays skipped: {e}")
+            if _rule_frames:
+                _n_badges = sum(len(v) for v in _rule_frames.values())
+                print(f"[RULES] drawing {_n_badges} badge(s) across "
+                      f"{len(_rule_frames)} frame(s) from "
+                      f"{len(analytics_result.rule_findings)} finding(s)")
 
-        def _draw_rule_badges(frame, frame_idx):
-            badges = _rule_frames.get(frame_idx)
-            if badges:
-                draw_rule_badges(frame, badges)
+            def _draw_rule_badges(frame, frame_idx):
+                badges = _rule_frames.get(frame_idx)
+                if badges:
+                    draw_rule_badges(frame, badges)
 
-        self._video_finding_signature = highlights.finding_signature(
-            analytics_result.rule_findings)
+            # Only when a video exists to carry them. The signature says "these
+            # findings are painted into the MP4", and recompute_analytics()
+            # reads it to warn that a retune has left the video stale — a claim
+            # that would be false about a run that never encoded one.
+            self._video_finding_signature = highlights.finding_signature(
+                analytics_result.rule_findings)
 
-        progress(1.0, desc="Encoding video")
-        # A broken encoder must not throw away a good run. reencode_to_mp4()
-        # raises now instead of silently returning a path to a file it failed to
-        # write, and everything downstream of here — POPS reconciliation,
-        # analytics, the heat-map, the case report — is worth having without a
-        # playable video. So this is the one place that swallows it: the video
-        # panel comes back empty, and the reason (ffmpeg's own last lines, and
-        # where the raw AVI was kept) is already in the log above.
-        try:
-            out_path = reencode_to_mp4(
-                avi_path,
-                frame_hook=_draw_rule_badges if _rule_frames else None)
-        except Exception as e:
-            print(f"[ERROR] the tracked video could not be encoded: {e}")
-            print("[ERROR] the rest of the run is unaffected — POPS, analytics "
-                  "and the case report below are complete; only the video "
-                  "player will be empty.")
-            out_path = None
+            progress(1.0, desc="Encoding video")
+            # A broken encoder must not throw away a good run. reencode_to_mp4()
+            # raises now instead of silently returning a path to a file it failed
+            # to write, and everything downstream of here — POPS reconciliation,
+            # analytics, the heat-map, the case report — is worth having without
+            # a playable video. So this is the one place that swallows it: the
+            # video panel comes back empty, and the reason (ffmpeg's own last
+            # lines, and where the raw AVI was kept) is already in the log above.
+            try:
+                out_path = reencode_to_mp4(
+                    avi_path,
+                    frame_hook=_draw_rule_badges if _rule_frames else None)
+            except Exception as e:
+                print(f"[ERROR] the tracked video could not be encoded: {e}")
+                print("[ERROR] the rest of the run is unaffected — POPS, "
+                      "analytics and the case report below are complete; only "
+                      "the video player will be empty.")
+                out_path = None
         t_encode = time.perf_counter()
         video_duration = total_frames / fps if fps > 0 else 0
         print(f"[PERF] Frame processing: {t_frames - t_start:.1f}s | "
-              f"Video encoding: {t_encode - t_frames:.1f}s | "
-              f"Total: {t_encode - t_start:.1f}s | "
+              + (f"Video encoding: {t_encode - t_frames:.1f}s | "
+                 if write_video else "Video encoding: skipped | ")
+              + f"Total: {t_encode - t_start:.1f}s | "
               f"Video duration: {video_duration:.1f}s | "
               f"Speed: {video_duration / (t_encode - t_start):.2f}x realtime")
 
@@ -2209,7 +2261,20 @@ class TrackingEngine:
             },
             "frames": self._json_frames,
             "events": self._event_log,
-            "cart_classifications": {f"C{cid}": self._cart_cls_cache.get(cid, {}) for cid in self._cart_cls_cache},
+            # A SNAPSHOT, not a verdict: `_cart_cls_cache` is overwritten on
+            # every classify pass, so this is the LAST reading taken while the
+            # cart was still detected — at any quality, including `unclear`.
+            # The cart's actual assessed fill/bag is the confidence-weighted
+            # vote over its valid_cart frames, and that lives in `pops_summary`
+            # below. The two legitimately disagree: on the FF1763940475070
+            # INSIDE clip C2 voted full|unbagged over 31 valid samples while its
+            # last reading, taken as it left the frame, was `unclear`.
+            # `observed_at_frame` is what makes that readable without the code.
+            "cart_classifications": {
+                f"C{cid}": {**self._cart_cls_cache.get(cid, {}),
+                            "observed_at_frame": self._cls_last_frame.get(cid)}
+                for cid in self._cart_cls_cache
+            },
             # Beyond max_score/peak_event: the reconciled snapshot's own reading
             # of WHY the cart scored what it did. Without these a run cannot be
             # attributed after the fact — see docs/missed_pushout_fix_plan.md,
@@ -2224,8 +2289,49 @@ class TrackingEngine:
                     "owner": self._peak_pops_snapshot.get(cid, {}).get("owner"),
                     "abandoned": bool(self._peak_pops_snapshot.get(cid, {}).get("abandoned", False)),
                     "merch_removed": bool(self._peak_pops_snapshot.get(cid, {}).get("merch_removed", False)),
+                    # The reconciled labels the score was actually computed
+                    # from — the vote, not one frame. Until these shipped here
+                    # they existed only in stdout and the POPS table HTML, so a
+                    # JSON-only consumer (the headless runner) could read a
+                    # cart's 75 with no way to learn it was voted full|unbagged.
+                    # A cart that never reached reconciliation (`best_fill is
+                    # None`) has no snapshot labels and reads "unclassified".
+                    "fill": self._peak_pops_snapshot.get(cid, {}).get("fill", "unclassified"),
+                    "bag": self._peak_pops_snapshot.get(cid, {}).get("bag", "unclassified"),
+                    "quality": self._peak_pops_snapshot.get(cid, {}).get("quality", "unclassified"),
                 }
                 for cid in set(list(self._max_pops_per_cart) + list(self._pops_cache))
+            },
+            # Plain-English gloss for the two fields a reader reliably
+            # misreads, carried IN the document so it travels with a copy of
+            # the file. A separate top-level key and NOT a member of
+            # pops_summary: three consumers iterate that dict expecting every
+            # value to be a per-cart dict — vlm_analyzer._format_pops_table,
+            # case_report_builder._build_pops_analysis, and the golden
+            # baseline's decisions_from_json — and a string among them is an
+            # uncaught AttributeError that takes the case report down.
+            "field_notes": {
+                "cart_classifications": (
+                    "A SNAPSHOT, not a verdict: the last reading taken while "
+                    "each cart was still detected, at whatever quality that "
+                    "reading had — see observed_at_frame. The cart's assessed "
+                    "fill/bag is the vote in pops_summary, and the two "
+                    "legitimately disagree when a cart ends its run "
+                    "unreadable."
+                ),
+                "pops_summary.merch_removed": (
+                    "The goods left a cart that was carrying them — what "
+                    "separates a pushout from a parked cart, since both trip "
+                    "'abandoned'. True needs ALL of: abandoned, a run of 5 "
+                    "consecutive loaded readings of one label earlier in the "
+                    "clip, and a history that ends empty (one trailing loaded "
+                    "run under 4 readings is tolerated as classifier noise, "
+                    "and only one such run is ever stripped). A cart that was "
+                    "empty throughout never qualifies — nothing was in it to "
+                    "remove. It changes the SCORE only on an UNKNOWN heading, "
+                    "where it lifts an unbagged cart's 65 to the 75 floor an "
+                    "OUTBOUND abandoned loaded cart already gets without it."
+                ),
             },
             "summary": {
                 "total_people_seen": len(self._all_people_seen),
@@ -2372,6 +2478,13 @@ class TrackingEngine:
         with open(json_path, 'w') as f_json:
             json.dump(full_json, f_json, indent=2)
         json_str = json.dumps(full_json, indent=2)
+
+        #: The run's AnalyticsResult, kept so a headless caller can read the
+        #: structured journey matrix and dwell rows that only ever reached the
+        #: UI as HTML. Same lifetime as _last_bundle; overwritten by the next
+        #: run and cleared by _reset(), so a caller reading it after a failed
+        #: run gets None rather than the previous run's numbers.
+        self._last_analytics = analytics_result
 
         # --- Analytics HTML ---
         progress(1.0, desc="Rendering panels")
