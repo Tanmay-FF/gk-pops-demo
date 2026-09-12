@@ -5,7 +5,7 @@ that are likely being pushed out without payment. One video in; an annotated
 video, a risk score per cart, an event timeline, operational alerts, analytics
 and a written case report out.
 
-Full technical detail is in [README.md](README.md). This page is the short
+Full technical detail is in [PROJECT_README.md](PROJECT_README.md). This page is the short
 version, plus what is specific to this build.
 
 ---
@@ -78,10 +78,11 @@ The annotated MP4 and the full JSON report are downloadable from the sidebar.
 
 ## Two things to know before sending this folder to someone
 
-1. **Video clips are not in the repository.** `*.mp4` is gitignored, and these
-   are store recordings of identifiable people. Send a clip separately and have
-   the recipient drop it into `sample_videos/`. Without one the sample dropdown
-   is empty — they can still drag a file into the upload box.
+1. **Six demo clips ARE in the repository**, as LFS objects, each with its
+   zone set and camera placement in `zone_presets/`. The recipient needs
+   `git lfs pull` or they arrive as pointer files. They are store recordings of
+   identifiable people, so `*.mp4` stays gitignored everywhere else in the
+   tree; do not add more clips on the assumption that folder is fair game.
 
 2. **The model weights are Git LFS objects.** This only matters if the
    recipient *clones*. They need `git lfs install` then `git lfs pull`, or the

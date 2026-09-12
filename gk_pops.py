@@ -45,7 +45,8 @@ with its count and --no-html drops the rendered panels; together they take a
 does -- every frame is still processed and still logged either way.
 
 `--help` is the full flag list; the examples above are the shapes worth
-remembering. README.md's "Run it without the UI" is the same material in prose.
+remembering. PROJECT_README.md's "Run it without the UI" is the same
+material in prose.
 
 Streams: stdout carries the run's narrative -- the phase headings, the status
 rows and the closing block. stderr carries everything an operator has to

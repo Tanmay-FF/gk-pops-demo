@@ -1,508 +1,518 @@
-# POPS -- Push-Out Probability Score
+# Analysing a video without opening the app
 
-**AI-powered system to identify potential cart push-out theft in real time using computer vision, multi-object tracking, and behavioral scoring.**
+This folder can do its work two ways.
 
----
+The **app** opens in your browser. You pick a video, press a button, and read
+the results on screen. That is `run_demo.bat`, and [RUN_THIS_DEMO.md](RUN_THIS_DEMO.md)
+explains it.
 
-## Overview
+This page is about the **other** way: you type one line, it analyses one video
+and writes the results to a file. No browser, nothing to click. It is the same
+analysis — the same models, the same scores, the same rules. Only the way you
+ask for it is different.
 
-POPS processes surveillance video to detect, track, and score shopping carts and persons in a retail environment to assesss the likelihood of a push-out theft event. The system outputs an annotated video with bounding boxes, trails, classification overlays, and a detailed JSON report with per-frame and per-cart analytics. It links persons to carts, classifies cart contents, analyzes motion direction, and computes a **0–100 risk score**.
+You would use this way when you want the numbers in a file rather than on a
+screen: to send to someone, to keep alongside the footage, to feed into a
+spreadsheet or another system, or to work through a stack of clips one after
+another without sitting in front of the browser.
 
----
-
-## Demonstration
-
-**Double-click `run_demo.bat`.** That is the whole procedure on Windows.
-
-Nothing has to be installed first. It finds or fetches a Python 3.11/3.12,
-builds the environment, checks the model weights, and opens the demo in your
-browser at **http://localhost:7860**. The first run downloads several GB and
-takes 10-20 minutes; later runs start in seconds.
-
-Before the first run, drop a video clip into `sample_videos/`. Clips are never
-committed since `*.mp4` is gitignored, so whoever sends you this project sends the clip separately.
-
-```
-run_demo.bat                 # normal run
-run_demo.bat --check-only    # prepare the machine, do not open the demo
-run_demo.bat --no-model      # do not pre-fetch the 4 GB case-report model
-```
-
-
-Starting from a fresh clone instead of a copied folder:
-
-```bash
-git clone https://github.com/Tanmay-FF/gk-pops-demo
-cd gk-pops-demo
-git lfs install && git lfs pull    # weights are LFS objects
-run_demo.bat
-```
-
-Handing this to someone non-technical: give them
-[RUN_THIS_DEMO.md](RUN_THIS_DEMO.md) for the browser demo, or
-[RUN_WITHOUT_THE_APP.md](RUN_WITHOUT_THE_APP.md) if they want a report file
-rather than a screen. A shorter overview of this build is in
-[QUICKSTART.md](QUICKSTART.md). Details of what `run_demo.bat` does are under
-[Running it](#running-it-no-setup-knowledge-required) below.
+**You do not need to know anything about Python or the command line.** The first
+section gets you to a working result. Everything after it is there for when you
+want more.
 
 ---
 
-## Run it without the UI
+## Contents
 
-**Double-click `gk_pops.bat`.** It prepares the machine the same way
-`run_demo.bat` does — they share one environment, so whichever you run first
-pays for it — then asks a handful of plain questions, shows you the command it
-built, and runs it. [RUN_WITHOUT_THE_APP.md](RUN_WITHOUT_THE_APP.md) is that
-path written out for someone who has never used a command line.
-
-The rest of this section is the tool underneath it.
-
-`gk_pops.py` runs the same pipeline with no browser and no server, and writes
-one JSON document containing everything the run produced:
-
-```bash
-python gk_pops.py sample_videos/1763942423220_B8A44F5B742E-medium.mp4 \
-    --camera-placement inside_facing_exit \
-    --zones zone_presets/1763942423220_B8A44F5B742E-medium__default__20260903-151029.json \
-    --blocked-door-s 5 --static-cart-s 10 --abandoned-cart-s 10 \
-    --json-path out/ --video-path out/
-```
-
-It is a caller, not a second pipeline — it invokes `TrackingEngine.process_video()`
-with the same arguments the demo does, so the numbers are the demo's numbers.
-`tests/test_cli_parity.py` runs one clip both ways and compares them.
-
-Three things worth knowing before the first run.
-
-**The threshold flags do nothing without zones.** The rule engine reads
-`door`-kind zones for the blocked-door family and `aisle`/`analytics` for
-static-cart; with no monitored zones it reports nothing and records why. A run
-like that still exits 0, so the CLI warns on stderr and the reason is in the
-JSON under `tracking.rule_engine.unavailable_reason`. Supply zones with
-`--zones` (a preset saved from the demo's **Save zone set** button),
-`--auto-zones` (the newest preset saved for this clip), or `--zone` inline:
-
-```bash
-python gk_pops.py clip.mp4 \
-    --zone "Main door:door:both:512,376 544,55 842,35 830,329" \
-    --save-zones northgate        # write it to zone_presets/ for next time
-```
-
-**The default output is the JSON alone, named after the clip.** Leave
-`--json-path` off and it lands beside the clip as `<clip stem>.json`.
-`--video-path` is how to also keep the annotated MP4, `--heatmap-path` the heat
-map. A directory is accepted anywhere a path is.
-
-The two behave differently, because they cost differently. The heat map is
-produced on every run and naming a path only *keeps* it — an unasked-for one is
-tidied away and listed under `artifacts.not_kept`. The annotated MP4 is
-**encoded only when `--video-path` asks for one**, and so is the pose
-estimation that draws the skeletons into it: pose is a second model per frame
-whose only consumers are that video and the case report's evidence images, so it
-runs exactly when one of those is wanted. A JSON-only run skips both and is
-about a third faster for it, with identical findings, events and per-frame
-records — `--pose` / `--no-pose` force the issue either way.
-
-**The case report is off by default.** `--case-report` turns on the VLM pass,
-which is multiple minutes per clip with the local backend, and both generates
-and saves the report. It takes an optional path the way the other outputs do:
-bare writes `<clip stem>_case_report.html` beside the clip, `--case-report out/`
-puts it there instead.
-
-The document is complete by default and that costs size: a 20-second clip is
-about 2 MB, most of it the per-frame array. `--frames none` replaces that array
-with its count and `--no-html` drops the rendered panels, which together take
-the same clip to roughly 16 KB. Neither changes what the pipeline does — every
-frame is still processed and still logged.
-
-Exit codes: **0** the run completed and the JSON was written; **2** bad usage,
-nothing ran; **3** the run started and failed, and an envelope was *still*
-written with `cli.exit = "error"` and the traceback in it; **130** interrupted.
-A failure envelope is a tombstone rather than a result, so re-running over one
-does not need `--force`.
-
-`python gk_pops.py --help` has the full flag list.
+- [Start here](#start-here) — the first run, step by step
+- [What you get](#what-you-get) — the three files, and what each is for
+- [Zones, and why they matter](#zones-and-why-they-matter)
+- [Typing the command yourself](#typing-the-command-yourself)
+- [The things you are most likely to want](#the-things-you-are-most-likely-to-want)
+- [Every option](#every-option)
+- [When something goes wrong](#when-something-goes-wrong)
+- [For whoever set this up](#for-whoever-set-this-up)
 
 ---
 
-## System Architecture
+## Start here
+
+### 1. Put a video in the folder
+
+Open the `sample_videos` folder and copy your `.mp4` file into it.
+
+### 2. Double-click `gk_pops.bat`
+
+That is the whole procedure. A black window opens.
+
+**The first time**, it spends 3 to 5 minutes getting the machine ready. It
+needs an internet connection for this part. It is installing the software this
+analysis needs into a folder of its own, inside this one — it does not change
+anything else on your computer, and it does not need you to be an administrator.
+
+You will see it work through a checklist. Green ticks are good:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Gradio Web Interface                         │
-│              app_poc_v2.py -- Upload / Sample Videos                │
-└────────────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     TrackingEngine (tracker.py)                      │
-│              Orchestrates the full per-frame pipeline                │
-│                                                                     │
-│  ┌───────────┐  ┌────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │  YOLOv26m │  │  BoTSORT   │  │ Cart Re-ID   │  │   Motion    │  │
-│  │ Detection │─▶│  Tracking  │─▶│  (distance)  │─▶│  Analysis   │  │
-│  └───────────┘  └────────────┘  └──────────────┘  └──────┬──────┘  │
-│                                                          │         │
-│  ┌───────────────────┐  ┌──────────────────────┐         │         │
-│  │  PersonCartLinker  │  │   CartClassifier     │         │         │
-│  │  (overlap + co-   │  │  Stage 1: Quality    │         │         │
-│  │   movement)       │  │  Stage 2: Fill + Bag │         │         │
-│  └────────┬──────────┘  └──────────┬───────────┘         │         │
-│           │                        │                     │         │
-│           ▼                        ▼                     ▼         │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    POPS Scoring Engine                       │   │
-│  │         Direction + Fill + Bag + Speed + Link state          │   │
-│  │                  → 0–100 risk score                          │   │
-│  └──────────────────────────┬──────────────────────────────────┘   │
-│                             │                                      │
-│  ┌──────────────┐  ┌───────┴───────┐  ┌────────────────────────┐  │
-│  │   Renderer   │  │  Event Logger │  │   Post-Processing      │  │
-│  │  (OpenCV)    │  │  + Classifier │  │  Reconciliation +      │  │
-│  │              │  │               │  │  Confidence Voting      │  │
-│  └──────┬───────┘  └───────┬───────┘  └───────────┬────────────┘  │
-└─────────┼──────────────────┼──────────────────────┼────────────────┘
-          ▼                  ▼                      ▼
-   Annotated MP4        JSON Report          HTML Dashboards
-   (NVENC/x264)      (per-frame data)     (Events, POPS, Config)
+  [1/2]  Environment
+  ──────────────────────────────────────────────────────────────────────
+   [✓]  torch                 2.11.0+cu128
+   [✓]  ultralytics           8.4.19
+   [✓]  CUDA                  NVIDIA GeForce RTX 3070 Ti Laptop GPU
+
+  [2/2]  Checkout
+  ──────────────────────────────────────────────────────────────────────
+   [✓]  model weights         4 files present
 ```
+
+**Every time after that**, this takes about six seconds.
+
+> If you have already run `run_demo.bat` at some point, this step is instant —
+> the app and this share the same setup, so whichever you ran first paid for it.
+
+### 3. Answer the questions
+
+Because you did not type anything after `gk_pops.bat`, it now asks you what to
+do. There are five questions and every one of them has a suggested answer, so
+you can press **Enter** five times and get a sensible result.
+
+```
+  Which video do you want to analyse?
+  ──────────────────────────────────────────────────────────────────────
+   ▶1  1763942423220_B8A44F5B742E-medium.mp4
+                              zones have been drawn for this one
+    2  1765967670150_B8A44FDCC0BF-medium.mp4
+                              no zones drawn yet — see question 3
+    3  Something else
+                              type the path to a video yourself
+   Type a number and press Enter [1]:
+```
+
+The `▶` marks the suggested answer. Type a number and press Enter, or just
+press Enter to take the suggestion.
+
+The five questions are:
+
+| | It asks | What to say |
+|---|---|---|
+| 1 | Which video | The one you copied in |
+| 2 | Where the camera was | See [below](#question-2-where-was-the-camera) — this one matters |
+| 3 | Which areas to watch | Take the suggestion |
+| 4 | What to keep | Take the suggestion — the report and the marked-up video |
+| 5 | The written case report | Say no the first time. It adds several minutes. |
+
+### 4. It shows you the command, then runs it
+
+```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Here is your command. Next time you can type it straight in.
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+     gk_pops.bat sample_videos\myclip.mp4 ^
+         --camera-placement inside_facing_exit --auto-zones ^
+         --json-path out\ --video-path out\
+
+   Run it now? [Y/n]:
+```
+
+This is the point of the questions. It is not hiding the command from you — it
+is showing you the one it built, so that next time you can skip the questions
+entirely and type it straight in. Write it down, or take a photo of the screen.
+
+Press Enter and it runs. A 20-second clip takes about 30 seconds.
+
+### 5. Read the result
+
+When it finishes you get a summary and a list of the files it made:
+
+```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ▶  Complete in 26.5s  ·  peak POPS 75 PUSHOUT ALERT  ·  3 findings
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   out\myclip.json                                                2.1 MB
+   out\myclip_annotated.mp4                                       5.8 MB
+```
+
+Everything is in the **`out`** folder, next to `gk_pops.bat`.
+
+That middle line is the headline:
+
+- **peak POPS 75** — the highest risk score any trolley in this clip reached,
+  out of 100.
+- **PUSHOUT ALERT** — what a score that high is called. The scale runs CLEAR,
+  MONITORING, SUSPICIOUS, PUSHOUT ALERT.
+- **3 findings** — three things the operational rules flagged: a blocked
+  doorway, a trolley left standing, a trolley abandoned.
 
 ---
 
-## Processing Pipeline
+## What you get
 
-```
-Video Frame
-    │
-    ├─ 1. YOLO Detection ──────────── Detect persons + carts (640px input)
-    │
-    ├─ 2. BoTSORT Tracking ────────── Assign persistent IDs across frames
-    │
-    ├─ 3. Cart Re-Identification ──── Recover identity after brief occlusion
-    │        └── Distance-based matching (< 200px, < 15 frames absent)
-    │
-    ├─ 4. Person–Cart Linking ─────── Associate persons with carts
-    │        ├── IoU overlap accumulation
-    │        ├── Co-movement detection (cosine similarity)
-    │        ├── Behind-the-cart bonus (1.5× for trailing person)
-    │        ├── Adaptive thresholds (6 frames single, 20 contested)
-    │        └── Drift detection + tracker swap recovery
-    │
-    ├─ 5. Classification (every N frames)
-    │        ├── Stage 1 -- Cart Quality: valid_cart vs unclear
-    │        │     └── Threshold: 0.50 confidence
-    │        └── Stage 2 -- Fill + Bag (valid carts only)
-    │              ├── Fill:  empty / partial / full
-    │              ├── Bag:   bagged / unbagged / not_applicable
-    │              └── Empty override: force empty if P(empty) ≥ 0.50
-    │
-    ├─ 6. Motion Analysis ─────────── Speed, direction, acceleration
-    │        ├── Speed: STATIC < 10 < SLOW < 100 < MEDIUM < 180 < FAST
-    │        └── Direction: INBOUND / OUTBOUND / UNKNOWN
-    │
-    ├─ 7. POPS Scoring ────────────── 0–100 risk score per cart
-    │
-    └─ 8. Rendering + Export ──────── Annotated video, JSON, HTML
-```
+### The marked-up video — `..._annotated.mp4`
+
+Open it in any video player. It is your footage with the analysis drawn on top:
+boxes around people and trolleys, a number for each one so you can follow it,
+lines joining a person to the trolley they are pushing, and a score in the
+corner that rises and falls as the clip plays.
+
+**This is the one to look at first,** and the one to show somebody else. If the
+analysis got something wrong, you will see it here in seconds.
+
+### The report file — `....json`
+
+Everything the analysis worked out, as a file. It is meant for a computer to
+read rather than a person — it is long, and a 20-second clip produces about
+2 MB of it.
+
+You can still open it in Notepad or a browser if you want to look. Inside are
+the per-trolley scores, every event with the second it happened, the rule
+findings, and a record of exactly what settings produced it.
+
+Send this to whoever asked for the analysis. It contains everything.
+
+### The heat map — `..._heatmap.png` *(only if you ask)*
+
+A single picture of where people spent their time, painted over a frame of the
+video. Warm colours are busy places.
 
 ---
 
-## Event Classification
+## Zones, and why they matter
 
-| Score Range | Event | Severity |
-|:-----------:|:------|:--------:|
-| 71–100 | PUSHOUT ALERT / HIGH PRIORITY | High |
-| 31–70 | MEDIUM PRIORITY / UNLINKED EXIT / ABANDONED CART | Medium |
-| 0–30 | MONITORING / LOW PRIORITY / INBOUND | Low |
+A **zone** is an area of the picture that somebody has drawn around — the
+doorway, an aisle, the area in front of the tills.
 
----
+Three of the checks cannot run without them, because they are questions about a
+*place*:
 
-## Classification Models
+- Is a trolley **blocking the doorway**?
+- Has a trolley been **left standing** in an aisle?
+- Has a trolley been **abandoned** — the person walked off and left it?
 
-### Stage 1 -- Cart Quality (valid vs unclear)
+If nobody has drawn the doorway, the analysis has no way to know where the
+doorway is. It cannot guess, and it does not try — a guessed doorway would
+produce confident findings about a patch of empty floor, which is worse than no
+findings at all.
 
-| Component | Detail |
-|:----------|:-------|
-| Architecture | MobileNetV3 + LayerNorm + Dropout(0.3) + Linear(2) |
-| Input | 224 × 224 crop, ImageNet normalization |
-| Classes | `valid_cart`, `unclear` |
-| Threshold | 0.50 confidence for `valid_cart` |
-| Temperature | 0.779 (from calibration.json) |
+**So: without zones, a run will still work, and will still be useful** — you get
+the trolley scores, the events, and the marked-up video. But the three checks
+above report nothing, and the report file says so rather than pretending
+everything was clear.
 
-### Stage 2 -- Fill + Bag (dual-head)
+### Drawing them, once, per camera
 
-| Component | Detail |
-|:----------|:-------|
-| Architecture | Shared backbone → two heads |
-| Fill Head | Linear(features → 3): `empty`, `partial`, `full` |
-| Bag Head | Linear(features + fill_logits → 3): `bagged`, `unbagged`, `not_applicable` |
-| Fill Temperature | 0.616 |
-| Bag Temperature | 0.613 |
-| Empty Override | If P(empty) ≥ 0.50, force `empty` + `not_applicable` |
+You only ever do this once for a given camera, and you do it in the app:
 
-The bag head receives concatenated backbone features + fill logits, so fill state informs bag prediction (empty carts have no bag state).
+1. Run `run_demo.bat`
+2. Choose your video
+3. Go to the **Zones** step and draw around the doorway
+4. Press **Save zone set**
 
----
+From then on, every run of `gk_pops.bat` on that video finds those zones by
+itself. The question 3 in the walkthrough says *"zones have been drawn for this
+one"* when it has found them.
 
-## Person–Cart Linking
-
-The linker uses a multi-stage state machine per frame:
-
-| Stage | What It Does |
-|:-----:|:-------------|
-| 0 | **Purge stale links** -- carts absent > 30 frames |
-| 0.5 | **Drift detection** -- linked person drifts away while someone else overlaps then release after 6 frames |
-| 1 | **Tracker swap recovery** - if linked person vanishes, find new person within 80px of last known position |
-| 2 | **New links** -- accumulate IoU for overlapping + co-moving persons, adaptive threshold (6 vs 20 frames), behind-the-cart 1.5× bonus |
+A zone set belongs to the video it was drawn on. A different camera needs its
+own.
 
 ---
 
-## Project Structure
+## Typing the command yourself
+
+Once you have seen the command, you never need the questions again.
+
+Open the folder, hold **Shift** and right-click in the empty space, and choose
+**Open PowerShell window here** or **Open command window here**. Then type:
 
 ```
-gk-pops-code/
-├── app_poc_v2.py               # Gradio web UI entry point
-├── gk_pops.py                  # Headless CLI -- same pipeline, no browser, one JSON out
-├── gk_pops.bat                 # Double-click entry point for the CLI (finds Python, then run_headless.py)
-├── run_headless.py             # Prepares the environment, then runs or helps you write the command
-├── create_virtual_env.py       # Generate the virutal env that can run the demo
-├── run_demo.py.py              # Overall orchestrator for demo (creates environment and activates demo)
-├── console_ui.py               # Shared console formatting for the launchers and the CLI
-├── requirements.txt            # Python dependencies
-├── README.md
-│
-├── engine/                     # Core pipeline package
-│   ├── __init__.py             # Public API exports
-│   ├── botsort_retail.yaml     # BoTSORT tracker configuration
-│   ├── config.py               # Paths, thresholds, colors, hyperparameters
-│   ├── tracker.py              # TrackingEngine -- main orchestrator
-│   ├── classifier.py           # CartClassifier -- batched two-stage inference
-│   ├── models.py               # CartQualityModel + DualHeadModel architectures
-│   ├── linker.py               # PersonCartLinker -- association state machine
-│   ├── motion.py               # Speed, direction, co-movement analysis
-│   ├── scoring.py              # POPS score computation + event classification
-│   ├── renderer.py             # OpenCV drawing primitives
-│   ├── ui_builder.py           # HTML table/dashboard generation for Gradio
-│   ├── run_outputs.py          # Name -> position map for process_video()'s return tuple
-│   ├── zone_editor.py          # Pure zone helpers -- make_zone, applies_to coercion, overlay
-│   ├── zone_presets.py         # Saved zone sets on disk, shared by the UI and the CLI
-│   └── video_io.py             # Video read/write + NVENC/x264 encoding
-│
-├── weights/                    # Pre-trained model weights
-│   ├── detection/
-│   │   └── weights/best.pt     # YOLOv26m person + cart detector
-│   ├── cart_quality/
-│   │   ├── weights/best.pt     # Stage 1 quality classifier
-│   │   └── calibration.json    # Temperature: 0.779
-│   └── fill_and_bag_classifier/
-│       ├── weights/best.pt     # Stage 2 fill + bag classifier
-│       └── calibration.json    # Fill temp: 0.616, Bag temp: 0.613
-│
-└── sample_videos/              # Test video clips
+.\gk_pops.bat sample_videos\myclip.mp4 --auto-zones --video-path out\
 ```
 
-### Module Responsibilities
+Press Enter.
 
-| Module | Role |
-|:-------|:-----|
-| `tracker.py` | Orchestrates the full pipeline: detection → tracking → re-ID → linking → classification → scoring → rendering → export |
-| `classifier.py` | Crops carts from frames, runs batched GPU inference through both classification stages |
-| `models.py` | Defines neural network architectures and checkpoint loading with temperature calibration |
-| `linker.py` | Maintains person–cart associations across frames with drift detection, swap recovery, and adaptive thresholds |
-| `motion.py` | Computes per-object speed/direction/acceleration and determines INBOUND/OUTBOUND/UNKNOWN labels |
-| `scoring.py` | Implements the POPS formula: direction + fill + bag + speed + link state → 0–100 score |
-| `renderer.py` | Draws bounding boxes, centroid trails, classification overlays, link lines, and HUD onto frames |
-| `ui_builder.py` | Generates styled HTML tables for the Gradio dashboard tabs |
-| `video_io.py` | Handles video input, AVI writing, and MP4 re-encoding with GPU acceleration (NVENC) or CPU fallback (libx264) |
-| `config.py` | Single source of truth for all paths, thresholds, colors, and hyperparameters |
-| `run_outputs.py` | The one name-to-position map for `process_video()`'s return tuple, so the UI and the CLI cannot drift from it |
-| `gk_pops.py` | Headless entry point: validates the inputs, calls `process_video()`, and wraps everything it produced in one JSON envelope |
+Reading that line:
+
+| Part | Meaning |
+|---|---|
+| `.\gk_pops.bat` | run this folder's analyser |
+| `sample_videos\myclip.mp4` | the video — **always comes first** |
+| `--auto-zones` | use the zones somebody drew for this video |
+| `--video-path out\` | also make and keep the marked-up video, in the `out` folder |
+
+Everything beginning with `--` is optional. The video is not.
+
+> **A tip that saves a lot of typing:** you can drag a video file from Explorer
+> into the black window, and it types the full path for you.
+
+### Question 2: where was the camera?
+
+This is the one setting that is easy to get wrong and will not tell you it is
+wrong.
+
+The analysis needs to know which direction is *out of the shop*, because a
+trolley heading for the exit is the thing it is looking for. Get it backwards
+and the clip will look quiet — no alarms, nothing flagged — which reads exactly
+like a clip where nothing happened.
+
+Pick the one that matches where the camera was mounted:
+
+| Type this | When |
+|---|---|
+| `outside_facing_entrance` | camera outside, looking at the doors from the car park |
+| `inside_facing_exit` | camera inside, looking straight at the way out |
+| `inside_exit_on_right` | camera inside, exit is to the right of the picture |
+| `inside_exit_on_left` | camera inside, exit is to the left of the picture |
+| `inside_exit_on_both` | camera inside, between two sets of doors |
+
+No quotation marks, no capital letters to get right, and these are the same
+five words the POPS HTTP service takes — so whichever of the two you use, you
+type the same thing.
+
+The longer wording the app's dropdown shows still works if you prefer it, but
+then the quotation marks are needed, because those words have spaces in them:
+`--camera-placement "Inside (facing exit)"`.
+
+If you leave it out entirely it assumes `outside_facing_entrance`.
 
 ---
 
-### Running it (no setup knowledge required)
+## The things you are most likely to want
 
-Double-click **`run_demo.bat`**. That is the whole procedure.
-
-It needs nothing installed beforehand. It looks for a Python 3.12 or 3.11 on
-the machine, and if there isn't one it uses [uv](https://astral.sh/uv) to
-download a private copy that touches nothing else on the system,
-installing uv itself first if necessary. Then it builds the environment, checks the model
-weights arrived intact, and opens the demo in your browser at
-**http://localhost:7860**.
-
-The first run downloads several GB and takes 10-20 minutes: the environment,
-plus the 4 GB local model that writes the case report. That model is fetched
-during setup on purpose; otherwise it downloads the first time someone clicks
-Run Analysis, silently, while the case-report tab appears to hang. Later runs
-start in seconds. An internet connection is needed the first time only.
-
-**No environment variables are needed.** Nothing has to be set, exported, or
-added to PATH. `ANTHROPIC_API_KEY` is read only if you switch the backend
-dropdown to Claude instead of the local model, and there is a box in the UI for
-that key. The `GK_*` variables in `app_poc_v2.py` are debugging switches that
-default to off.
-
-To check a machine is ready without starting anything:
+**Skipping the batch file entirely.** `gk_pops.py` is the thing `gk_pops.bat`
+ends up calling, and it takes exactly the same arguments. It does no setup of
+its own, so the environment has to be built already (run `gk_pops.bat` once) and
+active in this window:
 
 ```
-run_demo.bat --check-only     # check and prepare, do not start the demo
-run_demo.bat --no-model       # skip the 4 GB case-report model
+.\venv_gk-pops-enhanced\Scripts\activate
+python .\gk_pops.py sample_videos\1763942423220_B8A44F5B742E-medium.mp4 --camera-placement "Inside (facing exit)" --auto-zones --json-path result.json --video-path annotated_video.mp4
 ```
 
-On macOS or Linux, or if you would rather not use the `.bat`:
+That writes `result.json` and `annotated_video.mp4` into the folder you ran it
+from. Without the environment active it fails on the first missing package
+rather than fetching anything.
 
-```bash
-python run_demo.py
+**Just analyse it, keep only the report.** The report lands next to the video,
+named after it.
+
+```
+.\gk_pops.bat sample_videos\myclip.mp4
 ```
 
-#### The case-report model
+**Keep the marked-up video too, everything in one folder.**
 
-The written case report is produced by **Qwen3-VL-2B-Instruct**: Apache-2.0,
-public, no Hugging Face account and no token. It is ~4 GB and is not in this
-repository.
-
-`run_demo.bat` fetches it during setup and skips instantly on later runs. Three
-ways it can be satisfied, checked in this order:
-
-| Source | When it applies |
-|:--|:--|
-| `models/Qwen3-VL-2B-Instruct/` | You put an offline copy there. Nothing contacts Hugging Face. |
-| `%USERPROFILE%\.cache\huggingface` | It has been downloaded before on this machine. |
-| Hugging Face | Neither of the above, so it is downloaded during setup. |
-
-**Offline or blocked network.** If the machine cannot reach huggingface.co, copy
-the model's 12 files into `models/Qwen3-VL-2B-Instruct/`. `engine/config.py`
-checks for `config.json` there at import and loads from the folder when it
-exists. No variable to set, nothing else to change. `models/README.txt` has
-the copy instructions, including how to lift the files out of a working
-machine's cache.
-
-**If the download fails**, setup says so and carries on. Everything except the
-written case report works; detection, tracking, scoring, the annotated video
-and every dashboard tab are unaffected. `--no-model` skips the fetch
-deliberately.
-
-#### Before you send this folder to someone
-
-1. **Git LFS.** The detection/classifier weights are LFS objects. Whoever clones needs
-   `git lfs install` then `git lfs pull`, or the `.pt` files arrive as 130-byte
-   pointers. `run_demo.bat` detects that and says so in plain English rather
-   than dying inside torch.
-2. **A video clip.** Clips are never committed. `*.mp4` is gitignored, and
-   these are store recordings of identifiable people. Send one separately and
-   tell the recipient to drop it into `sample_videos/`. Without one the
-   dropdown is empty; they can still drag a video into the upload box.
-3. **Check it.** Run `run_demo.bat --check-only` on the target machine.
-
-### Prerequisites
-
-None, if you use `run_demo.bat`. It obtains what it needs.
-
-For a manual setup:
-
-- **Python 3.11 or 3.12.** Not 3.13 (numpy 1.26.4 has no cp313 wheel) and not
-  3.10 (scipy 1.17.1 needs >= 3.11). `create_virtual_env.py` refuses to run
-  outside that window rather than letting pip fail halfway.
-- **An NVIDIA driver**, if you want GPU inference. You do *not* need the CUDA
-  toolkit; the torch wheels carry their own CUDA runtime. Without a GPU the
-  demo still runs; inference is just much slower.
-- **Nothing else.** ffmpeg arrives with the `imageio-ffmpeg` package, so no
-  system ffmpeg and no PATH entry is required.
-
-### Manual setup
-
-```bash
-python create_virtual_env.py            # detects the GPU, builds the venv, verifies it
-python create_virtual_env.py --dry-run  # see the plan first, install nothing
-python create_virtual_env.py --cpu      # force the CPU build of torch
-python create_virtual_env.py --ensure   # build only if needed; verify and exit otherwise
+```
+.\gk_pops.bat sample_videos\myclip.mp4 --video-path out\ --json-path out\
 ```
 
-The script creates `venv_gk-pops-enhanced/`, installs the CUDA build of
-torch/torchvision from PyTorch's own index, then everything in
-`requirements.txt`, and finishes by importing the whole stack and reporting
-whether `torch.cuda.is_available()` actually came back true. It fails loudly if
-a GPU was detected but CUDA is not usable, because the only other symptom of
-that is a demo that runs quietly on the CPU.
+**Use the zones somebody drew, and say where the camera was.**
 
-Then:
-
-```bash
-venv_gk-pops-enhanced/Scripts/python app_poc_v2.py        # http://localhost:7860
-venv_gk-pops-enhanced/Scripts/python tests/run_all.py --fast
+```
+.\gk_pops.bat sample_videos\myclip.mp4 --auto-zones ^
+    --camera-placement inside_facing_exit --video-path out\
 ```
 
-### Model Weights
+(The `^` at the end of a line means *this command carries on below*. You can
+also just type it all on one long line.)
 
-All model weights are bundled under the `weights/` directory:
+**Check it would work, without waiting for the analysis.** Useful when you have
+typed a long command and want to know the paths are right before committing
+several minutes to it.
 
-| Asset | Path |
-|:------|:-----|
-| YOLOv26m detector | `weights/detection/weights/best.pt` |
-| Cart quality classifier | `weights/cart_quality/weights/best.pt` |
-| Fill + bag classifier | `weights/fill_and_bag_classifier/weights/best.pt` |
-| BoTSORT tracker config | `engine/botsort_retail.yaml` |
+```
+.\gk_pops.bat sample_videos\myclip.mp4 --auto-zones --dry-run
+```
 
-Paths are configured in [engine/config.py](engine/config.py).
+It checks everything, tells you exactly where each file would go, and stops.
 
-### UI
+**Make the report file small.** A full report is about 2 MB for a 20-second
+clip, most of which is a frame-by-frame record. If you only want the conclusions
+— the scores, events and findings — this takes the same clip to about 16 KB:
 
-The Gradio interface launches at **http://localhost:7860**. Upload a video or pick from the sample videos dropdown, select camera placement, and click **Run Analysis**.
+```
+.\gk_pops.bat sample_videos\myclip.mp4 --auto-zones --frames none --no-html
+```
 
-### Camera Placement Options
+The analysis is identical. Every frame is still examined. This only changes how
+much detail is written to the file.
 
-| Option | When to Use |
-|:-------|:------------|
-| Outside (facing entrance) | Camera is outside the store, pointing at the entrance |
-| Inside (facing exit) | Camera is inside, pointing toward the exit doors |
-| Inside (exit on right) | Camera is inside, exit is on the right side of the frame |
-| Inside (exit on left) | Camera is inside, exit is on the left side of the frame |
-| Inside (exit on both sides) | Camera is inside, exits on both sides |
+**Get the written case report.** Several minutes per clip, and the first time it
+downloads a large model:
 
-Camera placement determines how INBOUND vs OUTBOUND direction is computed from object motion vectors.
+```
+.\gk_pops.bat sample_videos\myclip.mp4 --auto-zones --case-report out\
+```
+
+**Do several videos in a row.** Paste this into a file called `nightly.bat` in
+this folder, and double-click it:
+
+```
+@echo off
+cd /d "%~dp0"
+for %%V in (sample_videos\*.mp4) do (
+    call "%~dp0gk_pops.bat" "%%V" --auto-zones --json-path out\
+)
+pause
+```
+
+(`%~dp0` means *the folder this file is in*. Without it, Windows sometimes
+cannot find `gk_pops.bat` even though it is sitting right next to it.)
+
+It works through every video in the folder, one after another, and puts all the
+reports in `out`. One video failing does not stop the rest — but check the
+window afterwards, because it will say which.
 
 ---
 
-## Outputs
+## Every option
 
-| Output | Description |
-|:-------|:------------|
-| **Annotated Video** | MP4 with bounding boxes, centroid trails, classification labels, POPS scores, link lines, and HUD |
-| **JSON Report** | Per-frame tracking data, event log, per-cart POPS summary, processing metadata |
-| **Events Timeline** | HTML table of all significant events with timestamps, scores, and classifications |
-| **POPS Summary** | HTML table showing final risk assessment per cart |
+For the full list, with the exact wording of everything:
+
+```
+.\gk_pops.bat --help
+```
+
+The ones worth knowing about:
+
+| Option | What it does |
+|---|---|
+| `--auto-zones` | use the zones saved for this video |
+| `--camera-placement inside_facing_exit` | where the camera was — see [above](#question-2-where-was-the-camera) |
+| `--json-path out\` | put the report in the `out` folder |
+| `--video-path out\` | also make and keep the marked-up video (slower) |
+| `--heatmap-path out\` | also keep the heat map |
+| `--pose` / `--no-pose` | force the skeleton overlay on or off — by default it runs only when `--video-path` or `--case-report` will show it |
+| `--case-report` | also write the AI case report (slow). Give it a path — `--case-report out\` — to choose where it lands; bare, it lands next to the video |
+| `--dry-run` | check everything and stop, without analysing |
+| `--frames none` | smaller report file, same analysis |
+| `--force` | overwrite a report that is already there |
+| `--quiet` | less on screen |
+| `--verbose` | more on screen — every line the analysis prints as it works |
+| `--engine-log run.log` | keep those lines in a file instead of on screen |
+| `--help` | the full list |
+
+A note on `--verbose`: the analysis narrates itself in some detail while it
+runs — which cart voted which way, how long each stage took, what was cached.
+None of that is needed to read a result, so it is kept out of the way by
+default rather than switched off. If a run fails, the last lines of it are
+printed automatically; `--verbose` shows all of it live, and `--engine-log`
+writes all of it to a file.
+
+A note on `--video-path` and `--heatmap-path`: the heat map is made on every run
+whether you ask for it or not, and naming a path is what *keeps* it. The
+marked-up video is different — it is **only made when `--video-path` asks for
+one**, because making it is not free: a frame is encoded on every pass through
+the loop and the whole thing is then decoded again to draw the rule badges in.
+
+Leaving `--video-path` off therefore does make the run faster, and by more than
+the encode alone. Pose estimation — the skeleton drawn over each person — is a
+second model run on every frame, and the only thing that ever displays it is the
+marked-up video or the case report's evidence images. So it follows the same
+question: with `--video-path` or `--case-report` it runs, without them it does
+not. Nothing else changes. Pose feeds no score, no rule and no number in the
+report; a clip run both ways produces the same findings, the same events and the
+same per-frame records.
+
+On the 20-second sample clip that is 31s with the video and 21s without, on the
+same machine back to back. `--pose` and `--no-pose` override the choice in
+either direction if you want it settled by hand.
 
 ---
 
-## Key Hyperparameters
+## When something goes wrong
 
-All configurable in [engine/config.py](engine/config.py):
+The window tells you what happened and what to do about it. It is worth reading
+— it is written for this, not for a programmer.
 
-| Parameter | Value | Purpose |
-|:----------|:-----:|:--------|
-| `YOLO_IMGSZ` | 640 | Detection input resolution |
-| `CLASSIFY_EVERY_N_FRAMES` | 8 | Classification frequency |
-| `QUALITY_THRESHOLD` | 0.50 | Minimum confidence for valid cart |
-| `EMPTY_OVERRIDE_THRESH` | 0.50 | Force empty prediction threshold |
-| `LINK_CONFIRM_FRAMES` | 6 | Frames to confirm single-candidate link |
-| `LINK_CONTESTED_FRAMES` | 20 | Frames to decide among multiple candidates |
-| `LINK_GRACE_FRAMES` | 15 | Grace period before linking new carts |
-| `ABANDON_FRAMES` | 30 | Person absent this many frames → abandonment |
-| `REID_DIST_THRESH` | 200 px | Max distance for cart re-identification |
-| `SPEED_STATIC` | 10 px/s | Below this → STATIC |
-| `SPEED_SLOW` | 100 px/s | Below this → SLOW |
-| `SPEED_MEDIUM` | 180 px/s | Below this → MEDIUM, above → FAST |
+```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ZoneSpecError
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  --zone 1: unknown kind "doorway"
+
+  one of: analytics, wall, aisle, door, fixture
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+The common ones:
+
+**"no such file"** — the video path is wrong. Drag the file into the window
+instead of typing it.
+
+**"already exists"** — there is a report there from a previous run. Add
+`--force` to replace it, or use a different `--json-path`.
+
+**"no saved zone preset for ..."** — `--auto-zones` could not find zones for
+this video, because nobody has drawn them. See
+[Zones](#zones-and-why-they-matter), or drop `--auto-zones` and run without.
+
+**"This preset was drawn on a 1920x1080 frame but the current video is
+1280x720"** — the zones belong to a different-sized recording from the same
+camera. They have to be redrawn for this one; stretching them would put the
+doorway in the wrong place.
+
+**"the engine could not be built"** — the model files did not arrive properly.
+Whoever sent you this folder needs to send it again, or run
+`git lfs install && git lfs pull` in it.
+
+**It says a warning but carries on.** That is deliberate. A warning means the
+run finished and something about it is worth knowing — most often that no zones
+were loaded, so the door and trolley rules could not run. The report is still
+good; just read the warning.
+
+**Nothing at all happens when you double-click.** Windows may be blocking the
+file because it came from the internet. Right-click `gk_pops.bat`, choose
+**Properties**, and if there is an **Unblock** box at the bottom, tick it and
+press OK.
+
+**If you are stuck**, take a photo of the whole window and send it to whoever
+gave you this folder. The window has everything needed to work out what
+happened.
 
 ---
 
-## Tech Stack
+## For whoever set this up
 
-| Component | Technology |
-|:----------|:-----------|
-| Object Detection | YOLOv8 (Ultralytics) -- custom YOLOv26m |
-| Multi-Object Tracking | BoTSORT |
-| Classification | PyTorch -- MobileNetV3 / EfficientNet / ConvNeXt / ResNet backbones |
-| Video Processing | OpenCV + FFmpeg (NVENC GPU / libx264 CPU) |
-| Web Interface | Gradio |
-| Inference | CUDA GPU with temperature-calibrated softmax |
+The things a non-technical reader does not need, in one place.
+
+**Nothing is installed system-wide.** `gk_pops.bat` looks for a usable Python in
+three places, in order: an environment a previous run already built, a Python
+3.12 or 3.11 already on the machine, and failing both, [uv](https://astral.sh/uv),
+which fetches a private 3.12 into the user profile. The environment itself is
+`venv_gk-pops-enhanced/` inside the folder. No administrator rights, no PATH
+changes, nothing outside this directory and `%USERPROFILE%\.local`.
+
+**`run_demo.bat` and `gk_pops.bat` share one environment.** `run_headless.py`
+imports `ensure_environment()` and `check_weights()` from `run_demo.py` rather
+than reimplementing them, so there is one setup path and whichever entry point
+runs first pays for it.
+
+**Exit codes** are passed through from `gk_pops.py`, so this can be scheduled:
+
+| | |
+|---|---|
+| `0` | the run completed and the report was written |
+| `2` | something about the command was wrong — nothing ran, nothing written |
+| `3` | the run started and failed. A report file **is still written**, with `cli.exit` set to `"error"` and the traceback inside it |
+| `130` | interrupted |
+
+`1` is never returned deliberately, so it stays the signal that the process died
+before it could report for itself.
+
+A failure report is a tombstone rather than a result, so re-running over one
+does **not** need `--force`. Fix the problem, run the same command again.
+
+**Set `GK_NO_PAUSE=1`** to stop the window waiting for a keypress at the end.
+Without it, a double-click pauses so the results can be read; with it, a
+scheduled task exits cleanly.
+
+**Run it from anywhere** by calling the batch file with its full path. Output
+paths you give are resolved against the directory you ran it *from*, not the
+folder the analysis lives in.
+
+**On macOS or Linux** there is no `.bat`. Run `python run_headless.py` with the
+same arguments — the batch file is only the Python-finding wrapper.
+
+**The details** — the JSON structure, every flag, the parity guarantee against
+the app — are in the "Run it without the UI" section of
+[PROJECT_README.md](PROJECT_README.md#run-it-without-the-ui) and in
+`gk_pops.py --help`.

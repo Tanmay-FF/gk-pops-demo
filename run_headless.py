@@ -841,7 +841,7 @@ def menu() -> None:
         ui.detail(title)
         print(f"{ui.PAD}   {ui.CYAN}{command}{ui.RESET}")
     print()
-    ui.detail("Full instructions, in plain language: RUN_WITHOUT_THE_APP.md")
+    ui.detail("Full instructions, in plain language: README.md")
     print()
 
 

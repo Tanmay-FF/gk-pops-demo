@@ -18,7 +18,7 @@ rem  environment if it has to and then runs the analysis.
 rem
 rem  This is the same search run_demo.bat does, deliberately: the two share an
 rem  environment, so whichever you run first pays for it and the other is
-rem  instant. See RUN_WITHOUT_THE_APP.md.
+rem  instant. See README.md.
 rem ==========================================================================
 setlocal
 cd /d "%~dp0"
