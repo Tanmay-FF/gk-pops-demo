@@ -1,11 +1,8 @@
 # How to run the POPS demo
 
-This is the cart push-out detection demo. You give it a video clip of a store
-entrance; it marks up the video, scores each cart for how likely it is being
-pushed out without payment, and writes up what it saw.
+This is the cart push-out detection demo. You give it a video clip of a store entrance; it marks up the video, scores each cart for how likely it is being pushed out without payment, and writes up what it saw.
 
-You do not need to install anything, set anything up, or know any Python. The
-whole procedure is below.
+You do not need to install anything, set anything up, or know any Python. The whole procedure is below.
 
 ---
 
@@ -14,18 +11,15 @@ whole procedure is below.
 - A Windows PC. A machine with an NVIDIA graphics card is much faster, but the
   demo works without one.
 - An internet connection, **the first time only**.
-- The video clip I sent you separately.
+- Video Clips
 
 ---
 
-## Step 1 — Put the video clip in place
+## Step 1 - Put the video clip in place
 
 Open this project folder. Inside it there is a folder called
-**`sample_videos`**. Copy the `.mp4` clip I sent you into that folder.
+**`sample_videos`**. Copy the `.mp4` clips into this folder.
 
-Do this first. The clips are not stored in the project — they are recordings of
-real people in a real store, so they are kept out on purpose. If you skip this
-step, the demo still opens, but the list of clips to choose from is empty.
 
 ## Step 2 — Start it
 
