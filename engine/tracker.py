@@ -2209,7 +2209,20 @@ class TrackingEngine:
             },
             "frames": self._json_frames,
             "events": self._event_log,
-            "cart_classifications": {f"C{cid}": self._cart_cls_cache.get(cid, {}) for cid in self._cart_cls_cache},
+            # A SNAPSHOT, not a verdict: `_cart_cls_cache` is overwritten on
+            # every classify pass, so this is the LAST reading taken while the
+            # cart was still detected — at any quality, including `unclear`.
+            # The cart's actual assessed fill/bag is the confidence-weighted
+            # vote over its valid_cart frames, and that lives in `pops_summary`
+            # below. The two legitimately disagree: on the FF1763940475070
+            # INSIDE clip C2 voted full|unbagged over 31 valid samples while its
+            # last reading, taken as it left the frame, was `unclear`.
+            # `observed_at_frame` is what makes that readable without the code.
+            "cart_classifications": {
+                f"C{cid}": {**self._cart_cls_cache.get(cid, {}),
+                            "observed_at_frame": self._cls_last_frame.get(cid)}
+                for cid in self._cart_cls_cache
+            },
             # Beyond max_score/peak_event: the reconciled snapshot's own reading
             # of WHY the cart scored what it did. Without these a run cannot be
             # attributed after the fact — see docs/missed_pushout_fix_plan.md,
@@ -2224,8 +2237,49 @@ class TrackingEngine:
                     "owner": self._peak_pops_snapshot.get(cid, {}).get("owner"),
                     "abandoned": bool(self._peak_pops_snapshot.get(cid, {}).get("abandoned", False)),
                     "merch_removed": bool(self._peak_pops_snapshot.get(cid, {}).get("merch_removed", False)),
+                    # The reconciled labels the score was actually computed
+                    # from — the vote, not one frame. Until these shipped here
+                    # they existed only in stdout and the POPS table HTML, so a
+                    # JSON-only consumer (the headless runner) could read a
+                    # cart's 75 with no way to learn it was voted full|unbagged.
+                    # A cart that never reached reconciliation (`best_fill is
+                    # None`) has no snapshot labels and reads "unclassified".
+                    "fill": self._peak_pops_snapshot.get(cid, {}).get("fill", "unclassified"),
+                    "bag": self._peak_pops_snapshot.get(cid, {}).get("bag", "unclassified"),
+                    "quality": self._peak_pops_snapshot.get(cid, {}).get("quality", "unclassified"),
                 }
                 for cid in set(list(self._max_pops_per_cart) + list(self._pops_cache))
+            },
+            # Plain-English gloss for the two fields a reader reliably
+            # misreads, carried IN the document so it travels with a copy of
+            # the file. A separate top-level key and NOT a member of
+            # pops_summary: three consumers iterate that dict expecting every
+            # value to be a per-cart dict — vlm_analyzer._format_pops_table,
+            # case_report_builder._build_pops_analysis, and the golden
+            # baseline's decisions_from_json — and a string among them is an
+            # uncaught AttributeError that takes the case report down.
+            "field_notes": {
+                "cart_classifications": (
+                    "A SNAPSHOT, not a verdict: the last reading taken while "
+                    "each cart was still detected, at whatever quality that "
+                    "reading had — see observed_at_frame. The cart's assessed "
+                    "fill/bag is the vote in pops_summary, and the two "
+                    "legitimately disagree when a cart ends its run "
+                    "unreadable."
+                ),
+                "pops_summary.merch_removed": (
+                    "The goods left a cart that was carrying them — what "
+                    "separates a pushout from a parked cart, since both trip "
+                    "'abandoned'. True needs ALL of: abandoned, a run of 5 "
+                    "consecutive loaded readings of one label earlier in the "
+                    "clip, and a history that ends empty (one trailing loaded "
+                    "run under 4 readings is tolerated as classifier noise, "
+                    "and only one such run is ever stripped). A cart that was "
+                    "empty throughout never qualifies — nothing was in it to "
+                    "remove. It changes the SCORE only on an UNKNOWN heading, "
+                    "where it lifts an unbagged cart's 65 to the 75 floor an "
+                    "OUTBOUND abandoned loaded cart already gets without it."
+                ),
             },
             "summary": {
                 "total_people_seen": len(self._all_people_seen),
