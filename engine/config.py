@@ -16,6 +16,46 @@ from torchvision import transforms
 MODEL_PATH = r"weights\detection\weights\best.pt"
 TRACKER_CONFIG = r"engine\botsort_retail.yaml"
 
+# ---------------------------------------------------------------------------
+# Detection backend (see docs/three_class_detector_plan.md)
+# ---------------------------------------------------------------------------
+#: Which detector + tracking path the engine builds:
+#:   "ultralytics_track"  -- the original path: YOLO(MODEL_PATH).track().
+#:   "ultralytics_direct" -- the same 2-class weights, but detection and
+#:                           tracking driven by engine/detection_backends.py.
+#:                           Exists to prove that driver reproduces
+#:                           "ultralytics_track" before the detector changes.
+#:   "yolov5_3class"      -- YOLOv5 person / empty_cart / non_empty_cart,
+#:                           through the same driver. Its empty / non-empty
+#:                           call decides which carts reach the classifiers.
+DETECTOR_BACKEND = "yolov5_3class"
+DETECTOR_BACKENDS = ("ultralytics_track", "ultralytics_direct", "yolov5_3class")
+
+#: Detection confidence for "ultralytics_direct". ultralytics' Model.track()
+#: forces conf=0.1 when the caller passes none (ByteTrack's second
+#: association needs the low-confidence boxes), so the direct driver must use
+#: the same value to reproduce it.
+ULTRALYTICS_TRACK_CONF = 0.1
+
+#: The YOLOv5 repository the 3-class checkpoint was trained with. Its pickled
+#: checkpoint references top-level `models` / `utils` modules, so the repo has
+#: to be importable at load time.
+V5_REPO_PATH = r"D:\gatekeeper_projects\dillion\yolov5"
+V5_WEIGHTS_PATH = (r"D:\gatekeeper_projects\dillion\yolov5"
+                   r"\yolov5m_person_cart_3class\weights\best.pt")
+#: YOLOv5 detect.py defaults, chosen by the user (no deployment values exist).
+V5_CONF = 0.25
+V5_IOU = 0.45
+V5_IMGSZ = 640
+#: Class names the 3-class checkpoint must carry; checked at load.
+V5_CLASS_PERSON = "person"
+V5_CLASS_EMPTY_CART = "empty_cart"
+V5_CLASS_NON_EMPTY_CART = "non_empty_cart"
+
+#: A cart read is NON-EMPTY when the mean detector P(non-empty) over the
+#: cart's frames since its previous read reaches this.
+CART_STATE_NON_EMPTY_THRESH = 0.5
+
 #: Where the sample-video dropdown looks. This used to be an absolute path
 #: into a sibling checkout on one particular D: drive, which meant the
 #: dropdown was empty on every other machine in the world -- the demo still

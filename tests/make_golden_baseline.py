@@ -1,7 +1,11 @@
 """Regenerate a golden baseline under tests/fixtures/golden/.
 
     python tests/make_golden_baseline.py <clip.mp4> [--placement "Outside (facing entrance)"]
-                                                    [--case <name>]
+                                                    [--case <name>] [--backend <name>]
+
+`--backend` is a config.DETECTOR_BACKENDS name (default: config.DETECTOR_BACKEND)
+and is recorded in the baseline's settings, so the test replays the baseline
+with the detector that produced it.
 
 Writes `baseline.json` by default. `--case outside` writes
 `baseline_outside.json` instead, which is how a second clip gets pinned —
@@ -39,7 +43,8 @@ def out_path(case):
     return os.path.join(GOLDEN_DIR, name)
 
 
-def provenance():
+def provenance(backend):
+    from engine.detection_backends import backend_fingerprint
     from engine.trajectory_cache import environment_fingerprint
     import ultralytics
 
@@ -50,6 +55,7 @@ def provenance():
         "ultralytics": ultralytics.__version__,
         "tracker_config_sha": fingerprint.get("tracker_cfg"),
         "weights": fingerprint.get("weights"),
+        "detector": backend_fingerprint(backend),
         "python": sys.version.split()[0],
     }
 
@@ -69,9 +75,17 @@ def main(argv):
     case = ""
     if "--case" in argv:
         case = argv[argv.index("--case") + 1]
+    from engine.config import DETECTOR_BACKEND, DETECTOR_BACKENDS
+    backend = DETECTOR_BACKEND
+    if "--backend" in argv:
+        backend = argv[argv.index("--backend") + 1]
+    if backend not in DETECTOR_BACKENDS:
+        print(f"unknown backend {backend!r}; expected one of {DETECTOR_BACKENDS}")
+        return 2
     OUT = out_path(case)
 
-    settings = {"camera_placement": placement, "zones": [], "enable_pose": True}
+    settings = {"camera_placement": placement, "zones": [], "enable_pose": True,
+                "detector_backend": backend}
 
     print(f"scoring {clip} ...")
     frames, decisions = run_pipeline(clip, settings, capture_decisions=True)
@@ -94,7 +108,7 @@ def main(argv):
             "size": os.path.getsize(clip),
         },
         "settings": settings,
-        "provenance": provenance(),
+        "provenance": provenance(backend),
         "frames": {str(k): v for k, v in sorted(frames.items())},
         "decisions": decisions,
     }

@@ -166,6 +166,19 @@ def decisions_from_json(json_str):
     }
 
 
+#: Every baseline recorded before docs/three_class_detector_plan.md was made
+#: by the original YOLO.track() path and carries no backend in its settings.
+LEGACY_BACKEND = "ultralytics_track"
+
+
+def baseline_backend(settings):
+    """The detector backend a baseline was recorded with. A baseline must be
+    replayed with the detector that produced it: comparing the 3-class
+    detector's frames against a 2-class baseline would fail for a reason that
+    has nothing to do with a regression."""
+    return settings.get("detector_backend", LEGACY_BACKEND)
+
+
 def run_pipeline(clip, settings, engine_obj=None, capture_decisions=False):
     """Drive the real engine and capture per-frame counts AND display IDs.
 
@@ -217,7 +230,7 @@ def run_pipeline(clip, settings, engine_obj=None, capture_decisions=False):
     T.draw_bbox = bbox_spy
     try:
         if engine_obj is None:
-            engine_obj = T.TrackingEngine()
+            engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
         result = engine_obj.process_video(
             clip,
             camera_placement=settings["camera_placement"],

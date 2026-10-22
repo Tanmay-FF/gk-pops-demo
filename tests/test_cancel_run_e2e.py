@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.cancellation import RunCancelled
 
 from test_golden_clip import (  # noqa: E402
-    Skip, load_baseline, find_clip, run_pipeline, compare,
+    Skip, load_baseline, find_clip, run_pipeline, compare, baseline_backend,
 )
 
 
@@ -87,7 +87,7 @@ def test_a_cancelled_run_leaves_the_next_run_unchanged():
     settings = baseline["settings"]
 
     import engine.tracker as T
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
 
     frames1, _log1 = _capture(engine_obj, clip, settings)
     assert frames1, "run 1 captured no frames"
@@ -145,7 +145,7 @@ def test_a_cancel_pressed_between_runs_does_not_kill_the_next_one():
     settings = baseline["settings"]
 
     import engine.tracker as T
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
 
     frames1, _ = _capture(engine_obj, clip, settings)
     buf = io.StringIO()

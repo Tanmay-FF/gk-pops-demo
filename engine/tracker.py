@@ -24,7 +24,7 @@ import torch
 from ultralytics import YOLO
 
 from .config import (
-    MODEL_PATH, TRACKER_CONFIG,
+    MODEL_PATH, TRACKER_CONFIG, DETECTOR_BACKEND, CART_STATE_NON_EMPTY_THRESH,
     COLOR_PERSON, COLOR_CART,
     YOLO_IMGSZ, CLASSIFY_EVERY_N_FRAMES, JSON_EVERY_N_FRAMES,
     PROGRESS_MAX_UPDATES, PROGRESS_MIN_INTERVAL_S,
@@ -41,6 +41,8 @@ from .config import (
 from . import ultralytics_compat as _ultralytics_compat
 from .cancellation import CancelToken, RunCancelled, RunSuperseded
 from .classifier import CartClassifier
+from .detection_backends import build_detection_model
+from . import cart_state as _cart_state
 from .linker import PersonCartLinker
 from .motion import (compute_motion, compute_direction_label, DirectionLatch,
                      outbound_axis_value)
@@ -93,14 +95,24 @@ from .trajectory_cache import TrajectoryCache, make_video_key
 
 
 class TrackingEngine:
-    def __init__(self, model_path=MODEL_PATH, tracker_config=TRACKER_CONFIG, device="auto"):
+    def __init__(self, model_path=MODEL_PATH, tracker_config=TRACKER_CONFIG, device="auto",
+                 detector_backend=DETECTOR_BACKEND):
         if device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
 
-        self.model = YOLO(model_path)
-        self.model.to(self.device)
+        # "ultralytics_track" is a plain YOLO (the original path); the other
+        # backends return a DirectTrackingModel that presents the same surface
+        # (.track/.to/.names/.model/.predictor.trackers), so every device and
+        # tracker-reset path below works unchanged. See
+        # engine/detection_backends.py and docs/three_class_detector_plan.md.
+        self.detector_backend = detector_backend
+        self.model = build_detection_model(detector_backend, self.device, model_path)
+        #: True when the detector reports P(non-empty) per cart (3-class
+        #: backend). Switches the classification read to the detector-first
+        #: flow in _classify_cart_read().
+        self._uses_cart_state = bool(getattr(self.model, "provides_cart_state", False))
         if self.device == "cuda":
             # cudnn.benchmark is deliberately OFF. It is normally a free win for
             # fixed input shapes, but measured on this stack (RTX 3070 Ti Laptop,
@@ -226,6 +238,13 @@ class TrackingEngine:
         self._all_carts_seen    = set()
 
         self._cart_cls_cache    = {}
+        # 3-class backend only: per-cart detector P(non-empty) samples between
+        # classification reads, plus per-cart read-outcome counts for the JSON.
+        # Keyed by cart DISPLAY id, like _cart_cls_history, so a re-identified
+        # cart keeps its evidence. See engine/cart_state.py.
+        self._cart_state        = _cart_state.CartStateAccumulator()
+        # raw id -> this frame's P(non-empty) (carts only), for the frame JSON.
+        self._frame_p_non_empty = {}
         self._pops_cache        = {}
         self._event_log         = []
         self._max_pops_per_cart = {}
@@ -363,6 +382,19 @@ class TrackingEngine:
                     "fill_conf": round(cr.get("fill_conf", 0.0), 4),
                     "bag_conf": round(cr.get("bag_conf", 0.0), 4),
                 }
+                if self._uses_cart_state:
+                    # The latest READ's origin ("detector" when the 3-class
+                    # detector called it empty and no classifier ran), and
+                    # THIS frame's detector call, which can differ from the
+                    # read: a read averages every frame since the previous one.
+                    obj["classification"]["source"] = cr.get("source", "classifier")
+                    _p = self._frame_p_non_empty.get(raw_id)
+                    obj["detector"] = {
+                        "state": (None if _p is None else
+                                  _cart_state.NON_EMPTY if _p >= CART_STATE_NON_EMPTY_THRESH
+                                  else _cart_state.EMPTY),
+                        "p_non_empty": None if _p is None else round(_p, 4),
+                    }
                 # `classification` above is this frame's OBSERVATION; `pops`
                 # below is scored from the VOTE over the cart's whole history
                 # (see the frame loop), so the two can legitimately disagree on
@@ -516,7 +548,7 @@ class TrackingEngine:
             )
 
         bundle = TrajectoryBundle(
-            video_key=make_video_key(source_path),
+            video_key=make_video_key(source_path, self.detector_backend),
             video_path=os.path.abspath(source_path),
             width=int(w), height=int(h), fps=float(fps),
             total_frames=int(total_frames),
@@ -553,7 +585,7 @@ class TrackingEngine:
 
         bundle = None
         if source_path:
-            video_key = make_video_key(source_path)
+            video_key = make_video_key(source_path, self.detector_backend)
             bundle = self._trajectory_cache.get(video_key)
         if bundle is None and self._last_bundle is not None:
             bundle = self._last_bundle
@@ -935,6 +967,41 @@ class TrackingEngine:
                 # BYTETracker.reset() must degrade, not abort.
                 print(f"[WARN] could not reset the tracker between runs: {e}")
 
+    def _classify_cart_read(self, cd, frame, bbox) -> dict:
+        """One classification read of cart `cd` (display id).
+
+        2-class backends: CartClassifier.classify(), exactly as before.
+
+        3-class backend (docs/three_class_detector_plan.md §4.4): the cart's
+        mean detector P(non-empty) since its previous read decides first.
+          EMPTY      -> detector record; no classifier runs.
+          NON-EMPTY  -> classify_loaded(): quality gate, then fill restricted
+                        to loaded classes. A crop that fails the gate is
+                        returned as unreadable and so is NOT added to the
+                        history (the user's choice, plan Q2).
+          UNKNOWN    -> no usable detector value; fall back to classify() so
+                        the read is not lost, and count it.
+        Every returned dict is a fresh copy: classify() can return shared
+        module-level constants, and the caller stores the result.
+        """
+        if not self._uses_cart_state:
+            return self._classifier.classify(frame, bbox)
+        decision = _cart_state.decide_cart_state(
+            self._cart_state.take(cd), CART_STATE_NON_EMPTY_THRESH)
+        if decision.state == _cart_state.EMPTY:
+            self._cart_state.count_read(cd, _cart_state.READ_EMPTY)
+            return _cart_state.detector_empty_result(decision.p_non_empty)
+        if decision.state == _cart_state.UNKNOWN:
+            self._cart_state.count_read(cd, _cart_state.READ_NO_STATE)
+            return {**self._classifier.classify(frame, bbox),
+                    "detector_state": _cart_state.UNKNOWN}
+        result = self._classifier.classify_loaded(frame, bbox)
+        outcome = (_cart_state.READ_NON_EMPTY if result.get("quality") == "valid_cart"
+                   else _cart_state.READ_QUALITY_FAIL)
+        self._cart_state.count_read(cd, outcome)
+        return {**result, "detector_state": _cart_state.NON_EMPTY,
+                "p_non_empty": decision.p_non_empty}
+
     @staticmethod
     def _bbox_iou(a, b):
         """IoU of two (x1,y1,x2,y2) boxes."""
@@ -1039,7 +1106,7 @@ class TrackingEngine:
     def invalidate_cache(self, source_path=None):
         """Drop the cached trajectory for a specific video, or all of them."""
         if source_path:
-            self._trajectory_cache.invalidate(make_video_key(source_path))
+            self._trajectory_cache.invalidate(make_video_key(source_path, self.detector_backend))
         else:
             self._trajectory_cache.clear()
         self._last_bundle = None
@@ -1342,6 +1409,7 @@ class TrackingEngine:
             person_count = 0
             cart_count = 0
             frame_detections = []
+            self._frame_p_non_empty = {}
 
             if results and results[0].boxes is not None and results[0].boxes.id is not None:
                 r = results[0]
@@ -1349,6 +1417,17 @@ class TrackingEngine:
                 ids   = r.boxes.id.cpu().tolist()
                 clss  = r.boxes.cls.tolist()
                 confs = r.boxes.conf.cpu().tolist()
+                # 3-class backend: P(non-empty) aligned with the boxes (NaN
+                # for persons). A length mismatch means the backend broke its
+                # contract; dropping the evidence for one frame is recoverable,
+                # attaching it to the wrong cart is not.
+                p_ne = None
+                if self._uses_cart_state:
+                    p_ne = getattr(r, "p_non_empty", None)
+                    if p_ne is not None and len(p_ne) != len(ids):
+                        print(f"[WARN] frame {frame_idx}: {len(p_ne)} cart-state values "
+                              f"for {len(ids)} boxes; ignoring them for this frame")
+                        p_ne = None
 
                 # Count
                 for c in clss:
@@ -1369,11 +1448,23 @@ class TrackingEngine:
                             self._obj_bbox_history, self._obj_frames)
 
                 # Draw + collect detections
-                for box, id_, c, conf in zip(boxes, ids, clss, confs):
+                for _bi, (box, id_, c, conf) in enumerate(zip(boxes, ids, clss, confs)):
                     raw = int(id_)
                     label = names[int(c)]
                     disp = gdi(label, raw)
-                    draw_bbox(im0, box, disp, c, names, self._class_colors)
+                    _state_kw = {}
+                    if p_ne is not None and label == 'cart':
+                        _p = float(p_ne[_bi])
+                        if math.isfinite(_p):
+                            # Every frame feeds the cart's next read (see
+                            # engine/cart_state.py), keyed by display id
+                            # AFTER re-ID above so a re-identified cart keeps
+                            # its evidence.
+                            self._cart_state.add(disp, _p)
+                            self._frame_p_non_empty[raw] = _p
+                            _state_kw = {"state": "loaded" if _p >= CART_STATE_NON_EMPTY_THRESH
+                                         else "empty"}
+                    draw_bbox(im0, box, disp, c, names, self._class_colors, **_state_kw)
 
                     x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
                     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
@@ -1441,7 +1532,7 @@ class TrackingEngine:
                     if names[int(c)] != 'cart':
                         continue
                     cd = gdi('cart', raw)
-                    result = self._classifier.classify(im0, bb)
+                    result = self._classify_cart_read(cd, im0, bb)
                     self._cart_cls_cache[cd] = result
                     self._cls_last_frame[cd] = frame_idx
                     if result.get("quality") == "valid_cart":
@@ -2247,6 +2338,9 @@ class TrackingEngine:
                     "fill": self._peak_pops_snapshot.get(cid, {}).get("fill", "unclassified"),
                     "bag": self._peak_pops_snapshot.get(cid, {}).get("bag", "unclassified"),
                     "quality": self._peak_pops_snapshot.get(cid, {}).get("quality", "unclassified"),
+                    # 3-class backend only: how this cart's reads were decided.
+                    **({"detector_reads": self._cart_state.read_counts(cid)}
+                       if self._uses_cart_state else {}),
                 }
                 for cid in set(list(self._max_pops_per_cart) + list(self._pops_cache))
             },
@@ -2280,6 +2374,19 @@ class TrackingEngine:
                     "where it lifts an unbagged cart's 65 to the 75 floor an "
                     "OUTBOUND abandoned loaded cart already gets without it."
                 ),
+                **({"detector_state": (
+                    "3-class detector backend. Each read's empty / non-empty "
+                    "call is the MEAN detector P(non-empty) over the cart's "
+                    "frames since its previous read (threshold "
+                    f"{CART_STATE_NON_EMPTY_THRESH}). EMPTY reads come from the "
+                    "detector alone (classification.source = 'detector', "
+                    "quality_conf 0.0 because no quality model ran); NON-EMPTY "
+                    "reads go through the quality gate and a fill model that "
+                    "can only answer partial or full, and are dropped when the "
+                    "crop is unreadable. Per-frame frames[].carts[].detector is "
+                    "the raw per-frame call; pops_summary.detector_reads counts "
+                    "the read outcomes."
+                )} if self._uses_cart_state else {}),
             },
             "summary": {
                 "total_people_seen": len(self._all_people_seen),
@@ -2290,6 +2397,7 @@ class TrackingEngine:
                 "medium_priority": sum(1 for e in self._event_log if e["event"] in MEDIUM_EVENTS),
             },
             "processing_info": {
+                "detector_backend": self.detector_backend,
                 "total_frames_processed": frame_idx,
                 "json_sampled_frames": len(self._json_frames),
                 "json_every_n": JSON_EVERY_N_FRAMES,

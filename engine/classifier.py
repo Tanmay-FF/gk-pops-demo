@@ -267,6 +267,21 @@ class CartClassifier:
     @torch.no_grad()
     def classify(self, frame_bgr, bbox) -> dict:
         """Classify a single cart crop. Returns result dict (original path)."""
+        return self._classify_one(frame_bgr, bbox, allow_empty=True)
+
+    def classify_loaded(self, frame_bgr, bbox) -> dict:
+        """Classify a crop the DETECTOR already called non-empty.
+
+        Same quality gate and bag model as classify(), but the fill answer is
+        restricted to the loaded classes: their probabilities are renormalised
+        over just those classes and the argmax taken, and EMPTY_OVERRIDE_THRESH
+        does not apply. `fill_conf` is the renormalised probability. A crop
+        that fails the quality gate is returned exactly as classify() would
+        return it (the caller decides what an unreadable read means).
+        """
+        return self._classify_one(frame_bgr, bbox, allow_empty=False)
+
+    def _classify_one(self, frame_bgr, bbox, allow_empty: bool) -> dict:
         t = self._crop_and_transform(frame_bgr, bbox)
         if t is None:
             return _EMPTY_RESULT_TINY
@@ -304,16 +319,36 @@ class CartClassifier:
             tensor.to(self._weights_device(self._fill_model, self.device)))
         fill_probs = torch.softmax(logits_fill / self._fill_temp, dim=1)[0]
         bag_probs  = torch.softmax(logits_bag  / self._bag_temp,  dim=1)[0]
-        fill_idx   = int(fill_probs.argmax())
         bag_idx    = int(bag_probs.argmax())
 
-        empty_idx = self._fill_classes.index("empty") if "empty" in self._fill_classes else 0
-        if float(fill_probs[empty_idx]) >= EMPTY_OVERRIDE_THRESH:
-            fill_idx = empty_idx
+        if allow_empty:
+            fill_idx = int(fill_probs.argmax())
+            empty_idx = self._fill_classes.index("empty") if "empty" in self._fill_classes else 0
+            if float(fill_probs[empty_idx]) >= EMPTY_OVERRIDE_THRESH:
+                fill_idx = empty_idx
+            fill_conf = float(fill_probs[fill_idx])
+            is_empty = fill_idx == empty_idx
+        else:
+            loaded = [i for i, c in enumerate(self._fill_classes) if c != "empty"]
+            sub = fill_probs[loaded] if loaded else None
+            total = float(sub.sum()) if sub is not None else 0.0
+            if not loaded or not total > 0.0:
+                # A fill model with no loaded class (or a degenerate softmax)
+                # cannot answer "how loaded"; say so rather than guess.
+                return {
+                    "is_valid": True, "quality": "valid_cart",
+                    "fill": "unclassified", "bag": "unclassified",
+                    "quality_conf": valid_prob,
+                    "fill_conf": 0.0, "bag_conf": 0.0,
+                }
+            k = int(sub.argmax())
+            fill_idx = loaded[k]
+            fill_conf = float(sub[k]) / total
+            is_empty = False
 
         fill_lbl = self._fill_classes[fill_idx]
 
-        if fill_idx == empty_idx:
+        if is_empty:
             bag_lbl  = "not_applicable"
             bag_conf = 1.0
         else:
@@ -324,6 +359,6 @@ class CartClassifier:
             "is_valid": True, "quality": "valid_cart",
             "fill": fill_lbl, "bag": bag_lbl,
             "quality_conf": valid_prob,
-            "fill_conf": float(fill_probs[fill_idx]),
+            "fill_conf": fill_conf,
             "bag_conf": bag_conf,
         }

@@ -25,11 +25,15 @@ def outlined_text(im0, text, pos, scale, color, thickness=1):
     cv2.putText(im0, text, pos, _FONT, scale, color, thickness, cv2.LINE_AA)
 
 
-def draw_bbox(im0, box, display_id, cls_id, names, class_colors):
+def draw_bbox(im0, box, display_id, cls_id, names, class_colors, state=None):
+    """`state` (3-class backend only) is appended to the label, e.g.
+    "cart:3 empty", so the overlay shows the detector's per-frame call."""
     x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
     color = class_colors.get(int(cls_id), (255, 255, 255))
     cv2.rectangle(im0, (x1, y1), (x2, y2), color, 2)
     label = f"{names[int(cls_id)]}:{display_id}"
+    if state:
+        label = f"{label} {state}"
     (tw, th), _ = cv2.getTextSize(label, _FONT, 0.8, 2)
     bg_x1 = x1
     bg_x2 = bg_x1 + tw + 20

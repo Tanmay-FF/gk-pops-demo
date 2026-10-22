@@ -21,7 +21,7 @@ REPO = os.path.dirname(HERE)
 #: Need the detection weights and/or the golden clip; everything else is pure
 #: logic and runs anywhere in about a second.
 SLOW = {"test_golden_clip", "test_device_guard", "test_device_guard_e2e",
-        "test_cancel_run_e2e"}
+        "test_cancel_run_e2e", "test_three_class_e2e"}
 
 _SUMMARY_MARKERS = ("passed", "All green", "PASSED")
 

@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from test_golden_clip import (  # noqa: E402
-    Skip, load_baseline, find_clip, run_pipeline, compare,
+    Skip, load_baseline, find_clip, run_pipeline, compare, baseline_backend,
 )
 
 HAS_CUDA = torch.cuda.is_available()
@@ -144,7 +144,7 @@ def test_a_run_started_during_a_case_report_is_correct_anyway():
     settings = baseline["settings"]
 
     import engine.tracker as T
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
 
     frames1, log1 = _capture(engine_obj, clip, settings)
     assert frames1, "run 1 captured no frames"
@@ -216,7 +216,7 @@ def test_two_runs_across_a_failed_case_report_agree():
     settings = baseline["settings"]
 
     import engine.tracker as T
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
 
     # --- run 1: the reference every later run in this process must match -----
     frames1, log1 = _capture(engine_obj, clip, settings)
@@ -274,7 +274,7 @@ def test_a_lost_predictor_does_not_degrade_the_next_run():
     import engine.tracker as T
     from engine import ultralytics_compat
 
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
     frames1, _log1 = _capture(engine_obj, clip, settings)
     assert frames1, "run 1 captured no frames"
     assert ultralytics_compat.tracking_callback_counts(engine_obj.model) == {
@@ -316,7 +316,7 @@ def test_a_stranded_classifier_is_repaired_and_changes_nothing():
     settings = baseline["settings"]
 
     import engine.tracker as T
-    engine_obj = T.TrackingEngine()
+    engine_obj = T.TrackingEngine(detector_backend=baseline_backend(settings))
     # Load the classifiers by doing one real run, then strand one of them the
     # way a half-completed .to("cuda") does.
     frames_before, _ = _capture(engine_obj, clip, settings)

@@ -88,7 +88,7 @@ def environment_fingerprint(refresh: bool = False) -> str:
     return _ENV_FINGERPRINT
 
 
-def make_video_key(path: str) -> str:
+def make_video_key(path: str, backend: Optional[str] = None) -> str:
     """sha1(abs_path + mtime_ns + size + environment fingerprint).
     16 hex chars → cheap collision-safe key.
 
@@ -96,6 +96,11 @@ def make_video_key(path: str) -> str:
     changes the key, so cached trajectories are never reused across a change
     that would have produced different ones. Entries keyed under a previous
     fingerprint simply stop being found; `clear()` still reaps them.
+
+    `backend` (a config.DETECTOR_BACKENDS name) folds in WHICH detector ran
+    and its weights/thresholds: the environment fingerprint only covers the
+    2-class MODEL_PATH, so without it a trajectory tracked by one backend
+    would be replayed as if another had produced it.
     """
     p = os.path.abspath(path)
     try:
@@ -104,6 +109,11 @@ def make_video_key(path: str) -> str:
     except OSError:
         payload = p
     payload = f"{payload}|{environment_fingerprint()}"
+    if backend is not None:
+        # Lazy: detection_backends imports torch, and this module is imported
+        # by tooling that never passes a backend.
+        from .detection_backends import backend_fingerprint
+        payload = f"{payload}|detector={backend_fingerprint(backend)}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
