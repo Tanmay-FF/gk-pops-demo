@@ -351,6 +351,21 @@ def test_classify_loaded_without_a_loaded_class_says_unclassified():
     assert clf.classify_loaded(FRAME_CLS, BB)["fill"] == "unclassified"
 
 
+def test_both_entry_points_run_without_autograd():
+    """A read must never build an autograd graph (memory per crop, and torch
+    warns on every float() of a requires_grad tensor)."""
+    clf = _classifier((5.0, -5.0), (0.0, 1.0, 4.0))
+    seen = []
+
+    def spy(module, inputs, output):
+        seen.append(torch.is_grad_enabled())
+
+    clf._quality_model.register_forward_hook(spy)
+    clf.classify(FRAME_CLS, BB)
+    clf.classify_loaded(FRAME_CLS, BB)
+    assert seen == [False, False], seen
+
+
 def test_classify_is_unchanged_for_loaded_crops():
     clf = _classifier((5.0, -5.0), (0.0, 1.0, 4.0))
     r = clf.classify(FRAME_CLS, BB)

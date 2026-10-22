@@ -264,7 +264,6 @@ class CartClassifier:
 
         return results
 
-    @torch.no_grad()
     def classify(self, frame_bgr, bbox) -> dict:
         """Classify a single cart crop. Returns result dict (original path)."""
         return self._classify_one(frame_bgr, bbox, allow_empty=True)
@@ -281,6 +280,10 @@ class CartClassifier:
         """
         return self._classify_one(frame_bgr, bbox, allow_empty=False)
 
+    # no_grad HERE, on the shared body, not on the public entry points: when it
+    # sat on classify() alone, classify_loaded() ran every read with autograd
+    # on (a graph per crop, and torch's requires_grad scalar warning).
+    @torch.no_grad()
     def _classify_one(self, frame_bgr, bbox, allow_empty: bool) -> dict:
         t = self._crop_and_transform(frame_bgr, bbox)
         if t is None:

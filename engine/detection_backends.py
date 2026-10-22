@@ -230,8 +230,18 @@ class _ProcessStateGuard:
                 print(f"[WARN] could not restore {what} after importing YOLOv5: {e}")
 
         attempt("OpenCV thread count", lambda: cv2.setNumThreads(self._cv2_threads))
-        attempt("warning filters", lambda: warnings.filters.__setitem__(
-            slice(None), self._warn_filters))
+
+        def restore_warning_filters():
+            warnings.filters[:] = self._warn_filters
+            # Editing the list directly bypasses the version counter that
+            # filterwarnings() bumps; without it, per-module warning
+            # registries can keep "ignore" decisions made while YOLOv5's
+            # blanket UserWarning filter was in force.
+            mutated = getattr(warnings, "_filters_mutated", None)
+            if callable(mutated):
+                mutated()
+
+        attempt("warning filters", restore_warning_filters)
         attempt("numpy print options", lambda: np.set_printoptions(**self._np_print))
         attempt("torch print options", lambda: torch.set_printoptions(**self._torch_print))
 
