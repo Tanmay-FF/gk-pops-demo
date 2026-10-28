@@ -1247,6 +1247,19 @@ class TrackingEngine:
             ok, im0 = cap.read()
             if not ok:
                 break
+            # The classifiers' copy of this frame, taken BEFORE anything is
+            # drawn on it. `im0` becomes the output video frame: draw_bbox()
+            # and draw_centroid_trail() below paint box outlines, "person:6" /
+            # "cart:3" label banners and each cart's trail dot straight onto
+            # it, and classification used to crop that painted frame. The
+            # quality model was trained on clean crops, so on held-out clips it
+            # rejected 49% of crops from the painted frame against 29% of the
+            # same boxes from a clean one (54 rejected only because of the
+            # overlay, 0 the other way), and the fill model read 44 empty
+            # carts "partial" that it reads "empty" when clean (7 the
+            # reverse). One copy of the decoded frame per frame; the output
+            # video is unchanged.
+            im0_clean = im0.copy()
             _is_edge = (_frame_no == 0 or _frame_no == total_frames - 1)
             _now = time.perf_counter()
             if _is_edge or (_frame_no % _prog_every == 0
@@ -1441,7 +1454,8 @@ class TrackingEngine:
                     if names[int(c)] != 'cart':
                         continue
                     cd = gdi('cart', raw)
-                    result = self._classifier.classify(im0, bb)
+                    # im0_clean, never im0: see where it is taken.
+                    result = self._classifier.classify(im0_clean, bb)
                     self._cart_cls_cache[cd] = result
                     self._cls_last_frame[cd] = frame_idx
                     if result.get("quality") == "valid_cart":

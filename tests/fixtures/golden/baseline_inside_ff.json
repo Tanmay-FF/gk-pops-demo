@@ -22,7 +22,7 @@
     "merch_removed": false,
     "owner": null,
     "peak_event": "PUSHOUT ALERT",
-    "peak_frame": 343
+    "peak_frame": 351
    },
    "C3": {
     "abandoned": false,
@@ -34,11 +34,11 @@
    },
    "C4": {
     "abandoned": false,
-    "max_score": 30,
+    "max_score": 35,
     "merch_removed": false,
     "owner": null,
     "peak_event": "UNLINKED EXIT",
-    "peak_frame": 417
+    "peak_frame": 415
    }
   },
   "events": [
@@ -49,7 +49,7 @@
     "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
     "fill": "full",
-    "frame": 32,
+    "frame": 24,
     "linked": false,
     "pops_score": 75,
     "speed_status": "STATIC"
@@ -61,16 +61,28 @@
     "direction": "OUTBOUND",
     "event": "MEDIUM PRIORITY",
     "fill": "partial",
-    "frame": 136,
+    "frame": 135,
     "linked": true,
+    "pops_score": 35,
+    "speed_status": "MEDIUM"
+   },
+   {
+    "abandoned": false,
+    "bag": "bagged",
+    "cart_id": 4,
+    "direction": "OUTBOUND",
+    "event": "UNLINKED EXIT",
+    "fill": "partial",
+    "frame": 406,
+    "linked": false,
     "pops_score": 35,
     "speed_status": "MEDIUM"
    }
   ],
   "summary": {
    "high_priority": 1,
-   "medium_priority": 1,
-   "total_events": 2,
+   "medium_priority": 2,
+   "total_events": 3,
    "total_links_established": 3
   }
  },
@@ -8154,9 +8166,9 @@
   }
  },
  "provenance": {
-  "python": "3.12.9",
+  "python": "3.11.9",
   "tracker_config_sha": "26104b659248",
-  "ultralytics": "8.4.40",
+  "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"
  },
  "settings": {
