@@ -782,7 +782,7 @@ def build_detection_model(backend: str, device: str, model_path: Optional[str] =
     elif backend == "yolo26_3class":
         det = Yolo26ThreeClassDetector(
             C.Y26_WEIGHTS_PATH, device=device,
-            conf=C.Y26_CONF, iou=C.Y26_IOU, imgsz=C.Y26_IMGSZ, class_names=names3)
+            conf=C.Y26_TRACK_CONF, iou=C.Y26_IOU, imgsz=C.Y26_IMGSZ, class_names=names3)
     else:  # DETECTOR_BACKENDS grew without this factory learning the new name
         raise DetectionBackendError(f"no factory for backend {backend!r}")
     model = DirectTrackingModel(det, backend)
@@ -801,7 +801,8 @@ def backend_fingerprint(backend: str) -> str:
             extra = f"conf={C.V5_CONF},iou={C.V5_IOU},imgsz={C.V5_IMGSZ}"
         elif backend == "yolo26_3class":
             path = C.Y26_WEIGHTS_PATH
-            extra = f"conf={C.Y26_CONF},iou={C.Y26_IOU},imgsz={C.Y26_IMGSZ}"
+            extra = (f"conf={C.Y26_TRACK_CONF},iou={C.Y26_IOU},imgsz={C.Y26_IMGSZ},"
+                     f"state_min_conf={C.CART_STATE_MIN_CONF}")
         else:
             path = C.MODEL_PATH
             extra = f"conf={C.ULTRALYTICS_TRACK_CONF}" if backend == "ultralytics_direct" else ""

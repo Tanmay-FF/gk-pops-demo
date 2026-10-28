@@ -24,7 +24,7 @@ import torch
 from ultralytics import YOLO
 
 from .config import (
-    MODEL_PATH, TRACKER_CONFIG, DETECTOR_BACKEND, CART_STATE_NON_EMPTY_THRESH,
+    MODEL_PATH, TRACKER_CONFIG, DETECTOR_BACKEND, CART_STATE_NON_EMPTY_THRESH, CART_STATE_MIN_CONF,
     COLOR_PERSON, COLOR_CART,
     YOLO_IMGSZ, CLASSIFY_EVERY_N_FRAMES, JSON_EVERY_N_FRAMES,
     PROGRESS_MAX_UPDATES, PROGRESS_MIN_INTERVAL_S,
@@ -1454,12 +1454,14 @@ class TrackingEngine:
                     disp = gdi(label, raw)
                     _state_kw = {}
                     if p_ne is not None and label == 'cart':
-                        _p = float(p_ne[_bi])
-                        if math.isfinite(_p):
-                            # Every frame feeds the cart's next read (see
-                            # engine/cart_state.py), keyed by display id
-                            # AFTER re-ID above so a re-identified cart keeps
-                            # its evidence.
+                        _p = _cart_state.usable_sample(p_ne[_bi], conf, CART_STATE_MIN_CONF)
+                        if _p is not None:
+                            # Every confidently detected frame feeds the cart's
+                            # next read (see engine/cart_state.py), keyed by
+                            # display id AFTER re-ID above so a re-identified
+                            # cart keeps its evidence. Boxes the tracker keeps
+                            # below CART_STATE_MIN_CONF still track, but do
+                            # not vote.
                             self._cart_state.add(disp, _p)
                             self._frame_p_non_empty[raw] = _p
                             _state_kw = {"state": "loaded" if _p >= CART_STATE_NON_EMPTY_THRESH
@@ -2378,7 +2380,9 @@ class TrackingEngine:
                     "3-class detector backend. Each read's empty / non-empty "
                     "call is the MEAN detector P(non-empty) over the cart's "
                     "frames since its previous read (threshold "
-                    f"{CART_STATE_NON_EMPTY_THRESH}). EMPTY reads come from the "
+                    f"{CART_STATE_NON_EMPTY_THRESH}), counting only frames where "
+                    f"the cart was detected at confidence >= {CART_STATE_MIN_CONF}; "
+                    "weaker boxes keep the track alive but do not vote. EMPTY reads come from the "
                     "detector alone (classification.source = 'detector', "
                     "quality_conf 0.0 because no quality model ran); NON-EMPTY "
                     "reads go through the quality gate and a fill model that "

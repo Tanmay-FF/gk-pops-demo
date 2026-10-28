@@ -106,11 +106,11 @@ def test_matches_predict_on_real_frames():
 
     frames = _frames()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    det = DB.Yolo26ThreeClassDetector(C.Y26_WEIGHTS_PATH, device, C.Y26_CONF, C.Y26_IOU, C.Y26_IMGSZ, NAMES3)
+    det = DB.Yolo26ThreeClassDetector(C.Y26_WEIGHTS_PATH, device, C.Y26_TRACK_CONF, C.Y26_IOU, C.Y26_IMGSZ, NAMES3)
     ref = YOLO(C.Y26_WEIGHTS_PATH)
     n_carts = n_person = n_dup = 0
     for fi, im in enumerate(frames, 1):
-        r = ref.predict(im, conf=C.Y26_CONF, iou=C.Y26_IOU, imgsz=C.Y26_IMGSZ, device=device, verbose=False)[0].boxes
+        r = ref.predict(im, conf=C.Y26_TRACK_CONF, iou=C.Y26_IOU, imgsz=C.Y26_IMGSZ, device=device, verbose=False)[0].boxes
         rx, rc, rk = r.xyxy.cpu().numpy(), r.conf.cpu().numpy(), r.cls.cpu().numpy().astype(int)
         d = det.detect(im)
 

@@ -58,6 +58,15 @@ def test_bad_threshold_is_refused():
         raise AssertionError(f"threshold {t} accepted")
 
 
+def test_only_confident_boxes_vote():
+    assert CS.usable_sample(0.9, 0.30, 0.25) == 0.9
+    assert CS.usable_sample(0.9, 0.25, 0.25) == 0.9, "the threshold is inclusive"
+    assert CS.usable_sample(0.9, 0.12, 0.25) is None, "a weak box tracked but must not vote"
+    for p, c in ((float("nan"), 0.9), (0.9, float("nan")), (None, 0.9), (0.9, None), ("x", 0.9)):
+        assert CS.usable_sample(p, c, 0.25) is None, (p, c)
+    assert CS.usable_sample(1.4, 0.9, 0.25) == 1.0, "probabilities are clamped"
+
+
 def test_detector_empty_result_is_shaped_like_a_classifier_result():
     r = CS.detector_empty_result(0.2)
     for key in ("is_valid", "quality", "fill", "bag", "quality_conf", "fill_conf", "bag_conf"):

@@ -57,6 +57,24 @@ def _finite_probability(value) -> float | None:
     return min(1.0, max(0.0, p))
 
 
+def usable_sample(p_non_empty, det_conf, min_conf: float) -> float | None:
+    """One tracked cart box's vote for its next read, or None if it must not vote.
+
+    The tracker is fed boxes down to a low confidence (as Model.track() does)
+    so tracks survive weak frames, but only a box detected at `min_conf` or
+    above may say empty / non-empty: a barely-detected cart's class guess is
+    noise. None also for an unusable P(non-empty) or confidence.
+    """
+    p = _finite_probability(p_non_empty)
+    try:
+        c = float(det_conf)
+    except (TypeError, ValueError):
+        return None
+    if p is None or not math.isfinite(c) or c < float(min_conf):
+        return None
+    return p
+
+
 def decide_cart_state(samples: Iterable, threshold: float) -> CartStateRead:
     """Mean P(non-empty) over `samples` against `threshold`.
 

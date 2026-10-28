@@ -689,11 +689,12 @@
   },
   "145": {
    "carts": [
+    1,
     2
    ],
    "counts": [
     1,
-    1,
+    2,
     1
    ],
    "persons": [
@@ -981,10 +982,12 @@
    ]
   },
   "166": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -993,10 +996,12 @@
    ]
   },
   "167": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1005,10 +1010,12 @@
    ]
   },
   "168": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1017,10 +1024,12 @@
    ]
   },
   "169": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1038,10 +1047,12 @@
    "persons": []
   },
   "170": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1050,10 +1061,12 @@
    ]
   },
   "171": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1062,10 +1075,12 @@
    ]
   },
   "172": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1074,10 +1089,12 @@
    ]
   },
   "173": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1086,10 +1103,12 @@
    ]
   },
   "174": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1098,10 +1117,12 @@
    ]
   },
   "175": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1110,10 +1131,12 @@
    ]
   },
   "176": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -1122,10 +1145,12 @@
    ]
   },
   "177": {
-   "carts": [],
+   "carts": [
+    1
+   ],
    "counts": [
     2,
-    0,
+    1,
     1
    ],
    "persons": [
@@ -2078,11 +2103,12 @@
     1
    ],
    "counts": [
-    1,
+    2,
     1,
     1
    ],
    "persons": [
+    1,
     2
    ]
   },
@@ -3343,77 +3369,91 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "334": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "335": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "336": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "337": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "338": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "339": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "34": {
    "carts": [],
@@ -3429,110 +3469,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "341": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "342": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "343": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "344": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "345": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "346": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "347": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "348": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "349": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "35": {
    "carts": [],
@@ -3548,110 +3608,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "351": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "352": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "353": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "354": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "355": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "356": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "357": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "358": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "359": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "36": {
    "carts": [
@@ -3669,110 +3749,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "361": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "362": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "363": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "364": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "365": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "366": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "367": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "368": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "369": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "37": {
    "carts": [
@@ -3790,110 +3890,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "371": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "372": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "373": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "374": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "375": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "376": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "377": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "378": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "379": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "38": {
    "carts": [
@@ -3911,110 +4031,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "381": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "382": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "383": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "384": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "385": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "386": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "387": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "388": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "389": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "39": {
    "carts": [
@@ -4032,110 +4172,130 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "391": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "392": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "393": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "394": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "395": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "396": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "397": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "398": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "399": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "4": {
    "carts": [],
@@ -4162,77 +4322,91 @@
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "401": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "402": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "403": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "404": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "405": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "406": {
    "carts": [
     1
    ],
    "counts": [
-    0,
+    1,
     1,
     1
    ],
-   "persons": []
+   "persons": [
+    3
+   ]
   },
   "407": {
    "carts": [
@@ -5149,7 +5323,7 @@
   }
  },
  "provenance": {
-  "detector": "yolo26_3class:44005017:1793028244000000000:conf=0.25,iou=0.7,imgsz=640",
+  "detector": "yolo26_3class:44005017:1793028244000000000:conf=0.1,iou=0.7,imgsz=640,state_min_conf=0.25",
   "python": "3.11.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",

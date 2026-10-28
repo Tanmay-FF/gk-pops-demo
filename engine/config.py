@@ -61,9 +61,15 @@ V5_IMGSZ = 640
 #: in, and the mode this backend reproduces (with the two cart classes merged
 #: before NMS, see engine/detection_backends.py).
 Y26_WEIGHTS_PATH = r"D:\gatekeeper_projects\dillion\yolov26m_3class\weights\best.pt"
-#: conf as for YOLOv5 (the user's choice); IoU is ultralytics' predict default,
-#: which is what the held-out comparison ran with.
-Y26_CONF = 0.25
+#: Detection confidence for boxes handed to the TRACKER. 0.1 is what
+#: ultralytics' Model.track() uses on the 2-class path (ULTRALYTICS_TRACK_CONF):
+#: ByteTrack's second association needs the 0.1-0.3 boxes. At 0.25 the
+#: tracker lost them and tracked ~21% fewer person boxes on the primary golden
+#: clip (353 vs 428 at 0.1; the 2-class engine tracks 449). Which tracked carts
+#: may VOTE empty / non-empty is gated separately by CART_STATE_MIN_CONF.
+Y26_TRACK_CONF = 0.1
+#: IoU is ultralytics' predict default, which is what the held-out comparison
+#: ran with.
 Y26_IOU = 0.7
 Y26_IMGSZ = 640
 
@@ -75,6 +81,11 @@ THREE_CLASS_NON_EMPTY_CART = "non_empty_cart"
 #: A cart read is NON-EMPTY when the mean detector P(non-empty) over the
 #: cart's frames since its previous read reaches this.
 CART_STATE_NON_EMPTY_THRESH = 0.5
+#: A tracked cart box contributes its P(non-empty) to the cart's next read only
+#: when its detection confidence reaches this (the user's 0.25). The tracker
+#: may carry boxes down to Y26_TRACK_CONF, but a barely-detected cart's empty /
+#: non-empty guess is noise and must not vote.
+CART_STATE_MIN_CONF = 0.25
 
 #: Where the sample-video dropdown looks. This used to be an absolute path
 #: into a sibling checkout on one particular D: drive, which meant the
