@@ -28,8 +28,14 @@ TRACKER_CONFIG = r"engine\botsort_retail.yaml"
 #:   "yolov5_3class"      -- YOLOv5 person / empty_cart / non_empty_cart,
 #:                           through the same driver. Its empty / non-empty
 #:                           call decides which carts reach the classifiers.
-DETECTOR_BACKEND = "yolov5_3class"
-DETECTOR_BACKENDS = ("ultralytics_track", "ultralytics_direct", "yolov5_3class")
+#:   "yolo26_3class"      -- YOLOv26m with the same three classes, same
+#:                           driver and same read logic. Beat YOLOv5 per cart
+#:                           on the 56 held-out clips (accuracy 0.920 vs
+#:                           0.873, McNemar p = 0.013).
+DETECTOR_BACKEND = "yolo26_3class"
+DETECTOR_BACKENDS = ("ultralytics_track", "ultralytics_direct", "yolov5_3class", "yolo26_3class")
+#: The backends whose detector reports P(non-empty) per cart.
+THREE_CLASS_BACKENDS = ("yolov5_3class", "yolo26_3class")
 
 #: Detection confidence for "ultralytics_direct". ultralytics' Model.track()
 #: forces conf=0.1 when the caller passes none (ByteTrack's second
@@ -47,10 +53,24 @@ V5_WEIGHTS_PATH = (r"D:\gatekeeper_projects\dillion\yolov5"
 V5_CONF = 0.25
 V5_IOU = 0.45
 V5_IMGSZ = 640
-#: Class names the 3-class checkpoint must carry; checked at load.
-V5_CLASS_PERSON = "person"
-V5_CLASS_EMPTY_CART = "empty_cart"
-V5_CLASS_NON_EMPTY_CART = "non_empty_cart"
+
+#: YOLOv26m person / empty_cart / non_empty_cart (ultralytics format). The
+#: checkpoint is saved with its NMS-free one-to-one head switched OFF
+#: (head._end2end = False), so ultralytics runs it with the one-to-many head
+#: plus per-class NMS; that is the mode its validation metrics were measured
+#: in, and the mode this backend reproduces (with the two cart classes merged
+#: before NMS, see engine/detection_backends.py).
+Y26_WEIGHTS_PATH = r"D:\gatekeeper_projects\dillion\yolov26m_3class\weights\best.pt"
+#: conf as for YOLOv5 (the user's choice); IoU is ultralytics' predict default,
+#: which is what the held-out comparison ran with.
+Y26_CONF = 0.25
+Y26_IOU = 0.7
+Y26_IMGSZ = 640
+
+#: Class names every 3-class checkpoint must carry; checked at load.
+THREE_CLASS_PERSON = "person"
+THREE_CLASS_EMPTY_CART = "empty_cart"
+THREE_CLASS_NON_EMPTY_CART = "non_empty_cart"
 
 #: A cart read is NON-EMPTY when the mean detector P(non-empty) over the
 #: cart's frames since its previous read reaches this.

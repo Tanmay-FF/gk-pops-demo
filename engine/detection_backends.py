@@ -333,6 +333,26 @@ def _yolov5_on_path(repo: Path):
             del sys.modules[stub_name]
 
 
+def merge_cart_scores(probs: torch.Tensor, person_i: int, empty_i: int, non_empty_i: int,
+                      dim: int = -1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The one place the two cart classes become one, for every 3-class backend.
+
+    `probs` holds per-class probabilities along `dim`. Returns three tensors,
+    each keeping `dim` with size 1: p_person, p_cart = max(p_empty,
+    p_non_empty) (so a cart box ranks by its best cart class, exactly as
+    3-class NMS would rank it), and share = p_non_empty / (p_empty +
+    p_non_empty), i.e. P(non-empty | cart). Any other class is ignored.
+    """
+    nc = probs.shape[dim]
+    for name, i in (("person", person_i), ("empty_cart", empty_i), ("non_empty_cart", non_empty_i)):
+        if not 0 <= i < nc:
+            raise ValueError(f"{name} index {i} out of range for {nc} classes")
+    pick = lambda i: probs.narrow(dim, i, 1)
+    p_empty, p_non_empty = pick(empty_i), pick(non_empty_i)
+    share = p_non_empty / (p_empty + p_non_empty).clamp_min(1e-9)
+    return pick(person_i), torch.maximum(p_empty, p_non_empty), share
+
+
 def merge_cart_classes(pred: torch.Tensor, person_i: int, empty_i: int,
                        non_empty_i: int) -> torch.Tensor:
     """Collapse YOLOv5's two cart classes into one before NMS.
@@ -350,17 +370,9 @@ def merge_cart_classes(pred: torch.Tensor, person_i: int, empty_i: int,
     `share * obj`; recover_share() divides them. Any other class the
     checkpoint may have is dropped.
     """
-    if pred.ndim != 3:
+    if pred.ndim != 3 or pred.shape[2] < 6:
         raise ValueError(f"expected (B, N, 5+nc) predictions, got {tuple(pred.shape)}")
-    nc = pred.shape[2] - 5
-    for name, i in (("person", person_i), ("empty_cart", empty_i), ("non_empty_cart", non_empty_i)):
-        if not 0 <= i < nc:
-            raise ValueError(f"{name} index {i} out of range for {nc} classes")
-    p_person = pred[..., 5 + person_i:6 + person_i]
-    p_empty = pred[..., 5 + empty_i:6 + empty_i]
-    p_non_empty = pred[..., 5 + non_empty_i:6 + non_empty_i]
-    p_cart = torch.maximum(p_empty, p_non_empty)
-    share = p_non_empty / (p_empty + p_non_empty).clamp_min(1e-9)
+    p_person, p_cart, share = merge_cart_scores(pred[..., 5:], person_i, empty_i, non_empty_i, dim=-1)
     return torch.cat([pred[..., :5], p_person, p_cart, share, torch.ones_like(share)], dim=-1)
 
 
@@ -374,6 +386,24 @@ def recover_share(scaled_share: np.ndarray, scaled_one: np.ndarray) -> np.ndarra
     ok = scaled_one > 0
     out[ok] = np.clip(scaled_share[ok] / scaled_one[ok], 0.0, 1.0)
     return out.astype(np.float32)
+
+
+def _three_class_indices(names, class_names: Mapping[str, str], weights: str):
+    """Resolve a 3-class checkpoint's (person, empty_cart, non_empty_cart)
+    class indices BY NAME, so a checkpoint with another class order still
+    maps correctly. Returns (raw_names, (person_i, empty_i, non_empty_i))."""
+    raw = names if isinstance(names, Mapping) else dict(enumerate(names))
+    raw_names = {int(k): str(v) for k, v in raw.items()}
+    by_name = {v: k for k, v in raw_names.items()}
+    if len(by_name) != len(raw_names):
+        raise DetectionBackendError(f"{weights} has duplicate class names: {raw_names}")
+    try:
+        return raw_names, (by_name[class_names["person"]], by_name[class_names["empty_cart"]],
+                           by_name[class_names["non_empty_cart"]])
+    except KeyError as e:
+        raise DetectionBackendError(
+            f"{weights} has classes {raw_names}; expected "
+            f"{sorted(class_names.values())} (missing {e})") from None
 
 
 class YoloV5ThreeClassDetector:
@@ -418,17 +448,8 @@ class YoloV5ThreeClassDetector:
         self._stride = int(net.stride) if not isinstance(net.stride, torch.Tensor) else int(net.stride.max())
         self._conf, self._iou, self._imgsz = float(conf), float(iou), int(imgsz)
 
-        raw = net.names if isinstance(net.names, Mapping) else dict(enumerate(net.names))
-        self.raw_names = {int(k): str(v) for k, v in raw.items()}
-        by_name = {v: k for k, v in self.raw_names.items()}
-        try:
-            self._person_i = by_name[class_names["person"]]
-            self._empty_i = by_name[class_names["empty_cart"]]
-            self._non_empty_i = by_name[class_names["non_empty_cart"]]
-        except KeyError as e:
-            raise DetectionBackendError(
-                f"{weights} has classes {self.raw_names}; expected "
-                f"{sorted(class_names.values())} (missing {e})") from None
+        self.raw_names, (self._person_i, self._empty_i, self._non_empty_i) = \
+            _three_class_indices(net.names, class_names, weights)
         self.names = dict(UNIFIED_NAMES)
 
     @property
@@ -462,6 +483,123 @@ class YoloV5ThreeClassDetector:
         cls = out[:, 5].astype(np.float32)
         share = recover_share(out[:, 6], out[:, 7])
         p_non_empty = np.where(cls == CART_CLS, share, np.nan).astype(np.float32)
+        return Detections(
+            xyxy=out[:, :4].astype(np.float32),
+            conf=out[:, 4].astype(np.float32),
+            cls=cls,
+            p_non_empty=p_non_empty,
+            orig_shape=tuple(frame.shape[:2]),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Backend 3: YOLOv26 person / empty_cart / non_empty_cart (ultralytics format)
+# ---------------------------------------------------------------------------
+class Yolo26ThreeClassDetector:
+    """YOLOv26 3-class, run the way ultralytics' predict() runs it, with the
+    two cart classes merged before NMS.
+
+    ultralytics' Results keep only each box's top class, so P(non-empty)
+    cannot be read off predict(). This class therefore does predict()'s steps
+    itself, on the same fused model:
+
+      LetterBox(imgsz, auto=True, stride)  BGR->RGB, CHW, /255   (pre_transform + preprocess)
+      net(t) -> (B, 4 + nc, N): xywh + sigmoid class probs        (Detect._inference)
+      merge_cart_scores -> [xywh, p_person, p_cart, share]
+      ultralytics nms.non_max_suppression(nc=2): `share` rides as an extra
+        column, which that function carries through UNSCALED (no objectness
+        in this head, unlike YOLOv5)
+      ops.scale_boxes back to the frame                            (construct_result)
+
+    Only the non-end-to-end head is supported. The supplied checkpoint is
+    saved with its one-to-one head disabled, so ultralytics itself runs it this
+    way; an end-to-end checkpoint is refused rather than silently run in a
+    mode its metrics were not measured in.
+
+    Equivalence with predict() is pinned by tests/test_yolo26_backend.py:
+    person boxes identical, every cart box identical with conf equal to the
+    best of the cart classes predict() reported at that box.
+    """
+
+    provides_cart_state = True
+
+    def __init__(self, weights: str, device: str, conf: float, iou: float, imgsz: int,
+                 class_names: Mapping[str, str]):
+        if not os.path.isfile(weights):
+            raise DetectionBackendError(f"3-class detector weights not found: {weights}")
+        if not 0.0 < conf < 1.0 or not 0.0 < iou <= 1.0:
+            raise DetectionBackendError(f"conf must be in (0, 1) and iou in (0, 1]; got {conf}, {iou}")
+        if int(imgsz) <= 0 or int(imgsz) % 32:
+            raise DetectionBackendError(f"imgsz must be a positive multiple of 32, got {imgsz}")
+        from ultralytics import YOLO
+        from ultralytics.data.augment import LetterBox
+        from ultralytics.nn.modules.head import Detect
+        from ultralytics.utils import nms, ops
+
+        try:
+            yolo = YOLO(weights)
+        except Exception as e:
+            raise DetectionBackendError(f"could not load {weights}: {e}") from e
+        if yolo.task != "detect":
+            raise DetectionBackendError(f"{weights} is a {yolo.task!r} model, not 'detect'")
+        net = yolo.model
+        head = net.model[-1]
+        if not isinstance(head, Detect):
+            raise DetectionBackendError(f"{weights}: last layer is {type(head).__name__}, not Detect")
+        if getattr(head, "end2end", False):
+            raise DetectionBackendError(
+                f"{weights} runs its end-to-end (NMS-free) head; this backend reproduces the "
+                f"one-to-many + NMS path only")
+        self.raw_names, (self._person_i, self._empty_i, self._non_empty_i) = \
+            _three_class_indices(yolo.names, class_names, weights)
+        self._nc = int(head.nc)
+        # Same fusion predict()'s AutoBackend applies (Conv+BN folded); the
+        # one-to-many head stays because end2end is off.
+        net = net.fuse(verbose=False)
+        net.eval()
+        for p in net.parameters():
+            p.requires_grad_(False)
+        self._net = net
+        self._stride = int(max(net.stride.tolist())) if isinstance(net.stride, torch.Tensor) else int(net.stride)
+        self._letterbox = LetterBox((int(imgsz), int(imgsz)), auto=True, stride=self._stride)
+        self._nms, self._ops = nms, ops
+        self._conf, self._iou, self._imgsz = float(conf), float(iou), int(imgsz)
+        self.names = dict(UNIFIED_NAMES)
+        self.to(device)
+
+    @property
+    def module(self) -> torch.nn.Module:
+        return self._net
+
+    def to(self, device) -> "Yolo26ThreeClassDetector":
+        self._net.to(device)
+        return self
+
+    def detect(self, frame: np.ndarray, imgsz: Optional[int] = None) -> Detections:
+        """`imgsz` is accepted for interface parity and ignored: this model's
+        input size is its own configured Y26_IMGSZ."""
+        _check_frame(frame)
+        img = self._letterbox(image=frame)
+        img = np.ascontiguousarray(img[..., ::-1].transpose((2, 0, 1)))  # HWC BGR -> CHW RGB
+        dev = module_device(self._net)
+        t = torch.from_numpy(img).to(dev).float().div_(255.0).unsqueeze(0)
+        with torch.inference_mode():
+            pred = self._net(t)
+            if isinstance(pred, (list, tuple)):
+                pred = pred[0]
+            if pred.ndim != 3 or pred.shape[1] != 4 + self._nc:
+                raise DetectionBackendError(
+                    f"unexpected YOLOv26 output {tuple(pred.shape)}; expected (B, {4 + self._nc}, N)")
+            p_person, p_cart, share = merge_cart_scores(
+                pred[:, 4:].float(), self._person_i, self._empty_i, self._non_empty_i, dim=1)
+            merged = torch.cat([pred[:, :4].float(), p_person, p_cart, share], dim=1)
+            out = self._nms.non_max_suppression(merged, self._conf, self._iou, nc=2)[0]
+            if out is None or len(out) == 0:
+                return Detections.empty(frame.shape)
+            out[:, :4] = self._ops.scale_boxes(t.shape[2:], out[:, :4], frame.shape)
+            out = out.detach().cpu().numpy()
+        cls = out[:, 5].astype(np.float32)
+        p_non_empty = np.where(cls == CART_CLS, np.clip(out[:, 6], 0.0, 1.0), np.nan).astype(np.float32)
         return Detections(
             xyxy=out[:, :4].astype(np.float32),
             conf=out[:, 4].astype(np.float32),
@@ -614,9 +752,10 @@ def build_detection_model(backend: str, device: str, model_path: Optional[str] =
     """The detector object TrackingEngine stores as `self.model`.
 
     "ultralytics_track" returns a plain ultralytics YOLO (the original path,
-    byte-for-byte); the other two return a DirectTrackingModel. `model_path`
-    overrides config.MODEL_PATH for the two 2-class backends and is ignored by
-    "yolov5_3class" (which loads V5_WEIGHTS_PATH).
+    byte-for-byte); every other backend returns a DirectTrackingModel.
+    `model_path` overrides config.MODEL_PATH for the two 2-class backends and
+    is ignored by the 3-class ones (which load V5_WEIGHTS_PATH /
+    Y26_WEIGHTS_PATH).
     """
     from . import config as C
 
@@ -632,15 +771,20 @@ def build_detection_model(backend: str, device: str, model_path: Optional[str] =
         model = YOLO(weights_2class)
         model.to(device)
         return model
+    names3 = {"person": C.THREE_CLASS_PERSON, "empty_cart": C.THREE_CLASS_EMPTY_CART,
+              "non_empty_cart": C.THREE_CLASS_NON_EMPTY_CART}
     if backend == "ultralytics_direct":
         det = UltralyticsDetector(weights_2class, conf=C.ULTRALYTICS_TRACK_CONF)
-    else:
+    elif backend == "yolov5_3class":
         det = YoloV5ThreeClassDetector(
             C.V5_WEIGHTS_PATH, C.V5_REPO_PATH, device=device,
-            conf=C.V5_CONF, iou=C.V5_IOU, imgsz=C.V5_IMGSZ,
-            class_names={"person": C.V5_CLASS_PERSON,
-                         "empty_cart": C.V5_CLASS_EMPTY_CART,
-                         "non_empty_cart": C.V5_CLASS_NON_EMPTY_CART})
+            conf=C.V5_CONF, iou=C.V5_IOU, imgsz=C.V5_IMGSZ, class_names=names3)
+    elif backend == "yolo26_3class":
+        det = Yolo26ThreeClassDetector(
+            C.Y26_WEIGHTS_PATH, device=device,
+            conf=C.Y26_CONF, iou=C.Y26_IOU, imgsz=C.Y26_IMGSZ, class_names=names3)
+    else:  # DETECTOR_BACKENDS grew without this factory learning the new name
+        raise DetectionBackendError(f"no factory for backend {backend!r}")
     model = DirectTrackingModel(det, backend)
     model.to(device)
     return model
@@ -655,6 +799,9 @@ def backend_fingerprint(backend: str) -> str:
         if backend == "yolov5_3class":
             path = C.V5_WEIGHTS_PATH
             extra = f"conf={C.V5_CONF},iou={C.V5_IOU},imgsz={C.V5_IMGSZ}"
+        elif backend == "yolo26_3class":
+            path = C.Y26_WEIGHTS_PATH
+            extra = f"conf={C.Y26_CONF},iou={C.Y26_IOU},imgsz={C.Y26_IMGSZ}"
         else:
             path = C.MODEL_PATH
             extra = f"conf={C.ULTRALYTICS_TRACK_CONF}" if backend == "ultralytics_direct" else ""

@@ -1,4 +1,5 @@
-"""End to end on the 3-class detector backend (docs/three_class_detector_plan.md).
+"""End to end on every 3-class detector backend (docs/three_class_detector_plan.md):
+config.THREE_CLASS_BACKENDS, each run whose weights are present.
 
 On the primary golden clip, through the real engine:
   * the run completes and the tracking JSON says which backend produced it;
@@ -11,8 +12,9 @@ On the primary golden clip, through the real engine:
     protects on the original path, re-proved for the DirectTrackingModel.
 
 Run-against-run, not against a committed baseline: the 3-class baselines are
-tests/test_golden_clip.py's job. Needs CUDA, the YOLOv5 repo and weights at the
-config paths, and the golden clip; skips otherwise.
+tests/test_golden_clip.py's job. Needs CUDA, each backend's weights (and for
+YOLOv5 its repo) at the config paths, and the golden clip; a backend whose
+files are missing is skipped, and the test skips only if every one is.
 """
 import contextlib
 import io
@@ -29,19 +31,24 @@ import torch  # noqa: E402
 
 from test_golden_clip import Skip, load_baseline, find_clip, run_pipeline, compare  # noqa: E402
 
-BACKEND = "yolov5_3class"
-
-
-def _require_environment():
+def _required_files(backend):
     from engine import config as C
 
+    if backend == "yolov5_3class":
+        return (C.V5_WEIGHTS_PATH, os.path.join(C.V5_REPO_PATH, "models", "common.py"))
+    if backend == "yolo26_3class":
+        return (C.Y26_WEIGHTS_PATH,)
+    raise AssertionError(f"no file list for 3-class backend {backend!r}; add it here")
+
+
+def _require_environment(backend):
     if not torch.cuda.is_available():
         raise Skip("no CUDA")
-    for path in (C.V5_WEIGHTS_PATH, os.path.join(C.V5_REPO_PATH, "models", "common.py")):
+    for path in _required_files(backend):
         if not os.path.exists(path):
             raise Skip(f"missing {path}")
     baseline = load_baseline()
-    return find_clip(baseline), dict(baseline["settings"], detector_backend=BACKEND)
+    return find_clip(baseline), dict(baseline["settings"], detector_backend=backend)
 
 
 def _strict_json(text):
@@ -71,8 +78,24 @@ def _run(engine_obj, clip, settings):
     return frames, _strict_json(holder["json"])
 
 
-def test_three_class_run_reports_detector_state_and_survives_offload():
-    clip, settings = _require_environment()
+def test_three_class_runs_report_detector_state_and_survive_offload():
+    from engine import config as C
+
+    ran, skipped = [], []
+    for backend in C.THREE_CLASS_BACKENDS:
+        try:
+            clip, settings = _require_environment(backend)
+        except Skip as why:
+            skipped.append(f"{backend}: {why}")
+            continue
+        _check_backend(backend, clip, settings)
+        ran.append(backend)
+    if not ran:
+        raise Skip("; ".join(skipped))
+    print(f"  ran: {ran}" + (f"; skipped: {skipped}" if skipped else ""))
+
+
+def _check_backend(BACKEND, clip, settings):
     import engine.tracker as T
 
     engine_obj = T.TrackingEngine(detector_backend=BACKEND)
