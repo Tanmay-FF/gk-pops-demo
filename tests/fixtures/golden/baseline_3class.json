@@ -25,7 +25,7 @@
     "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
     "fill": "partial",
-    "frame": 64,
+    "frame": 72,
     "linked": true,
     "pops_score": 75,
     "speed_status": "STATIC"

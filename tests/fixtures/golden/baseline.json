@@ -10,38 +10,38 @@
   "carts": {
    "C1": {
     "abandoned": true,
-    "max_score": 75,
+    "max_score": 55,
     "merch_removed": true,
     "owner": 1,
-    "peak_event": "PUSHOUT ALERT",
-    "peak_frame": 415
+    "peak_event": "ABANDONED CART",
+    "peak_frame": 303
    },
    "C2": {
     "abandoned": false,
     "max_score": 0,
     "merch_removed": false,
-    "owner": 3,
-    "peak_event": "MONITORING",
-    "peak_frame": 175
+    "owner": null,
+    "peak_event": "UNLINKED EXIT",
+    "peak_frame": 151
    }
   },
   "events": [
    {
     "abandoned": true,
-    "bag": "unbagged",
+    "bag": "bagged",
     "cart_id": 1,
     "direction": "OUTBOUND",
-    "event": "PUSHOUT ALERT",
+    "event": "ABANDONED CART",
     "fill": "partial",
     "frame": 72,
     "linked": true,
-    "pops_score": 75,
+    "pops_score": 55,
     "speed_status": "STATIC"
    }
   ],
   "summary": {
-   "high_priority": 1,
-   "medium_priority": 0,
+   "high_priority": 0,
+   "medium_priority": 1,
    "total_events": 1,
    "total_links_established": 2
   }
@@ -5413,9 +5413,9 @@
   }
  },
  "provenance": {
-  "python": "3.12.9",
+  "python": "3.11.9",
   "tracker_config_sha": "26104b659248",
-  "ultralytics": "8.4.40",
+  "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"
  },
  "settings": {

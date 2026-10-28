@@ -46,7 +46,7 @@
     "merch_removed": false,
     "owner": null,
     "peak_event": "LOW PRIORITY",
-    "peak_frame": 417
+    "peak_frame": 313
    },
    "C6": {
     "abandoned": false,
@@ -65,7 +65,7 @@
     "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
     "fill": "full",
-    "frame": 80,
+    "frame": 42,
     "linked": false,
     "pops_score": 75,
     "speed_status": "STATIC"
@@ -89,7 +89,7 @@
     "direction": "OUTBOUND",
     "event": "UNLINKED EXIT",
     "fill": "partial",
-    "frame": 416,
+    "frame": 410,
     "linked": false,
     "pops_score": 35,
     "speed_status": "MEDIUM"
