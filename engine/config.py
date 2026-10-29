@@ -270,6 +270,19 @@ GRABRUN_MIN_RUN_OBS = 5
 # turned the parked-cart negative in tests/test_grabrun_pushout.py — a loaded
 # run of 4 at the end of the history — into a pushout.
 GRABRUN_TRAILING_NOISE_OBS = 4
+
+# How long after a loaded cart's track ends a new cart track starting near it
+# is still taken for the same cart, re-acquired under a new ID (see
+# engine/scoring.py:continues_loaded_track). Such a cart does not get the
+# never-loaded exemption, so a grab-and-run the tracker splits in two keeps
+# its abandonment floor. Generous on purpose: a longer gap only withholds the
+# exemption from more empty carts, it never hides a pushout.
+SPLIT_TRACK_GAP_S = 5.0
+
+# A cart seen for less than this, and never read, is a detector blip: the
+# clip verdict ignores it instead of calling the clip INSUFFICIENT EVIDENCE.
+# Half a second is 10 frames at the 19 fps these cameras record.
+CART_BLIP_S = 0.5
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------

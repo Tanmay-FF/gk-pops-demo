@@ -31,6 +31,7 @@ from .config import (
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES, STALE_CART_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
     WALKAWAY_GAP_FRAC, WALKAWAY_MIN_GAP_PX, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
+    SPLIT_TRACK_GAP_S, CART_BLIP_S,
     DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX,
     LINK_DRIFT_IOU,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
@@ -48,7 +49,7 @@ from .motion import (compute_motion, compute_direction_label, DirectionLatch,
                      outbound_axis_value)
 from .scoring import (
     compute_pops, classify_event, peak_sustained_fill, merchandise_removed,
-    vote_classification, longest_loaded_run, clip_verdict,
+    vote_classification, longest_loaded_run, continues_loaded_track, clip_verdict,
     prune_event_log,
     inbound_suppression_note, unassessed_cart_note, vote_bag_for_loaded_cart,
     sync_events_with_snapshots, select_best_event,
@@ -255,10 +256,16 @@ class TrackingEngine:
         # 3-class NON-EMPTY read whose crop failed the quality gate still says
         # "loaded" here. See _record_loaded_read().
         self._cart_loaded_reads = defaultdict(list)
-        # True once ANY cart has held a sustained loaded run. Its negation is
-        # compute_pops()'s `never_loaded`, and it is clip-wide on purpose: see
-        # _record_loaded_read().
+        # Carts that have held a sustained loaded run, and whether any has: the
+        # first feeds _never_loaded(), the second the clip verdict.
+        self._loaded_carts      = set()
         self._clip_loaded       = False
+        # cd -> [first_frame, first_bbox, last_frame, last_bbox, n_frames]: where
+        # and when each cart was seen. _never_loaded() reads it to spot a split
+        # track; the clip verdict, to tell a detector blip from an unread cart.
+        self._cart_span         = {}
+        self._fps               = 30.0  # the clip's, once open_video() says
+
         self._clip_verdict      = None  # set by _finalise_pops()
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
         # cart display_id -> last sustained OUTBOUND heading, held through the
@@ -1025,14 +1032,8 @@ class TrackingEngine:
         left out rather than counted empty, so it neither starts nor breaks a
         run.
 
-        `_clip_loaded` latches on the first sustained loaded run in ANY cart,
-        not just this one, because a split track would otherwise defeat it.
-        When the tracker loses a loaded cart and picks it back up as a new
-        track after the goods are gone, the new track has only ever read
-        empty; judged alone it would be "never loaded" and its abandonment
-        would score nothing, which is exactly the grab-and-run the abandonment
-        floors exist for. Clip scope costs nothing on the clips this is for
-        (no merchandise anywhere) and keeps today's scoring on every other.
+        The cart joins `_loaded_carts` on its first sustained loaded run, and
+        `_clip_loaded` latches with it.
         """
         if result.get("detector_state") == _cart_state.NON_EMPTY:
             loaded = True
@@ -1042,8 +1043,33 @@ class TrackingEngine:
             return
         reads = self._cart_loaded_reads[cd]
         reads.append(loaded)
-        if loaded and not self._clip_loaded:
-            self._clip_loaded = longest_loaded_run(reads) >= GRABRUN_MIN_RUN_OBS
+        if loaded and cd not in self._loaded_carts \
+                and longest_loaded_run(reads) >= GRABRUN_MIN_RUN_OBS:
+            self._loaded_carts.add(cd)
+            self._clip_loaded = True
+
+    def _never_loaded(self, cd) -> bool:
+        """compute_pops()'s `never_loaded` for cart `cd`, from what is known now.
+
+        Per cart, as the rule reads: a cart that never held anything is
+        exempt even when another cart in the clip was loaded, which is the
+        ordinary exit scene (one shopper leaves with goods, another returns an
+        empty cart). The guard is a split track: a cart that may be a loaded
+        cart re-acquired under a new ID after the goods were taken out is not
+        exempt, or the grab-and-run the abandonment floors exist for would
+        score nothing. See continues_loaded_track().
+
+        In the frame loop this is "so far" and a later loaded run can only
+        withdraw it; the finaliser asks again with the whole clip.
+        """
+        if cd in self._loaded_carts:
+            return False
+        span = self._cart_span.get(cd)
+        if span is None:
+            return True
+        loaded_spans = [self._cart_span[c] for c in self._loaded_carts if c in self._cart_span]
+        return not continues_loaded_track(
+            span, loaded_spans, round(SPLIT_TRACK_GAP_S * self._fps))
 
     @staticmethod
     def _bbox_iou(a, b):
@@ -1294,7 +1320,7 @@ class TrackingEngine:
 
             # RECOMPUTE score with finalized, consistent inputs. never_loaded is
             # read over the WHOLE clip here; the frame loop could only say "so far".
-            never_loaded = not self._clip_loaded
+            never_loaded = self._never_loaded(cd)
             recomputed = compute_pops(
                 direction, speed_status, True, best_fill,
                 bag_label=best_bag, cart_detected=True,
@@ -1385,13 +1411,16 @@ class TrackingEngine:
         # One answer for the clip, from the log that just survived. Every cart
         # the POPS table lists is an input; one with no valid reading at all
         # goes in as None, which is what keeps an unread cart from passing for
-        # an empty one.
-        self._clip_verdict = clip_verdict(
-            self._event_log,
-            {cd: (self._peak_pops_snapshot.get(cd, {}).get("fill")
-                  if self._cart_cls_history.get(cd) else None)
-             for cd in set(self._max_pops_per_cart) | set(self._pops_cache)},
-            self._clip_loaded)
+        # an empty one. The exception is a blip, seen for under CART_BLIP_S:
+        # a one-frame detection is not a cart nobody could read.
+        blip_frames = math.ceil(CART_BLIP_S * self._fps)
+        cart_fills = {}
+        for cd in set(self._max_pops_per_cart) | set(self._pops_cache):
+            if self._cart_cls_history.get(cd):
+                cart_fills[cd] = self._peak_pops_snapshot.get(cd, {}).get("fill")
+            elif self._cart_span.get(cd, [None] * 4 + [blip_frames])[4] >= blip_frames:
+                cart_fills[cd] = None
+        self._clip_verdict = clip_verdict(self._event_log, cart_fills, self._clip_loaded)
         print(f"[VERDICT] {self._clip_verdict['verdict']}: "
               f"{self._clip_verdict['reason']}")
 
@@ -1524,6 +1553,7 @@ class TrackingEngine:
         self._classifier.load_fill(FILL_WEIGHT_PATH)
 
         cap, w, h, fps, total_frames = open_video(source_path)
+        self._fps = fps if fps and fps > 0 else 30.0
 
         # SAM-based one-shot scene layout detection is disabled — the user
         # draws zones explicitly in the Zone Editor. `_scene_elements` is kept
@@ -1802,6 +1832,12 @@ class TrackingEngine:
                 lbl = names[int(c)]
                 if lbl == 'person': person_bb[raw] = bb
                 elif lbl == 'cart': cart_bb[raw] = bb
+            for raw, bb in cart_bb.items():
+                span = self._cart_span.get(gdi('cart', raw))
+                if span is None:
+                    self._cart_span[gdi('cart', raw)] = [frame_idx, list(bb), frame_idx, list(bb), 1]
+                else:
+                    span[2], span[3], span[4] = frame_idx, list(bb), span[4] + 1
             self._linker.update(person_bb, cart_bb, frame_idx,
                                 self._obj_disappeared, self._obj_positions,
                                 self._obj_first_frame)
@@ -2099,9 +2135,8 @@ class TrackingEngine:
                     if fill_lbl in ("partial", "full") and bag_lbl == "not_applicable":
                         bag_lbl = vote_bag_for_loaded_cart(history)
 
-                # "So far": a later loaded run anywhere in the clip withdraws
-                # the exemption, and the finaliser re-scores with the whole clip.
-                never_loaded = not self._clip_loaded
+                # "So far": the finaliser re-scores with the whole clip.
+                never_loaded = self._never_loaded(cd)
                 pops_score = compute_pops(dir_label, speed_status, is_valid, fill_lbl,
                                           bag_label=bag_lbl, cart_detected=True,
                                           abandoned=abandoned, linked=linked,
@@ -2479,13 +2514,15 @@ class TrackingEngine:
                     "are listed beside it and never change it."
                 ),
                 "pops_summary.never_loaded": (
-                    "True when no cart in the clip held 5 consecutive reads "
-                    "saying it carried something (3-class NON-EMPTY reads count "
-                    "even when the crop was unreadable). Only then does an "
-                    "abandoned EMPTY cart score nothing for its abandonment; "
-                    "otherwise it floors at 60 outbound as before. Clip-wide on "
-                    "purpose, so a loaded cart the tracker re-acquires as a new "
-                    "track after the goods are gone cannot pass as never loaded."
+                    "True when this cart never held 5 consecutive reads saying "
+                    "it carried something (3-class NON-EMPTY reads count even "
+                    "when the crop was unreadable) and its track did not begin "
+                    "just after, and near where, a loaded cart's track ended. "
+                    "Only then does an abandoned EMPTY cart score nothing for "
+                    "its abandonment; otherwise it floors at 60 outbound as "
+                    "before. The second condition is so a loaded cart the "
+                    "tracker re-acquires as a new track after the goods are "
+                    "gone cannot pass as never loaded."
                 ),
                 **({"detector_state": (
                     "3-class detector backend. Each read's empty / non-empty "

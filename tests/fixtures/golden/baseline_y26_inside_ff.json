@@ -34,11 +34,11 @@
    },
    "C4": {
     "abandoned": false,
-    "max_score": 35,
+    "max_score": 30,
     "merch_removed": false,
     "owner": 8,
-    "peak_event": "MEDIUM PRIORITY",
-    "peak_frame": 237
+    "peak_event": "MONITORING",
+    "peak_frame": 282
    },
    "C5": {
     "abandoned": false,
@@ -50,7 +50,7 @@
    },
    "C6": {
     "abandoned": false,
-    "max_score": 35,
+    "max_score": 30,
     "merch_removed": false,
     "owner": null,
     "peak_event": "UNLINKED EXIT",
@@ -69,36 +69,12 @@
     "linked": false,
     "pops_score": 75,
     "speed_status": "STATIC"
-   },
-   {
-    "abandoned": false,
-    "bag": "bagged",
-    "cart_id": 4,
-    "direction": "OUTBOUND",
-    "event": "MEDIUM PRIORITY",
-    "fill": "partial",
-    "frame": 137,
-    "linked": true,
-    "pops_score": 35,
-    "speed_status": "MEDIUM"
-   },
-   {
-    "abandoned": false,
-    "bag": "bagged",
-    "cart_id": 6,
-    "direction": "OUTBOUND",
-    "event": "UNLINKED EXIT",
-    "fill": "partial",
-    "frame": 410,
-    "linked": false,
-    "pops_score": 35,
-    "speed_status": "MEDIUM"
    }
   ],
   "summary": {
    "high_priority": 1,
-   "medium_priority": 2,
-   "total_events": 3,
+   "medium_priority": 0,
+   "total_events": 1,
    "total_links_established": 5
   }
  },

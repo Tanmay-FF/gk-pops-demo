@@ -65,7 +65,7 @@
     "direction": "OUTBOUND",
     "event": "ABANDONED CART",
     "fill": "partial",
-    "frame": 11,
+    "frame": 195,
     "linked": true,
     "pops_score": 55,
     "speed_status": "SLOW"

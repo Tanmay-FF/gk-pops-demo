@@ -2,6 +2,8 @@
 """
 POPS (Push-Out Probability Score) computation and event classification.
 """
+import math
+
 from .config import (
     COLOR_PUSHOUT, COLOR_SUSPICIOUS, COLOR_MONITORING, COLOR_CLEAR,
     GRABRUN_TRAILING_NOISE_OBS,
@@ -29,8 +31,14 @@ from .config import (
 #   cart clears the 71 HIGH line at walking pace (75 SLOW / 80 MEDIUM) instead
 #   of topping out at 70; standing still it stays MEDIUM (65), which is the
 #   rule engine's business rather than POPS's. Partial+unbagged reaches HIGH
-#   only when also FAST (85). Partial+bagged is still capped at 55 — items that
-#   look paid for.
+#   only when also FAST (85).
+#
+#   Bagged merchandise is paid for. A partial/full bagged cart whose owner is
+#   still with it caps at BAGGED_PAID_CAP (30, LOW) at any pace: a customer
+#   wheeling their shopping out is the most common thing an exit camera sees,
+#   and at 35-50 every one of them was a MEDIUM. Abandoned, partial+bagged keeps
+#   the older cap of 55 and full+bagged its floor, so a cart left at the door
+#   with goods in it is still reported.
 #
 # C. Linked damping (UNKNOWN direction only):
 #   If a person is WITH the cart (linked) and direction is UNKNOWN
@@ -54,7 +62,9 @@ from .config import (
 #   `never_loaded` exempts an EMPTY cart from both abandonment terms (the
 #   OUTBOUND floor of 60 and the UNKNOWN +25): nothing was ever in it, so
 #   nothing left with it, and an empty cart left by the door is not a theft.
-#   It is a CLIP-wide fact, not a per-cart one — see longest_loaded_run().
+#   It is a per-CART fact, guarded against split tracks: a cart that may be a
+#   loaded cart re-acquired under a new ID is not exempt -- see
+#   continues_loaded_track().
 # ---------------------------------------------------------------------------
 
 #: What the INBOUND / not-valid kill switches score a cart. Named rather than
@@ -83,6 +93,14 @@ PUSHOUT_SCORE = 80
 #: same evidence whichever direction label the motion window managed to
 #: resolve, so the two paths must not drift apart.
 MERCH_REMOVED_FLOOR = 75
+
+#: Ceiling for a loaded cart whose contents vote bagged while its owner is
+#: still with it: one under MEDIUM_SCORE, so a paying customer is LOW whatever
+#: their pace. A bagged pushout (unpaid goods bagged in the cart) is
+#: deliberately given up here; the bag classifier cannot tell paid bags from
+#: unpaid ones, and on the clip-verdict dev set every bagged cart scored 35-50
+#: was a paying customer but one.
+BAGGED_PAID_CAP = MEDIUM_SCORE - 1
 
 _FILL_SCORE_OUTBOUND = {"empty": -15}
 _FILL_SCORE_UNKNOWN  = {"partial": 8}
@@ -116,12 +134,16 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     floor, where it lifts 65 to MERCH_REMOVED_FLOOR for an unbagged cart; the
     OUTBOUND branch already floors that case.
 
-    `never_loaded` says no cart in the clip has held a sustained loaded run
-    (see longest_loaded_run()). It only changes an abandoned cart whose fill
-    is "empty": without it that cart floors at 60 OUTBOUND (ABANDONED CART)
-    and gains 25 on an UNKNOWN heading; with it, abandonment adds nothing.
-    A cart with no fill verdict is not exempt — no reading is not an empty
-    reading.
+    `never_loaded` says this cart never held a sustained loaded run (see
+    longest_loaded_run()) and is not a loaded cart's track picked up again
+    under a new ID (see continues_loaded_track()). It only changes an
+    abandoned cart whose fill is "empty": without it that cart floors at 60
+    OUTBOUND (ABANDONED CART) and gains 25 on an UNKNOWN heading; with it,
+    abandonment adds nothing. A cart with no fill verdict is not exempt — no
+    reading is not an empty reading.
+
+    A partial/full cart whose bag votes "bagged" and which is not abandoned is
+    capped at BAGGED_PAID_CAP: bagged goods are paid for.
     """
     # --- Kill Switches ---
     if not cart_detected:
@@ -238,6 +260,9 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     # Cap: partial + bagged is low-risk (items are paid for)
     if fill_label == "partial" and bag_label == "bagged":
         score = min(score, 55)
+    # ...and with the owner still on the cart, it is a customer leaving.
+    if fill_label in ("partial", "full") and bag_label == "bagged" and not abandoned:
+        score = min(score, BAGGED_PAID_CAP)
 
     # Clamp
     if score < 0:
@@ -379,15 +404,49 @@ def longest_loaded_run(loaded_reads) -> int:
       * on the 3-class backend a NON-EMPTY detector read counts even when its
         crop failed the quality gate and so never reached the fill history.
 
-    Both only lengthen runs, so a clip that clears this test can never have a
-    cart that peak_sustained_fill() would call loaded: the never-loaded
-    exemption and the grab-and-run override cannot both apply to one clip.
+    Both only lengthen runs, so a cart that clears this test can never be one
+    peak_sustained_fill() would call loaded: the never-loaded exemption and
+    the grab-and-run override cannot both apply to one cart.
     """
     best = run = 0
     for loaded in loaded_reads:
         run = run + 1 if loaded else 0
         best = max(best, run)
     return best
+
+
+def continues_loaded_track(span, loaded_spans, max_gap_frames: int) -> bool:
+    """Could the cart seen over `span` be a loaded cart under a new track ID?
+
+    `span` is a cart's sightings, [first_frame, first_bbox, last_frame,
+    last_bbox, n_frames] (the tracker's `_cart_span`); `loaded_spans` are the
+    spans of the carts that held a sustained loaded run.
+
+    This is what keeps a per-cart `never_loaded` from defeating the
+    abandonment floors. When the tracker loses a loaded cart and picks it up
+    again as a new track after the goods are gone, the new track has only ever
+    read empty. Judged alone it would be "never loaded", and its abandonment
+    would score nothing -- exactly the grab-and-run those floors exist for. So a
+    cart whose track BEGAN within `max_gap_frames` after a loaded cart's track
+    ENDED, near where that one was last seen, is treated as that cart.
+
+    A loaded track still running when this one began cannot be the same cart,
+    and a cart in view from before any loaded track ended cannot be either.
+    "Near" is two of the larger box's diagonals, centre to centre: a cart lost
+    behind a passer-by does not travel far before it is found again.
+    """
+    first, fbb = span[0], span[1]
+    fx, fy = (fbb[0] + fbb[2]) / 2, (fbb[1] + fbb[3]) / 2
+    for other in loaded_spans:
+        last, lbb = other[2], other[3]
+        if not 0 < first - last <= max_gap_frames:
+            continue
+        lx, ly = (lbb[0] + lbb[2]) / 2, (lbb[1] + lbb[3]) / 2
+        reach = 2.0 * max(math.hypot(fbb[2] - fbb[0], fbb[3] - fbb[1]),
+                          math.hypot(lbb[2] - lbb[0], lbb[3] - lbb[1]))
+        if math.hypot(fx - lx, fy - ly) <= reach:
+            return True
+    return False
 
 
 def vote_classification(history):
@@ -843,7 +902,10 @@ def clip_verdict(event_log, cart_fills, clip_loaded: bool) -> dict:
     `event_log` is the FINAL log (after sync_events_with_snapshots() and
     prune_event_log()), so every row in it is a real MEDIUM-or-higher event.
     `cart_fills` maps every cart POPS scored to its reconciled fill, or None
-    when the cart never got a usable reading. `clip_loaded` is True when any
+    when the cart never got a usable reading. The caller leaves out a cart
+    seen for under CART_BLIP_S that never got a reading: that is a detector
+    blip, not a blind spot, and must not hold a clip at INSUFFICIENT
+    EVIDENCE. `clip_loaded` is True when any
     cart held a sustained loaded run (longest_loaded_run()).
 
     In order, first match wins:

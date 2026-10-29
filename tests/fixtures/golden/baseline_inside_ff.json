@@ -2,7 +2,7 @@
  "_comment": "Per frame: counts [persons, carts, links] from the HUD, plus the display IDs actually drawn. IDs are recorded because counts alone cannot see one object being tracked under two IDs. `decisions` records the scoring layer \u2014 per-cart peak event, owner, abandonment, merch_removed, and the finalised event rows \u2014 because counts and IDs alone cannot see a cart linked to the wrong person and scored a tier too low. Regenerate with tests/make_golden_baseline.py; see tests/test_golden_clip.py.",
  "clip": {
   "name": "FF1763940475070_E827250FC2BA-medium-INSIDE.mp4",
-  "path": "d:\\gatekeeper_projects\\gk-pops-code\\sample_videos\\FF1763940475070_E827250FC2BA-medium-INSIDE.mp4",
+  "path": "D:\\gatekeeper_projects\\gk-pops-code\\sample_videos\\FF1763940475070_E827250FC2BA-medium-INSIDE.mp4",
   "sha256": "760b7a19a55c41c952b3aa08277428b2991df3d80ee38226ff8e026fb2b82835",
   "size": 2980276
  },
@@ -26,19 +26,19 @@
    },
    "C3": {
     "abandoned": false,
-    "max_score": 35,
+    "max_score": 30,
     "merch_removed": false,
     "owner": 8,
-    "peak_event": "MEDIUM PRIORITY",
-    "peak_frame": 235
+    "peak_event": "MONITORING",
+    "peak_frame": 410
    },
    "C4": {
     "abandoned": false,
-    "max_score": 35,
+    "max_score": 30,
     "merch_removed": false,
     "owner": null,
     "peak_event": "UNLINKED EXIT",
-    "peak_frame": 415
+    "peak_frame": 417
    }
   },
   "events": [
@@ -53,36 +53,12 @@
     "linked": false,
     "pops_score": 75,
     "speed_status": "STATIC"
-   },
-   {
-    "abandoned": false,
-    "bag": "bagged",
-    "cart_id": 3,
-    "direction": "OUTBOUND",
-    "event": "MEDIUM PRIORITY",
-    "fill": "partial",
-    "frame": 135,
-    "linked": true,
-    "pops_score": 35,
-    "speed_status": "MEDIUM"
-   },
-   {
-    "abandoned": false,
-    "bag": "bagged",
-    "cart_id": 4,
-    "direction": "OUTBOUND",
-    "event": "UNLINKED EXIT",
-    "fill": "partial",
-    "frame": 406,
-    "linked": false,
-    "pops_score": 35,
-    "speed_status": "MEDIUM"
    }
   ],
   "summary": {
    "high_priority": 1,
-   "medium_priority": 2,
-   "total_events": 3,
+   "medium_priority": 0,
+   "total_events": 1,
    "total_links_established": 3
   }
  },
@@ -8166,6 +8142,7 @@
   }
  },
  "provenance": {
+  "detector": "ultralytics_track:52009682:1777561815177817200:",
   "python": "3.11.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",
@@ -8173,6 +8150,7 @@
  },
  "settings": {
   "camera_placement": "Inside (facing exit)",
+  "detector_backend": "ultralytics_track",
   "enable_pose": true,
   "zones": []
  }

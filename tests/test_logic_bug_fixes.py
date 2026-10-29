@@ -443,8 +443,10 @@ check("it is still a MEDIUM-tier alert, not ignored",
       still >= 31, f"got {still}")
 
 # The terms that are treated as SPEC must not have moved.
-check("bagged merchandise is unaffected — items look paid for",
-      compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="bagged") == 40,
+# Except bagged goods with their owner, which are paid for and now LOW at any
+# pace (BAGGED_PAID_CAP; tests/test_clip_verdict.py has the full grid).
+check("bagged merchandise walked out is LOW -- items are paid for",
+      compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="bagged") == 30,
       str(compute_pops("OUTBOUND", "MEDIUM", True, "full", bag_label="bagged")))
 check("partial + bagged is still capped at 55",
       compute_pops("OUTBOUND", "STATIC", True, "partial", bag_label="bagged",

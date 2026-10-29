@@ -89,7 +89,7 @@
     "direction": "OUTBOUND",
     "event": "ABANDONED CART",
     "fill": "partial",
-    "frame": 11,
+    "frame": 191,
     "linked": true,
     "pops_score": 55,
     "speed_status": "STATIC"
@@ -6932,6 +6932,7 @@
   }
  },
  "provenance": {
+  "detector": "ultralytics_track:52009682:1777561815177817200:",
   "python": "3.11.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",
@@ -6939,6 +6940,7 @@
  },
  "settings": {
   "camera_placement": "Outside (facing entrance)",
+  "detector_backend": "ultralytics_track",
   "enable_pose": true,
   "zones": []
  }
