@@ -868,6 +868,33 @@ def build_tab_counts(counts: dict) -> str:
 # ---------------------------------------------------------------------------
 # POPS summary
 # ---------------------------------------------------------------------------
+#: Clip verdicts below the event tiers -> severity vocabulary. An unread cart
+#: is WATCH, not GOOD: the clip has not been shown to be clean.
+_VERDICT_SEVERITY = {
+    "NOTHING HAPPENED": "GOOD",
+    "LOW PRIORITY": "GOOD",
+    "INSUFFICIENT EVIDENCE": "WATCH",
+}
+
+
+def build_clip_verdict(verdict) -> str:
+    """One-line callout with the clip's verdict (scoring.clip_verdict()).
+
+    Operational findings are counted beside it, never merged in, matching the
+    JSON: a blocked door does not turn NOTHING HAPPENED into an incident.
+    """
+    if not verdict or not verdict.get("verdict"):
+        return ""
+    name = verdict["verdict"]
+    tone = _VERDICT_SEVERITY.get(name) or _EVENT_SEVERITY.get(name, "INFO")
+    body = T.esc(verdict.get("reason", ""))
+    n_ops = len(verdict.get("operational_findings") or [])
+    if n_ops:
+        body += (f" Separately, {n_ops} operational finding(s): see the "
+                 f"Operational column and the Operational Alerts tab.")
+    return T.notice(f"Clip verdict: {T.esc(name)}", body, tone=tone)
+
+
 def build_pops_summary(max_pops_per_cart, peak_snapshots, rule_findings=None):
     """Per-cart table: the peak POPS event AND every operational category.
 

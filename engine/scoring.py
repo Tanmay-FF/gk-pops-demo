@@ -50,6 +50,11 @@ from .config import (
 #   goods left the cart while the owner left the frame, which is the same
 #   evidence OUTBOUND floors at 75, so it gets 75 here too. Bagged carts are
 #   excluded — see merchandise_removed().
+#
+#   `never_loaded` exempts an EMPTY cart from both abandonment terms (the
+#   OUTBOUND floor of 60 and the UNKNOWN +25): nothing was ever in it, so
+#   nothing left with it, and an empty cart left by the door is not a theft.
+#   It is a CLIP-wide fact, not a per-cart one — see longest_loaded_run().
 # ---------------------------------------------------------------------------
 
 #: What the INBOUND / not-valid kill switches score a cart. Named rather than
@@ -96,7 +101,8 @@ _LINKED_DAMPING = 20
 def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
                  fill_label: str, bag_label: str = "not_applicable",
                  cart_detected: bool = True, abandoned: bool = False,
-                 linked: bool = False, merch_removed: bool = False) -> int:
+                 linked: bool = False, merch_removed: bool = False,
+                 never_loaded: bool = False) -> int:
     """Compute Push-Out Probability Score (0-100).
 
     A linked person pushing their cart through the store is normal — the score
@@ -109,6 +115,13 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
     merchandise_removed(). It only changes the UNKNOWN-direction abandonment
     floor, where it lifts 65 to MERCH_REMOVED_FLOOR for an unbagged cart; the
     OUTBOUND branch already floors that case.
+
+    `never_loaded` says no cart in the clip has held a sustained loaded run
+    (see longest_loaded_run()). It only changes an abandoned cart whose fill
+    is "empty": without it that cart floors at 60 OUTBOUND (ABANDONED CART)
+    and gains 25 on an UNKNOWN heading; with it, abandonment adds nothing.
+    A cart with no fill verdict is not exempt — no reading is not an empty
+    reading.
     """
     # --- Kill Switches ---
     if not cart_detected:
@@ -185,7 +198,8 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
             if fill_label in ("partial", "full"):
                 score = max(score, MERCH_REMOVED_FLOOR)
             elif fill_label == "empty":
-                score = max(score, 60)
+                if not never_loaded:
+                    score = max(score, 60)
             else:
                 score += 35
 
@@ -218,7 +232,7 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
                     score = max(score, MERCH_REMOVED_FLOOR)
                 else:
                     score = max(score, 65)
-            else:
+            elif not (fill_label == "empty" and never_loaded):
                 score += 25
 
     # Cap: partial + bagged is low-risk (items are paid for)
@@ -346,6 +360,34 @@ def merchandise_removed(fill_sequence, min_run: int,
     # how the history ENDS, and a stripped burst is still a real observation of
     # a cart that held something.
     return peak_sustained_fill(fill_sequence, min_run) is not None
+
+
+def longest_loaded_run(loaded_reads) -> int:
+    """Longest run of consecutive True in one cart's `loaded_reads`.
+
+    `loaded_reads` holds one bool per classification read the cart got, in
+    order: True when the read said the cart holds something, False when it
+    said empty. Unreadable reads are not in it (see the tracker's
+    `_cart_loaded_reads` for exactly what counts).
+
+    This is the test behind `never_loaded`, and it is built to be STRICTER
+    than peak_sustained_fill() in the direction that protects a pushout:
+
+      * partial and full count as one run here, where peak_sustained_fill()
+        runs each label separately, so a cart read partial/full/partial/full
+        is loaded here and not there;
+      * on the 3-class backend a NON-EMPTY detector read counts even when its
+        crop failed the quality gate and so never reached the fill history.
+
+    Both only lengthen runs, so a clip that clears this test can never have a
+    cart that peak_sustained_fill() would call loaded: the never-loaded
+    exemption and the grab-and-run override cannot both apply to one clip.
+    """
+    best = run = 0
+    for loaded in loaded_reads:
+        run = run + 1 if loaded else 0
+        best = max(best, run)
+    return best
 
 
 def vote_classification(history):
@@ -713,6 +755,7 @@ def sync_events_with_snapshots(event_log, peak_snapshots, max_pops) -> list[str]
             row["speed_status"] = snap.get("speed_status", row.get("speed_status"))
             row["linked"] = snap.get("linked", row.get("linked"))
             row["abandoned"] = snap.get("abandoned", row.get("abandoned"))
+            row["never_loaded"] = snap.get("never_loaded", row.get("never_loaded", False))
             # `frame`/`timestamp` stay put: the log records when the cart FIRST
             # reached the event, which is what prune_event_log() collapses to and
             # what an operator scrubbing the timeline is looking for. The peak is
@@ -780,3 +823,65 @@ LOGGABLE_EVENTS = frozenset({
 
 HIGH_EVENTS = frozenset({"PUSHOUT ALERT", "HIGH PRIORITY"})
 MEDIUM_EVENTS = frozenset({"MEDIUM PRIORITY", "UNLINKED EXIT", "ABANDONED CART"})
+
+
+# ---------------------------------------------------------------------------
+# Clip verdict
+# ---------------------------------------------------------------------------
+#: The clip-level answers below the event tiers. A clip with any surviving
+#: event is named after its most severe one instead (PUSHOUT ALERT, ...).
+CLIP_NOTHING_HAPPENED = "NOTHING HAPPENED"
+CLIP_LOW_PRIORITY = "LOW PRIORITY"
+CLIP_INSUFFICIENT_EVIDENCE = "INSUFFICIENT EVIDENCE"
+
+_ASSESSED_FILLS = frozenset({"empty", "partial", "full"})
+
+
+def clip_verdict(event_log, cart_fills, clip_loaded: bool) -> dict:
+    """One answer for the whole clip: did anything happen?
+
+    `event_log` is the FINAL log (after sync_events_with_snapshots() and
+    prune_event_log()), so every row in it is a real MEDIUM-or-higher event.
+    `cart_fills` maps every cart POPS scored to its reconciled fill, or None
+    when the cart never got a usable reading. `clip_loaded` is True when any
+    cart held a sustained loaded run (longest_loaded_run()).
+
+    In order, first match wins:
+
+      1. any event survives      -> that event's name, tier HIGH or MEDIUM
+      2. a cart was never read   -> INSUFFICIENT EVIDENCE: no reading is not
+                                    an empty reading, and a blind spot must not
+                                    be reported as a clean clip
+      3. a cart held something   -> LOW PRIORITY: merchandise was present but
+                                    nothing about it scored as suspicious
+      4. otherwise               -> NOTHING HAPPENED: every cart read empty
+                                    throughout, or there was no cart at all
+
+    Operational findings (rules.py) are deliberately not an input. They answer
+    a different question (is a door blocked, is a cart unattended), and the
+    caller reports them beside this verdict, never folded into it.
+    """
+    carts = dict(cart_fills or {})
+    unassessed = sorted(cd for cd, f in carts.items() if f not in _ASSESSED_FILLS)
+    base = {"carts_scored": len(carts), "carts_unassessed": unassessed,
+            "clip_loaded": bool(clip_loaded), "top_cart": None, "top_score": None}
+
+    if event_log:
+        top = max(event_log, key=lambda e: (EVENT_SEVERITY.get(e["event"], 0),
+                                            e.get("pops_score") or 0))
+        return {**base, "verdict": top["event"],
+                "tier": "HIGH" if top["event"] in HIGH_EVENTS else "MEDIUM",
+                "top_cart": top["cart_id"], "top_score": top.get("pops_score"),
+                "reason": f"Cart {top['cart_id']} reached {top['event']} "
+                          f"(POPS {top.get('pops_score')})."}
+    if unassessed:
+        return {**base, "verdict": CLIP_INSUFFICIENT_EVIDENCE, "tier": "UNKNOWN",
+                "reason": f"No usable reading of {_cart_list(unassessed)}, so the "
+                          "clip cannot be called clean."}
+    if clip_loaded or any(f in ("partial", "full") for f in carts.values()):
+        return {**base, "verdict": CLIP_LOW_PRIORITY, "tier": "LOW",
+                "reason": "A cart held merchandise, but nothing about it scored "
+                          "as suspicious."}
+    return {**base, "verdict": CLIP_NOTHING_HAPPENED, "tier": "NONE",
+            "reason": ("Every cart read empty for the whole clip." if carts
+                       else "No cart was tracked long enough to score.")}

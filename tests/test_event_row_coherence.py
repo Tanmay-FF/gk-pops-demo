@@ -59,6 +59,7 @@ def recompute(row):
         bag_label=row["bag"], cart_detected=True,
         abandoned=row.get("abandoned", False), linked=row.get("linked", False),
         merch_removed=row.get("merch_removed", False),
+        never_loaded=row.get("never_loaded", False),
     )
     # compute_pops does not know about the partial+bagged cap the finaliser
     # re-applies, so mirror it here or a legitimately capped row reads as broken.
