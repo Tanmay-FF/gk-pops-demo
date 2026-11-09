@@ -60,7 +60,12 @@ V5_IMGSZ = 640
 #: plus per-class NMS; that is the mode its validation metrics were measured
 #: in, and the mode this backend reproduces (with the two cart classes merged
 #: before NMS, see engine/detection_backends.py).
-Y26_WEIGHTS_PATH = r"D:\gatekeeper_projects\dillion\yolov26m_3class\weights\best.pt"
+#: Bundled in the repo via git-lfs (it is the best.pt of the dillion
+#: yolov26m_3class run). Anchored to this file rather than the working
+#: directory, so the tests that load it cannot quietly skip when run from
+#: somewhere other than the repo root.
+Y26_WEIGHTS_PATH = str(Path(__file__).resolve().parent.parent
+                       / "weights" / "detection_3class_yolo26" / "weights" / "best.pt")
 #: Detection confidence for boxes handed to the TRACKER. 0.1 is what
 #: ultralytics' Model.track() uses on the 2-class path (ULTRALYTICS_TRACK_CONF):
 #: ByteTrack's second association needs the 0.1-0.3 boxes. At 0.25 the

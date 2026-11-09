@@ -350,7 +350,8 @@ All model weights are bundled under the `weights/` directory:
 
 | Asset | Path |
 |:------|:-----|
-| YOLOv26m detector | `weights/detection/weights/best.pt` |
+| YOLOv26m detector (2-class) | `weights/detection/weights/best.pt` |
+| YOLOv26m 3-class detector (person / empty_cart / non_empty_cart, the default backend) | `weights/detection_3class_yolo26/weights/best.pt` |
 | Cart quality classifier | `weights/cart_quality/weights/best.pt` |
 | Fill + bag classifier | `weights/fill_and_bag_classifier/weights/best.pt` |
 | BoTSORT tracker config | `engine/botsort_retail.yaml` |

@@ -67,6 +67,7 @@ HERE = Path(__file__).resolve().parent
 MIN_WEIGHT_BYTES = 1_000_000
 REQUIRED_WEIGHTS = (
     Path("weights/detection/weights/best.pt"),
+    Path("weights/detection_3class_yolo26/weights/best.pt"),
     Path("weights/cart_quality/weights/best.pt"),
     Path("weights/fill_and_bag_classifier/weights/best.pt"),
     Path("weights/pose_estimation/yolo26l-pose.pt"),
