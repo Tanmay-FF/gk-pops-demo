@@ -879,13 +879,17 @@ _VERDICT_SEVERITY = {
 
 def build_review_label(review) -> str:
     """One-line callout with the placement-free review label
-    (engine/review_label.py): NEEDS_REVIEW or SKIP, and why. Shown above the POPS
-    verdict and independent of it; camera placement cannot change it."""
+    (engine/review_label.py): NEEDS_REVIEW, SKIP or NOTHING_HAPPENED, and why.
+    Shown above the POPS verdict and independent of it; camera placement cannot
+    change it."""
     if not review or not review.get("label"):
         return ""
-    tone = "GOOD" if review["label"] == "SKIP" else "WATCH"
+    tone = "WATCH" if review["label"] == "NEEDS_REVIEW" else "GOOD"
     reasons = review.get("reasons") or []
     body = "<br>".join(T.esc(r) + "." for r in reasons)
+    conf = review.get("confidence") or {}
+    if review["label"] == "SKIP" and conf.get("blocked_by"):
+        body += "<br>Not confident: " + T.esc("; ".join(conf["blocked_by"])) + "."
     return T.notice(f"Review label: {T.esc(review['label'])} (no camera placement used)",
                     body, tone=tone)
 

@@ -265,6 +265,19 @@ class TrackingEngine:
         # and when each cart was seen. _never_loaded() reads it to spot a split
         # track; the clip verdict, to tell a detector blip from an unread cart.
         self._cart_span         = {}
+        # Placement-free evidence for the review label's candidate rules (all
+        # keyed by cart display id). cd -> [min cx, max cx, min cy, max cy] of
+        # the box centre; cd -> [sum, n] of detector P(non-empty) and of the
+        # stacked_cart share over every scored frame; cd -> one (read P, person
+        # cover, child-inside share) per entry of _cart_loaded_reads.
+        self._cart_extent       = {}
+        self._cart_p_acc        = defaultdict(lambda: [0.0, 0])
+        self._cart_stacked_acc  = defaultdict(lambda: [0.0, 0])
+        self._cart_read_evidence = defaultdict(list)
+        # raw id -> this frame's stacked_cart share (5-class backend), and this
+        # frame's child_in_cart boxes, for the frame JSON.
+        self._frame_p_stacked   = {}
+        self._frame_children    = []
         self._fps               = 30.0  # the clip's, once open_video() says
 
         self._clip_verdict      = None  # set by _finalise_pops()
@@ -414,6 +427,9 @@ class TrackingEngine:
                                   else _cart_state.EMPTY),
                         "p_non_empty": None if _p is None else round(_p, 4),
                     }
+                    _ps = self._frame_p_stacked.get(raw_id)
+                    if _ps is not None:
+                        obj["detector"]["p_stacked"] = round(_ps, 4)
                 # `classification` above is this frame's OBSERVATION; `pops`
                 # below is scored from the VOTE over the cart's whole history
                 # (see the frame loop), so the two can legitimately disagree on
@@ -470,13 +486,19 @@ class TrackingEngine:
         p_dis = sum(1 for r, l in self._obj_labels.items() if l == 'person' and 0 < self._obj_disappeared[r] < 90)
         c_dis = sum(1 for r, l in self._obj_labels.items() if l == 'cart' and 0 < self._obj_disappeared[r] < 90)
 
-        return {
+        out = {
             "frame_number": frame_idx, "timestamp": round(timestamp, 4),
             "people": people, "carts": carts, "links": link_data,
             "statistics": {"total_people": len(people), "total_carts": len(carts),
                            "active_links": active,
                            "people_disappeared": p_dis, "carts_disappeared": c_dis},
         }
+        # 5-class backend: child_in_cart boxes (drawn, never tracked), so the
+        # review label's child rule can be replayed offline.
+        kids = getattr(self, "_frame_children", None)
+        if kids:
+            out["children"] = kids
+        return out
 
     # ------------------------------------------------------------------
     # Trajectory bundle builder + analytics recompute
@@ -1043,13 +1065,38 @@ class TrackingEngine:
         elif result.get("quality") == "valid_cart":
             loaded = result.get("fill") in ("partial", "full")
         else:
-            return
+            return False
         reads = self._cart_loaded_reads[cd]
         reads.append(loaded)
         if loaded and cd not in self._loaded_carts \
                 and longest_loaded_run(reads) >= GRABRUN_MIN_RUN_OBS:
             self._loaded_carts.add(cd)
             self._clip_loaded = True
+        return True
+
+    @staticmethod
+    def _read_evidence(result, cart_bb, person_bbs, children) -> tuple:
+        """(read P(non-empty), person cover, child-inside share) for one read.
+
+        Person cover: the largest share of the cart box any one person box
+        covers. Child-inside: the largest share of any child_in_cart box that
+        lies inside the cart box. Both are geometry in the image plane only, so
+        placement-free. P is the read's detector mean, None on a 2-class
+        backend or when the classifier fell back.
+        """
+        x1, y1, x2, y2 = cart_bb
+        area = max(1.0, float(x2 - x1) * float(y2 - y1))
+
+        def inter(b):
+            w = min(x2, b[2]) - max(x1, b[0])
+            h = min(y2, b[3]) - max(y1, b[1])
+            return max(0.0, w) * max(0.0, h)
+        cover = max((inter(pb) / area for pb in person_bbs), default=0.0)
+        child = max((inter(k) / max(1.0, (k[2] - k[0]) * (k[3] - k[1])) for k in children),
+                    default=0.0)
+        p = result.get("p_non_empty")
+        p = None if p is None or not np.isfinite(p) else round(float(p), 4)
+        return (p, round(cover, 3), round(child, 3))
 
     def _never_loaded(self, cd) -> bool:
         """compute_pops()'s `never_loaded` for cart `cd`, from what is known now.
@@ -1435,25 +1482,43 @@ class TrackingEngine:
         """The placement-free review label (engine/review_label.py).
 
         Reads ONLY state that camera placement cannot reach: the raw
-        classification history, the loaded-read sequence, the track span, the
-        split-track guard and the per-frame linker abandonment flag recorded in
-        _cart_facts. Never the event log, the peak snapshot or the clip verdict,
-        which all depend on direction.
+        classification history, the loaded-read sequence and its per-read
+        evidence, the track span and box movement, the split-track guard, the
+        detector's P(non-empty) and the per-frame linker link and abandonment
+        flags recorded in _cart_facts. Never the event log, the peak snapshot
+        or the clip verdict, which all depend on direction.
         """
+        return _review.review_label(self._review_facts())
+
+    def _review_facts(self) -> dict:
+        """cart display id -> CartReviewFacts. Separate from the label so an
+        evaluation harness can save the exact inputs and replay new rules."""
         fps = self._fps or 20
         # getattr: unit tests drive _finalise_pops() on hand-built engine state
         # that predates the per-frame fact timeline.
         facts = getattr(self, "_cart_facts", {})
+        extent = getattr(self, "_cart_extent", {})
+        p_acc = getattr(self, "_cart_p_acc", {})
+        st_acc = getattr(self, "_cart_stacked_acc", {})
+        read_ev = getattr(self, "_cart_read_evidence", {})
         carts = {}
         for cd, span in self._cart_span.items():
+            ext = extent.get(cd)
+            samples = facts.get(cd, ())
+            p, ps = p_acc.get(cd), st_acc.get(cd)
             carts[cd] = _review.CartReviewFacts(
                 seen_s=(span[2] - span[0] + 1) / fps,
                 history=list(self._cart_cls_history.get(cd, ())),
                 loaded_reads=list(self._cart_loaded_reads.get(cd, ())),
                 never_loaded=self._never_loaded(cd),
-                abandoned_flags=[s.abandoned_linker for s in facts.get(cd, ())],
+                abandoned_flags=[s.abandoned_linker for s in samples],
+                moved_px=None if ext is None else max(ext[1] - ext[0], ext[3] - ext[2]),
+                linked_ever=any(s.linked for s in samples) if samples else None,
+                p_mean=p[0] / p[1] if p and p[1] else None,
+                p_stacked_mean=ps[0] / ps[1] if ps and ps[1] else None,
+                read_evidence=list(read_ev.get(cd, ())),
             )
-        return _review.review_label(carts)
+        return carts
 
     def process_video(self, *args, progress=None, **kwargs):
         """Serialised public entry point — see `_process_video` for the pipeline.
@@ -1764,14 +1829,19 @@ class TrackingEngine:
             cart_count = 0
             frame_detections = []
             self._frame_p_non_empty = {}
+            self._frame_p_stacked = {}
+            self._frame_children = []
 
             # 5-class backend: children in a cart are drawn, never tracked, and
-            # feed no rule. Outside the tracked-boxes branch below so a frame
-            # with a child and no tracked box still shows it.
+            # feed no POPS rule (the review label's child rule reads them per
+            # read). Outside the tracked-boxes branch below so a frame with a
+            # child and no tracked box still shows it.
             _kids = getattr(results[0], "children", None) if results else None
             if _kids is not None:
                 for _k in _kids:
                     draw_child_box(im0, _k[:4], float(_k[4]))
+                    self._frame_children.append(
+                        [round(float(v), 1) for v in _k[:4]] + [round(float(_k[4]), 4)])
 
             if results and results[0].boxes is not None and results[0].boxes.id is not None:
                 r = results[0]
@@ -1829,8 +1899,17 @@ class TrackingEngine:
                             # not vote.
                             self._cart_state.add(disp, _p)
                             self._frame_p_non_empty[raw] = _p
+                            _acc = self._cart_p_acc[disp]
+                            _acc[0] += _p
+                            _acc[1] += 1
                             _state_kw = {"state": "loaded" if _p >= CART_STATE_NON_EMPTY_THRESH
                                          else "empty"}
+                    if p_st is not None and label == 'cart' and np.isfinite(p_st[_bi]):
+                        _ps = float(p_st[_bi])
+                        self._frame_p_stacked[raw] = _ps
+                        _acc = self._cart_stacked_acc[disp]
+                        _acc[0] += _ps
+                        _acc[1] += 1
                     # 5-class backend: a stacked cart is labelled as such. Drawn
                     # only; the loaded/empty read above is what the rules use.
                     if p_st is not None and label == 'cart' and p_st[_bi] >= STACKED_DRAW_THRESH:
@@ -1884,6 +1963,13 @@ class TrackingEngine:
                     self._cart_span[gdi('cart', raw)] = [frame_idx, list(bb), frame_idx, list(bb), 1]
                 else:
                     span[2], span[3], span[4] = frame_idx, list(bb), span[4] + 1
+                _cx, _cy = (bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5
+                ext = self._cart_extent.get(gdi('cart', raw))
+                if ext is None:
+                    self._cart_extent[gdi('cart', raw)] = [_cx, _cx, _cy, _cy]
+                else:
+                    ext[0], ext[1] = min(ext[0], _cx), max(ext[1], _cx)
+                    ext[2], ext[3] = min(ext[2], _cy), max(ext[3], _cy)
             self._linker.update(person_bb, cart_bb, frame_idx,
                                 self._obj_disappeared, self._obj_positions,
                                 self._obj_first_frame)
@@ -1918,7 +2004,10 @@ class TrackingEngine:
                             (result["fill"], result["bag"],
                              result.get("fill_conf", 0.0), result.get("bag_conf", 0.0))
                         )
-                    self._record_loaded_read(cd, result)
+                    if self._record_loaded_read(cd, result):
+                        self._cart_read_evidence[cd].append(
+                            self._read_evidence(result, bb, person_bb.values(),
+                                                self._frame_children))
 
             _t_cls += time.perf_counter() - _t0
 
@@ -2700,6 +2789,11 @@ class TrackingEngine:
                 "label": self._review_label["label"],
                 "reasons": self._review_label["reasons"],
                 "carts": {f"C{cd}": rec for cd, rec in self._review_label["carts"].items()},
+                "confidence": {
+                    **self._review_label["confidence"],
+                    "carts": {f"C{cd}": ev for cd, ev
+                              in self._review_label["confidence"]["carts"].items()},
+                },
             }
         # Record the thresholds ACTUALLY used, not the config defaults — with
         # the sidebar sliders those can differ, and a report that names the

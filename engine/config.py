@@ -325,15 +325,65 @@ REVIEW_UNREAD_MIN_S = 2.0
 # the seat, legs through the basket) rarely win the vote AND hold a long run.
 REVIEW_LOADED_BASIS = "both"
 # Consecutive loaded reads that make a sustained run for the review label (and
-# for its goods-removed test). Longer than GRABRUN_MIN_RUN_OBS (5): runs of 5-7
-# were mostly brief background carts in the every-cart-empty clips. The cost:
-# a loaded cart seen for only ~2 s (4 reads) is not reviewed.
-REVIEW_LOADED_MIN_RUN = 8
+# for its goods-removed test). The SAME run that makes the engine call a cart
+# loaded (GRABRUN_MIN_RUN_OBS), by reference so the two cannot drift apart:
+# the user's answer (2026-11-11, plan Q1) is that a cart with 5 to 7
+# consecutive loaded reads did hold items. With the review label at 8 and the
+# engine at 5, a cart with a run of 5-7 was neither "held goods" nor "never
+# loaded", and when its shopper stepped away the split-track guard reviewed it
+# as a loaded cart re-acquired, i.e. against itself. Measured cost on the 165
+# eval clips (offline replay): every-cart-empty clips skipped 46 -> 42 of 58,
+# pushouts reviewed 44 of 49 either way. Revert: set this to 8.
+REVIEW_LOADED_MIN_RUN = GRABRUN_MIN_RUN_OBS
 # When a cart counts as left by its shopper: "ever" (at any frame) or "end"
 # (it ends the clip without its shopper). "ever" is the user's rule
 # (2026-11-11): ANY abandonment of a cart that held goods, bagged or unbagged,
 # needs review. Abandonment of a cart that never held goods never does.
 REVIEW_ABANDON_MODE = "ever"
+
+# Candidate rules from docs/review_label_empty_cart_plan.md, each behind its own
+# switch and OFF until it passes the fresh validation set (plan section 8: P
+# not lower, E higher, the NOTHING HAPPENED tier 0 pushouts). In-sample numbers
+# on the 165 eval clips are in the plan; they were tuned on those clips.
+#
+# R2: a cart that never moved and was never linked to a person is a fixture (a
+# merchandise display rack read as a loaded cart), never a cart that held goods.
+REVIEW_IGNORE_STATIC_UNLINKED = False
+# Movement under this many pixels (largest extent of the box centre over the
+# cart's life) counts as "never moved". Shared by R2 and R3.
+REVIEW_STATIC_MOVE_PX = 40
+# R3: a brief cart read loaded on every read, at near-certain detector
+# confidence, and moving, holds goods even below REVIEW_LOADED_MIN_RUN. Catches
+# loaded carts that cross the frame in ~2 s (4 of the 5 missed pushouts). Such a
+# cart still goes through the normal rules (bagged with its shopper is skipped).
+REVIEW_PROMOTE_BRIEF_STRONG = False
+REVIEW_BRIEF_MIN_READS = 2
+REVIEW_BRIEF_MIN_P = 0.9
+# R4: a loaded read taken while a person covers at least this share of the cart
+# box, at a detector P(non-empty) under REVIEW_OCCLUDED_KEEP_P, is dropped
+# before the run is measured: the body over the basket, not goods, may be what
+# the detector saw. Per read, so a real pushout read with high confidence under
+# its pusher is kept.
+REVIEW_DROP_OCCLUDED_READS = False
+REVIEW_OCCLUDED_COVER = 0.5
+REVIEW_OCCLUDED_KEEP_P = 0.9
+# Phase 3 (5-class backend): a loaded read taken while a child_in_cart box sits
+# in the cart (at least this share of the child box inside the cart box) is
+# dropped; the user's policy is that a child-only cart is empty.
+REVIEW_DROP_CHILD_READS = False
+REVIEW_CHILD_INSIDE = 0.5
+# Phase 3 (5-class backend): a cart whose mean stacked_cart share over its life
+# reaches STACKED_DRAW_THRESH is a nest of empty carts and never held goods.
+REVIEW_STACKED_NOT_HELD = False
+# Phase 2: the confident NOTHING_HAPPENED tier. A SKIP clip is promoted when
+# every cart that is not a blip read empty with at least
+# REVIEW_CONFIDENT_MIN_READS reads and mean detector P(non-empty) at most
+# REVIEW_CONFIDENT_MAX_P, no cart went unread, and no cart was ever left by its
+# shopper, even an empty one (user's answer to plan Q3, 2026-11-11). The
+# evidence block is always written; the label only changes when this is on.
+REVIEW_CONFIDENT_TIER = False
+REVIEW_CONFIDENT_MIN_READS = 5
+REVIEW_CONFIDENT_MAX_P = 0.30
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------

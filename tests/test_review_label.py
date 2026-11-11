@@ -119,6 +119,110 @@ lab = RL.review_label({1: cart([EMPTY] * 20), 2: cart([PART_UNB] * (N + 2)),
 check("any loaded cart -> NEEDS_REVIEW with that cart's reason only",
       lab["label"] == RL.REVIEW and lab["reasons"] == ["Cart 2 held unbagged goods"], lab["reasons"])
 
+section("Q1: the review's run is the engine's run")
+from engine.config import GRABRUN_MIN_RUN_OBS  # noqa: E402
+check("REVIEW_LOADED_MIN_RUN follows GRABRUN_MIN_RUN_OBS", N == GRABRUN_MIN_RUN_OBS)
+check("a run of exactly GRABRUN_MIN_RUN_OBS held goods; shopper left -> reviewed",
+      decision(cart([PART_UNB] * GRABRUN_MIN_RUN_OBS + [EMPTY] * 15, never_loaded=False,
+                    abandoned=[True])) == RL.CART_GOODS_REMOVED)
+
+
+def ev_cart(history=(), *, moved=200.0, linked=True, p=None, stacked=None, evidence=(), **kw):
+    c = cart(history, **kw)
+    c.moved_px, c.linked_ever, c.p_mean, c.p_stacked_mean = moved, linked, p, stacked
+    c.read_evidence = list(evidence)
+    return c
+
+
+section("candidate rules are off by default")
+rack = ev_cart([("full", "unbagged", 0.9, 0.9)] * (N + 4), moved=1.0, linked=False, p=1.0)
+check("default: a static unlinked loaded box is reviewed", decision(rack) == RL.CART_LOADED)
+brief = ev_cart([PART_UNB] * 3, p=0.99, seen_s=2.0)
+check("default: a brief all-loaded cart is not promoted", decision(brief) == RL.CART_EMPTY)
+
+section("R2: static, never-linked fixture")
+check("static_unlinked: display rack -> fixture",
+      decision(rack, static_unlinked=True) == RL.CART_FIXTURE)
+check("static_unlinked: a linked static cart is still reviewed",
+      decision(ev_cart(rack.history, moved=1.0, linked=True, p=1.0), static_unlinked=True)
+      == RL.CART_LOADED)
+check("static_unlinked: a moving unlinked cart is still reviewed",
+      decision(ev_cart(rack.history, moved=300.0, linked=False, p=1.0), static_unlinked=True)
+      == RL.CART_LOADED)
+check("static_unlinked: missing evidence never fires",
+      decision(cart(rack.history), static_unlinked=True) == RL.CART_LOADED)
+
+section("R3: brief strongly-loaded cart")
+check("promote_brief: 3 reads all loaded, P 0.99, moving -> loaded",
+      decision(brief, promote_brief=True) == RL.CART_LOADED)
+check("promote_brief: bagged with its shopper is still skipped",
+      decision(ev_cart([PART_BAG] * 3, p=0.99), promote_brief=True) == RL.CART_BAGGED_WITH_SHOPPER)
+check("promote_brief: shopper left -> left_with_goods",
+      decision(ev_cart([PART_UNB] * 3, p=0.99, abandoned=[True]), promote_brief=True)
+      == RL.CART_LEFT_WITH_GOODS)
+check("promote_brief: detector-only reads (never classified) -> loaded, not unread_brief",
+      decision(ev_cart([], loaded=[True] * 3, p=0.99, seen_s=1.8), promote_brief=True)
+      == RL.CART_LOADED)
+check("promote_brief: one empty read blocks it",
+      decision(ev_cart([PART_UNB, EMPTY, PART_UNB], p=0.99), promote_brief=True) == RL.CART_EMPTY)
+check("promote_brief: P 0.8 blocks it", decision(ev_cart([PART_UNB] * 3, p=0.8), promote_brief=True)
+      == RL.CART_EMPTY)
+check("promote_brief: static blocks it",
+      decision(ev_cart([PART_UNB] * 3, p=0.99, moved=5.0), promote_brief=True) == RL.CART_EMPTY)
+check("promote_brief: a single read is not enough",
+      decision(ev_cart([PART_UNB], p=0.99), promote_brief=True) == RL.CART_EMPTY)
+
+section("R4 / child: doubtful loaded reads dropped per read")
+occl = ev_cart([PART_UNB] * N, evidence=[(0.7, 0.6, 0.0)] * N)
+check("drop_occluded: every loaded read under a person at P 0.7 -> run 0, empty",
+      decision(occl, drop_occluded=True) == RL.CART_EMPTY)
+check("drop_occluded: off -> loaded", decision(occl) == RL.CART_LOADED)
+check("drop_occluded: high-confidence reads under the pusher are kept",
+      decision(ev_cart([PART_UNB] * N, evidence=[(0.95, 0.8, 0.0)] * N), drop_occluded=True)
+      == RL.CART_LOADED)
+check("drop_occluded: misaligned evidence never fires",
+      decision(ev_cart([PART_UNB] * N, evidence=[(0.7, 0.6, 0.0)]), drop_occluded=True)
+      == RL.CART_LOADED)
+kid = ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.9)] * N)
+check("drop_child: loaded reads with a child in the cart -> empty",
+      decision(kid, drop_child=True) == RL.CART_EMPTY)
+check("drop_child: off -> loaded", decision(kid) == RL.CART_LOADED)
+
+section("stacked carts")
+stack = ev_cart([PART_UNB] * N, stacked=0.8)
+check("stacked_not_held: a stack -> stacked", decision(stack, stacked_not_held=True) == RL.CART_STACKED)
+check("stacked_not_held: off -> loaded", decision(stack) == RL.CART_LOADED)
+
+section("NOTHING_HAPPENED tier")
+clean = lambda **kw: ev_cart([EMPTY] * 10, p=0.1, **kw)  # noqa: E731
+lab = RL.review_label({1: clean(), 2: clean()}, confident_tier=True)
+check("tier on: two clean empty carts -> NOTHING_HAPPENED", lab["label"] == RL.NOTHING_HAPPENED, lab)
+lab = RL.review_label({1: clean(), 2: clean()})
+check("tier off (default): same clip -> SKIP with confident evidence",
+      lab["label"] == RL.SKIP and lab["confidence"]["confident"], lab["confidence"])
+lab = RL.review_label({1: clean(), 2: clean(abandoned=[False, True])}, confident_tier=True)
+check("Q3: an EMPTY cart left by its shopper blocks the tier (still SKIP)",
+      lab["label"] == RL.SKIP and any("left by its shopper" in b for b in lab["confidence"]["blocked_by"]),
+      lab["confidence"])
+lab = RL.review_label({1: clean(), 2: ev_cart([EMPTY] * 3, p=0.1)}, confident_tier=True)
+check("too few reads blocks the tier", lab["label"] == RL.SKIP)
+lab = RL.review_label({1: clean(), 2: ev_cart([EMPTY] * 10, p=0.45)}, confident_tier=True)
+check("mean P above the bar blocks the tier", lab["label"] == RL.SKIP)
+lab = RL.review_label({1: clean(), 2: ev_cart([EMPTY] * 10)}, confident_tier=True)
+check("unknown P (2-class backend) blocks the tier", lab["label"] == RL.SKIP)
+lab = RL.review_label({1: clean(), 2: cart(seen_s=(CART_BLIP_S + REVIEW_UNREAD_MIN_S) / 2)},
+                      confident_tier=True)
+check("a brief unread cart blocks the tier", lab["label"] == RL.SKIP)
+lab = RL.review_label({1: clean(), 2: cart(seen_s=CART_BLIP_S / 2)}, confident_tier=True)
+check("a blip does not block the tier", lab["label"] == RL.NOTHING_HAPPENED, lab["confidence"])
+lab = RL.review_label({1: clean(), 2: ev_cart([PART_BAG] * (N + 2), p=0.9)}, confident_tier=True)
+check("bagged with shopper -> SKIP, never NOTHING_HAPPENED", lab["label"] == RL.SKIP)
+check("no carts -> SKIP, never NOTHING_HAPPENED",
+      RL.review_label({}, confident_tier=True)["label"] == RL.SKIP)
+lab = RL.review_label({1: clean(), 2: ev_cart([PART_UNB] * (N + 2), p=0.9)}, confident_tier=True)
+check("a review clip is never confident", lab["label"] == RL.REVIEW
+      and not lab["confidence"]["confident"])
+
 # ---------------------------------------------------------------------------
 section("engine: built from placement-free state only")
 from collections import defaultdict  # noqa: E402
@@ -144,6 +248,12 @@ def engine_label(event_log, snapshots):
     e._peak_pops_snapshot = snapshots
     return e._build_review_label()
 
+
+ev = TrackingEngine._read_evidence({"p_non_empty": 0.8}, (0, 0, 100, 100),
+                                   [(50, 0, 150, 100), (0, 0, 10, 10)], [[10, 10, 30, 30, 0.9]])
+check("read evidence: P, largest person cover, child-inside share", ev == (0.8, 0.5, 1.0), ev)
+ev = TrackingEngine._read_evidence({"quality": "valid_cart"}, (0, 0, 100, 100), [], [])
+check("read evidence: no detector P, no person, no child", ev == (None, 0.0, 0.0), ev)
 
 a = engine_label([], {})
 b = engine_label([{"cart_id": 2, "event": "PUSHOUT ALERT", "pops_score": 90, "direction": "OUTBOUND",
