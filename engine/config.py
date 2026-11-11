@@ -309,6 +309,30 @@ SPLIT_TRACK_GAP_S = 5.0
 # clip verdict ignores it instead of calling the clip INSUFFICIENT EVIDENCE.
 # Half a second is 10 frames at the 19 fps these cameras record.
 CART_BLIP_S = 0.5
+
+# Placement-free review label (engine/review_label.py)
+# Tuned 2026-11-11 on the dev half of the 165 labelled eval clips
+# (clip_verdict_eval/compare_review.py --sweep), then read once on the held-out
+# half. Every setting tied on dev pushout recall (18/21), so the choice is the
+# one that skipped the most every-cart-empty clips (22/28).
+#
+# A cart that is never read clearly sends the clip to review only when it was
+# on screen at least this long; a briefer unread cart is skipped.
+REVIEW_UNREAD_MIN_S = 2.0
+# What makes a cart "loaded" for the review label: "run" (a sustained run of
+# loaded reads), "vote" (the fill vote says partial/full), "both" or "either".
+# "both" is the strictest: the false loaded reads on empty carts (a child in
+# the seat, legs through the basket) rarely win the vote AND hold a long run.
+REVIEW_LOADED_BASIS = "both"
+# Consecutive loaded reads that make a sustained run for the review label (and
+# for its goods-removed test). Longer than GRABRUN_MIN_RUN_OBS (5): runs of 5-7
+# were mostly brief background carts in the every-cart-empty clips. The cost:
+# a loaded cart seen for only ~2 s (4 reads) is not reviewed.
+REVIEW_LOADED_MIN_RUN = 8
+# When a cart counts as left by its shopper: "ever" (at any frame) or "end"
+# (it ends the clip without its shopper). "end" keeps a bagged cart whose
+# shopper stepped away for a moment from being reviewed.
+REVIEW_ABANDON_MODE = "end"
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------

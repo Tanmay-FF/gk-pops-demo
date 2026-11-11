@@ -44,6 +44,7 @@ from .cancellation import CancelToken, RunCancelled, RunSuperseded
 from .classifier import CartClassifier
 from .detection_backends import build_detection_model
 from . import cart_state as _cart_state
+from . import review_label as _review
 from .linker import PersonCartLinker
 from .motion import (compute_motion, compute_direction_label, DirectionLatch,
                      outbound_axis_value)
@@ -267,6 +268,7 @@ class TrackingEngine:
         self._fps               = 30.0  # the clip's, once open_video() says
 
         self._clip_verdict      = None  # set by _finalise_pops()
+        self._review_label      = None  # set by _finalise_pops(); placement-free
         self._motion_cache      = {}  # raw_id -> (speed, direction, status, accel, dir_label)
         # cart display_id -> last sustained OUTBOUND heading, held through the
         # UNKNOWN frames a parked cart produces. See motion.DirectionLatch.
@@ -664,7 +666,8 @@ class TrackingEngine:
         # advertising categories the user just tuned away. "" when this process
         # holds no POPS state; the caller reads that as "leave the tab alone"
         # rather than overwriting a good table with an empty one.
-        pops = (ui_builder.build_clip_verdict(
+        pops = (ui_builder.build_review_label(self._review_label)
+                + ui_builder.build_clip_verdict(
                     {**(self._clip_verdict or {}),
                      "operational_findings": result.rule_findings})
                 + ui_builder.build_pops_summary(
@@ -1424,6 +1427,33 @@ class TrackingEngine:
         self._clip_verdict = clip_verdict(self._event_log, cart_fills, self._clip_loaded)
         print(f"[VERDICT] {self._clip_verdict['verdict']}: "
               f"{self._clip_verdict['reason']}")
+        self._review_label = self._build_review_label()
+        print(f"[REVIEW] {self._review_label['label']}: "
+              + "; ".join(self._review_label["reasons"]))
+
+    def _build_review_label(self) -> dict:
+        """The placement-free review label (engine/review_label.py).
+
+        Reads ONLY state that camera placement cannot reach: the raw
+        classification history, the loaded-read sequence, the track span, the
+        split-track guard and the per-frame linker abandonment flag recorded in
+        _cart_facts. Never the event log, the peak snapshot or the clip verdict,
+        which all depend on direction.
+        """
+        fps = self._fps or 20
+        # getattr: unit tests drive _finalise_pops() on hand-built engine state
+        # that predates the per-frame fact timeline.
+        facts = getattr(self, "_cart_facts", {})
+        carts = {}
+        for cd, span in self._cart_span.items():
+            carts[cd] = _review.CartReviewFacts(
+                seen_s=(span[2] - span[0] + 1) / fps,
+                history=list(self._cart_cls_history.get(cd, ())),
+                loaded_reads=list(self._cart_loaded_reads.get(cd, ())),
+                never_loaded=self._never_loaded(cd),
+                abandoned_flags=[s.abandoned_linker for s in facts.get(cd, ())],
+            )
+        return _review.review_label(carts)
 
     def process_video(self, *args, progress=None, **kwargs):
         """Serialised public entry point — see `_process_video` for the pipeline.
@@ -2620,7 +2650,7 @@ class TrackingEngine:
         # Rule findings go into the POPS table too: it is the only per-cart
         # surface, so it is the one place a cart can be shown carrying several
         # operational categories at once (unattended AND blocking the exit).
-        pops_html   = ui_builder.build_clip_verdict(
+        pops_html   = ui_builder.build_review_label(self._review_label) + ui_builder.build_clip_verdict(
             {**(self._clip_verdict or {}),
              "operational_findings": analytics_result.rule_findings}
         ) + ui_builder.build_pops_summary(
@@ -2663,6 +2693,14 @@ class TrackingEngine:
                  "severity": d["severity"], "cart_id": d["cart_id"]}
                 for d in full_json["rule_findings"]],
         }
+        # Placement-free REVIEW / SKIP, beside the POPS verdict and independent
+        # of it: camera placement cannot change it. See engine/review_label.py.
+        if self._review_label is not None:
+            full_json["review_label"] = {
+                "label": self._review_label["label"],
+                "reasons": self._review_label["reasons"],
+                "carts": {f"C{cd}": rec for cd, rec in self._review_label["carts"].items()},
+            }
         # Record the thresholds ACTUALLY used, not the config defaults — with
         # the sidebar sliders those can differ, and a report that names the
         # wrong fuse length is worse than one that names none. Key names are

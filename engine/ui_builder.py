@@ -877,6 +877,19 @@ _VERDICT_SEVERITY = {
 }
 
 
+def build_review_label(review) -> str:
+    """One-line callout with the placement-free review label
+    (engine/review_label.py): REVIEW or SKIP, and why. Shown above the POPS
+    verdict and independent of it; camera placement cannot change it."""
+    if not review or not review.get("label"):
+        return ""
+    tone = "WATCH" if review["label"] == "REVIEW" else "GOOD"
+    reasons = review.get("reasons") or []
+    body = "<br>".join(T.esc(r) + "." for r in reasons)
+    return T.notice(f"Review label: {T.esc(review['label'])} (no camera placement used)",
+                    body, tone=tone)
+
+
 def build_clip_verdict(verdict) -> str:
     """One-line callout with the clip's verdict (scoring.clip_verdict()).
 
