@@ -250,15 +250,17 @@ def compute_pops(direction_label: str, speed_status: str, is_valid: bool,
                 # MERCH_REMOVED_FLOOR, so it gets the same floor here and
                 # reaches PUSHOUT ALERT through the existing
                 # HIGH_SCORE + abandoned route in classify_event().
-                if merch_removed and bag_label == "unbagged":
+                if merch_removed:
                     score = max(score, MERCH_REMOVED_FLOOR)
                 else:
                     score = max(score, 65)
             elif not (fill_label == "empty" and never_loaded):
                 score += 25
 
-    # Cap: partial + bagged is low-risk (items are paid for)
-    if fill_label == "partial" and bag_label == "bagged":
+    # Cap: partial + bagged is low-risk (items are paid for) -- unless the goods
+    # left the cart (merch_removed): then they are loose and bagged no longer
+    # means paid.
+    if fill_label == "partial" and bag_label == "bagged" and not merch_removed:
         score = min(score, 55)
     # ...and with the owner still on the cart, it is a customer leaving.
     if fill_label in ("partial", "full") and bag_label == "bagged" and not abandoned:

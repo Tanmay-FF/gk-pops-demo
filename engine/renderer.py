@@ -25,6 +25,22 @@ def outlined_text(im0, text, pos, scale, color, thickness=1):
     cv2.putText(im0, text, pos, _FONT, scale, color, thickness, cv2.LINE_AA)
 
 
+_COLOR_CHILD = (255, 0, 200)  # BGR magenta: distinct from person green and cart orange
+
+
+def draw_child_box(im0, box, conf):
+    """A child_in_cart box (5-class backend). Drawn only: children are not
+    tracked and no rule reads them, so there is no id."""
+    x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    cv2.rectangle(im0, (x1, y1), (x2, y2), _COLOR_CHILD, 2)
+    label = f"child {conf:.2f}"
+    (tw, th), _ = cv2.getTextSize(label, _FONT, 0.6, 2)
+    # Under the top edge, inside the box: a child sits inside a cart box whose
+    # own label already occupies the strip above it.
+    cv2.rectangle(im0, (x1, y1), (x1 + tw + 12, y1 + th + 12), _COLOR_CHILD, -1)
+    cv2.putText(im0, label, (x1 + 6, y1 + th + 5), _FONT, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+
+
 def draw_bbox(im0, box, display_id, cls_id, names, class_colors, state=None):
     """`state` (3-class backend only) is appended to the label, e.g.
     "cart:3 empty", so the overlay shows the detector's per-frame call."""

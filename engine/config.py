@@ -32,8 +32,16 @@ TRACKER_CONFIG = r"engine\botsort_retail.yaml"
 #:                           driver and same read logic. Beat YOLOv5 per cart
 #:                           on the 56 held-out clips (accuracy 0.920 vs
 #:                           0.873, McNemar p = 0.013).
-DETECTOR_BACKEND = "yolo26_3class"
-DETECTOR_BACKENDS = ("ultralytics_track", "ultralytics_direct", "yolov5_3class", "yolo26_3class")
+#:   "yolo26_5class"      -- YOLOv26m person / empty_cart / loaded_cart /
+#:                           stacked_cart / child_in_cart. Same driver, same
+#:                           tracking, same rules as "yolo26_3class": the three
+#:                           cart classes are merged into one tracked "cart"
+#:                           before NMS and loaded-vs-empty rides as
+#:                           P(non-empty). Stacked carts and children in a cart
+#:                           are DRAWN only; no rule reads them yet.
+DETECTOR_BACKEND = "yolo26_5class"
+DETECTOR_BACKENDS = ("ultralytics_track", "ultralytics_direct", "yolov5_3class", "yolo26_3class",
+                     "yolo26_5class")
 #: The backends whose detector reports P(non-empty) per cart.
 THREE_CLASS_BACKENDS = ("yolov5_3class", "yolo26_3class")
 
@@ -77,6 +85,19 @@ Y26_TRACK_CONF = 0.1
 #: ran with.
 Y26_IOU = 0.7
 Y26_IMGSZ = 640
+
+#: YOLOv26m 5-class checkpoint (dillion yolov26m_5_class). Not bundled in the
+#: repo; the path is the training machine's.
+Y26_5CLASS_WEIGHTS_PATH = r"D:\gatekeeper_projects\dillion\yolov26m_5_class\best.pt"
+#: Class names the 5-class checkpoint must carry; checked at load.
+FIVE_CLASS_NAMES = {"person": "person", "empty_cart": "empty_cart", "loaded_cart": "loaded_cart",
+                    "stacked_cart": "stacked_cart", "child": "child_in_cart"}
+#: A child_in_cart box is drawn when its confidence reaches this. Children are
+#: not tracked and feed no rule, so this only decides what is painted.
+CHILD_DRAW_CONF = 0.25
+#: A tracked cart is drawn "stacked" when the per-frame share of the
+#: stacked_cart class, p_stacked / (p_empty + p_loaded + p_stacked), reaches this.
+STACKED_DRAW_THRESH = 0.5
 
 #: Class names every 3-class checkpoint must carry; checked at load.
 THREE_CLASS_PERSON = "person"
@@ -483,7 +504,13 @@ WALKAWAY_MIN_GAP_PX = 40
 
 # Re-identification
 REID_DIST_THRESH     = 200    # max pixel distance for cart re-ID
-REID_MAX_GONE_FRAMES = 15     # max frames a cart can be gone and still re-ID
+#: Max frames a cart can be gone and still be re-identified. Kept under
+#: STALE_CART_FRAMES (30), where a cart's link record is purged. 15 was too short
+#: for a shopper who turns a cart around: on FF1763940475070 the detector lost
+#: the cart for 20 frames (confidence 0.32 -> 0.01 as the shopper's body covered
+#: it), and the cart came back as a new ID. 20 is the smallest value that
+#: covers that gap; a longer window merged more carts on the other golden clips.
+REID_MAX_GONE_FRAMES = 20
 
 # Nested duplicate detections
 # The detector emits a tight box and a loose box for the same cart. IoU-based

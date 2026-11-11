@@ -233,15 +233,22 @@ check("a full unbagged cart escalates the same way",
       _full >= MERCH_REMOVED_FLOOR and _event(_full) == "PUSHOUT ALERT",
       f"got {_full} / {_event(_full)!r}")
 
-# Bagged means the items look paid for, which is the one reading that survives
-# a cart going empty innocently: the customer transferred their own bags. The
-# partial+bagged cap of 55 is spec (see test_grabrun_override.py) and the
-# escalation must not lift it.
+# Bagged no longer shields a cart whose goods left it (merch_removed): the
+# bags are out of the cart and loose, so "bagged means paid" does not hold. This
+# reverses the old spec, which capped partial+bagged at 55 even with the
+# evidence (1764099569430 OUTSIDE Cart 1: bagged goods removed, cart abandoned).
 _bagged = _score("partial", "bagged", merch_removed=True)
-check("partial + bagged is still capped at 55 even with the evidence",
-      _bagged == 55, f"got {_bagged}")
-check("and does not become a pushout", _event(_bagged) != "PUSHOUT ALERT",
+check("partial + bagged with the evidence reaches MERCH_REMOVED_FLOOR",
+      _bagged >= MERCH_REMOVED_FLOOR, f"got {_bagged}")
+check("and becomes a pushout", _event(_bagged) == "PUSHOUT ALERT",
       f"got {_event(_bagged)!r}")
+
+# Without the evidence the cap of 55 still holds (a parked bagged cart).
+_bagged_no_ev = _score("partial", "bagged")
+check("partial + bagged without the evidence is still capped at 55",
+      _bagged_no_ev == 55, f"got {_bagged_no_ev}")
+check("and does not become a pushout without the evidence",
+      _event(_bagged_no_ev) != "PUSHOUT ALERT", f"got {_event(_bagged_no_ev)!r}")
 
 
 # ---------------------------------------------------------------------------

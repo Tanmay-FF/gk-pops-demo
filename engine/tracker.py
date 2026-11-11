@@ -35,7 +35,7 @@ from .config import (
     DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX,
     LINK_DRIFT_IOU,
     POSE_MODEL_PATH, POSE_IMGSZ, POSE_CONF_THRESHOLD,
-    POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN,
+    POSE_KP_CONF_THRESHOLD, POSE_MATCH_IOU_MIN, STACKED_DRAW_THRESH,
     RULE_BLOCKED_DOOR_S, RULE_STATIC_CART_S, RULE_ABANDONED_CART_S,
     PENDING_CASE_REPORTS_MAX,
 )
@@ -56,7 +56,7 @@ from .scoring import (
     LOGGABLE_EVENTS, HIGH_EVENTS, MEDIUM_EVENTS, MEDIUM_SCORE,
 )
 from .renderer import (
-    draw_bbox, draw_centroid_trail, draw_classification_overlay,
+    draw_bbox, draw_child_box, draw_centroid_trail, draw_classification_overlay,
     draw_person_overlay, draw_link_lines, draw_hud, outlined_text,
     draw_pose_skeleton, draw_rule_badges,
 )
@@ -1329,7 +1329,8 @@ class TrackingEngine:
             )
             final_score = recomputed
             # Re-apply caps based on final fill/bag
-            if best_fill == "partial" and best_bag == "bagged":
+            # merch_removed exempt, same as compute_pops(): the goods left the cart.
+            if best_fill == "partial" and best_bag == "bagged" and not merch_removed:
                 final_score = min(final_score, 55)
             final_event, final_color = classify_event(
                 final_score, linked, direction, abandoned=abandoned,
@@ -1734,6 +1735,14 @@ class TrackingEngine:
             frame_detections = []
             self._frame_p_non_empty = {}
 
+            # 5-class backend: children in a cart are drawn, never tracked, and
+            # feed no rule. Outside the tracked-boxes branch below so a frame
+            # with a child and no tracked box still shows it.
+            _kids = getattr(results[0], "children", None) if results else None
+            if _kids is not None:
+                for _k in _kids:
+                    draw_child_box(im0, _k[:4], float(_k[4]))
+
             if results and results[0].boxes is not None and results[0].boxes.id is not None:
                 r = results[0]
                 boxes = r.boxes.xyxy.cpu()
@@ -1751,6 +1760,9 @@ class TrackingEngine:
                         print(f"[WARN] frame {frame_idx}: {len(p_ne)} cart-state values "
                               f"for {len(ids)} boxes; ignoring them for this frame")
                         p_ne = None
+                p_st = getattr(r, "p_stacked", None)
+                if p_st is not None and len(p_st) != len(ids):
+                    p_st = None
 
                 # Count
                 for c in clss:
@@ -1789,6 +1801,10 @@ class TrackingEngine:
                             self._frame_p_non_empty[raw] = _p
                             _state_kw = {"state": "loaded" if _p >= CART_STATE_NON_EMPTY_THRESH
                                          else "empty"}
+                    # 5-class backend: a stacked cart is labelled as such. Drawn
+                    # only; the loaded/empty read above is what the rules use.
+                    if p_st is not None and label == 'cart' and p_st[_bi] >= STACKED_DRAW_THRESH:
+                        _state_kw["state"] = f"{_state_kw.get('state', '')} stacked".strip()
                     draw_bbox(im0, box, disp, c, names, self._class_colors, **_state_kw)
 
                     x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])

@@ -80,6 +80,11 @@ class Detections:
     cls: np.ndarray
     p_non_empty: np.ndarray
     orig_shape: tuple
+    #: 5-class backend only. p_stacked (N,): share of the stacked_cart class
+    #: for each cart box, NaN elsewhere. children (M, 5): [x1, y1, x2, y2,
+    #: conf] of child_in_cart boxes, which are never tracked.
+    p_stacked: Optional[np.ndarray] = None
+    children: Optional[np.ndarray] = None
 
     def __post_init__(self):
         n = len(self.conf)
@@ -609,6 +614,89 @@ class Yolo26ThreeClassDetector:
         )
 
 
+class Yolo26FiveClassDetector(Yolo26ThreeClassDetector):
+    """YOLOv26 person / empty_cart / loaded_cart / stacked_cart / child_in_cart.
+
+    Rules and tracking are the 3-class ones: empty_cart, loaded_cart and
+    stacked_cart are merged into ONE tracked "cart" before NMS (so a stack and
+    the cart under it never become two tracks), and loaded-vs-empty travels as
+
+        p_non_empty = p_loaded / (p_empty + p_loaded + p_stacked)
+
+    A stacked_cart is a nest of empty carts, so its mass counts toward empty.
+    The share of stacked_cart itself rides as `p_stacked` and is only drawn.
+
+    child_in_cart boxes sit INSIDE a cart box, so they get their own NMS pass
+    and never reach the tracker. They are returned in `Detections.children`.
+    """
+
+    def __init__(self, weights: str, device: str, conf: float, iou: float, imgsz: int,
+                 class_names: Mapping[str, str], child_conf: float):
+        super().__init__(weights, device, conf, iou, imgsz,
+                         {"person": class_names["person"], "empty_cart": class_names["empty_cart"],
+                          "non_empty_cart": class_names["loaded_cart"]})
+        by_name = {v: k for k, v in self.raw_names.items()}
+        try:
+            self._stacked_i = by_name[class_names["stacked_cart"]]
+            self._child_i = by_name[class_names["child"]]
+        except KeyError as e:
+            raise DetectionBackendError(
+                f"{weights} has classes {self.raw_names}; missing {e}") from None
+        if self._nc != 5:
+            raise DetectionBackendError(f"{weights} has {self._nc} classes, expected 5")
+        self._child_conf = float(child_conf)
+
+    def detect(self, frame: np.ndarray, imgsz: Optional[int] = None) -> Detections:
+        _check_frame(frame)
+        img = self._letterbox(image=frame)
+        img = np.ascontiguousarray(img[..., ::-1].transpose((2, 0, 1)))
+        dev = module_device(self._net)
+        t = torch.from_numpy(img).to(dev).float().div_(255.0).unsqueeze(0)
+        with torch.inference_mode():
+            pred = self._net(t)
+            if isinstance(pred, (list, tuple)):
+                pred = pred[0]
+            if pred.ndim != 3 or pred.shape[1] != 4 + self._nc:
+                raise DetectionBackendError(
+                    f"unexpected YOLOv26 output {tuple(pred.shape)}; expected (B, {4 + self._nc}, N)")
+            probs = pred[:, 4:].float()
+            boxes = pred[:, :4].float()
+            pick = lambda i: probs[:, i:i + 1]
+            p_person, p_empty, p_loaded = pick(self._person_i), pick(self._empty_i), pick(self._non_empty_i)
+            p_stack, p_child = pick(self._stacked_i), pick(self._child_i)
+            p_cart = torch.maximum(torch.maximum(p_empty, p_loaded), p_stack)
+            mass = (p_empty + p_loaded + p_stack).clamp_min(1e-9)
+            merged = torch.cat([boxes, p_person, p_cart, p_loaded / mass, p_stack / mass], dim=1)
+            out = self._nms.non_max_suppression(merged, self._conf, self._iou, nc=2)[0]
+            kids = self._nms.non_max_suppression(
+                torch.cat([boxes, p_child], dim=1), self._child_conf, self._iou, nc=1)[0]
+            if out is not None and len(out):
+                out[:, :4] = self._ops.scale_boxes(t.shape[2:], out[:, :4], frame.shape)
+                out = out.detach().cpu().numpy()
+            else:
+                out = None
+            if kids is not None and len(kids):
+                kids[:, :4] = self._ops.scale_boxes(t.shape[2:], kids[:, :4], frame.shape)
+                children = kids[:, :5].detach().cpu().numpy().astype(np.float32)
+            else:
+                children = np.zeros((0, 5), np.float32)
+        if out is None:
+            d = Detections.empty(frame.shape)
+            return Detections(d.xyxy, d.conf, d.cls, d.p_non_empty, d.orig_shape,
+                              p_stacked=np.zeros((0,), np.float32), children=children)
+        cls = out[:, 5].astype(np.float32)
+        is_cart = cls == CART_CLS
+        return Detections(
+            xyxy=out[:, :4].astype(np.float32),
+            conf=out[:, 4].astype(np.float32),
+            cls=cls,
+            p_non_empty=np.where(is_cart, np.clip(out[:, 6], 0.0, 1.0), np.nan).astype(np.float32),
+            orig_shape=tuple(frame.shape[:2]),
+            p_stacked=np.where(is_cart, np.clip(out[:, 7], 0.0, 1.0), np.nan).astype(np.float32),
+            children=children,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tracking driver
 # ---------------------------------------------------------------------------
@@ -618,12 +706,16 @@ class TrackedResult:
     `.id` is None when nothing is tracked) plus `.p_non_empty`, a numpy array
     aligned with the boxes (NaN where it does not apply)."""
 
-    __slots__ = ("boxes", "p_non_empty", "orig_shape")
+    __slots__ = ("boxes", "p_non_empty", "orig_shape", "p_stacked", "children")
 
-    def __init__(self, boxes, p_non_empty: np.ndarray, orig_shape):
+    def __init__(self, boxes, p_non_empty: np.ndarray, orig_shape,
+                 p_stacked: Optional[np.ndarray] = None, children: Optional[np.ndarray] = None):
         self.boxes = boxes
         self.p_non_empty = p_non_empty
         self.orig_shape = orig_shape
+        # 5-class backend only; None elsewhere. See Detections.
+        self.p_stacked = p_stacked
+        self.children = children
 
 
 class _TrackerHolder:
@@ -726,7 +818,9 @@ class DirectTrackingModel:
         if tracks is None or len(tracks) == 0:
             # Same as ultralytics: an untracked frame keeps id None.
             empty = Boxes(np.zeros((0, 6), np.float32), det.orig_shape)
-            return [TrackedResult(empty, np.zeros((0,), np.float32), det.orig_shape)]
+            return [TrackedResult(empty, np.zeros((0,), np.float32), det.orig_shape,
+                                  p_stacked=None if det.p_stacked is None else np.zeros((0,), np.float32),
+                                  children=det.children)]
         tracks = np.asarray(tracks, dtype=np.float32)
         idx = tracks[:, -1].astype(int)
         if idx.min() < 0 or idx.max() >= len(det):
@@ -742,7 +836,9 @@ class DirectTrackingModel:
 
         boxes_out = Boxes(ops.clip_boxes(torch.as_tensor(tracks[:, :-1]), det.orig_shape),
                           det.orig_shape)
-        return [TrackedResult(boxes_out, det.p_non_empty[idx].copy(), det.orig_shape)]
+        return [TrackedResult(boxes_out, det.p_non_empty[idx].copy(), det.orig_shape,
+                              p_stacked=None if det.p_stacked is None else det.p_stacked[idx].copy(),
+                              children=det.children)]
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +875,10 @@ def build_detection_model(backend: str, device: str, model_path: Optional[str] =
         det = YoloV5ThreeClassDetector(
             C.V5_WEIGHTS_PATH, C.V5_REPO_PATH, device=device,
             conf=C.V5_CONF, iou=C.V5_IOU, imgsz=C.V5_IMGSZ, class_names=names3)
+    elif backend == "yolo26_5class":
+        det = Yolo26FiveClassDetector(
+            C.Y26_5CLASS_WEIGHTS_PATH, device=device, conf=C.Y26_TRACK_CONF, iou=C.Y26_IOU,
+            imgsz=C.Y26_IMGSZ, class_names=C.FIVE_CLASS_NAMES, child_conf=C.CHILD_DRAW_CONF)
     elif backend == "yolo26_3class":
         det = Yolo26ThreeClassDetector(
             C.Y26_WEIGHTS_PATH, device=device,
@@ -799,6 +899,10 @@ def backend_fingerprint(backend: str) -> str:
         if backend == "yolov5_3class":
             path = C.V5_WEIGHTS_PATH
             extra = f"conf={C.V5_CONF},iou={C.V5_IOU},imgsz={C.V5_IMGSZ}"
+        elif backend == "yolo26_5class":
+            path = C.Y26_5CLASS_WEIGHTS_PATH
+            extra = (f"conf={C.Y26_TRACK_CONF},iou={C.Y26_IOU},imgsz={C.Y26_IMGSZ},"
+                     f"state_min_conf={C.CART_STATE_MIN_CONF},child={C.CHILD_DRAW_CONF}")
         elif backend == "yolo26_3class":
             path = C.Y26_WEIGHTS_PATH
             extra = (f"conf={C.Y26_TRACK_CONF},iou={C.Y26_IOU},imgsz={C.Y26_IMGSZ},"
