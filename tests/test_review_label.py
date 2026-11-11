@@ -5,7 +5,8 @@ What it pins:
   * every cart decision in cart_decision()'s documented order;
   * an empty cart is never a reason to review, abandoned or not, unless the
     split-track guard says it may be a loaded cart re-acquired;
-  * bagged goods with the shopper still there are skipped, left behind are reviewed;
+  * normal first: bagged goods whose shopper never left are skipped; ANY
+    abandonment of a cart that held goods, bagged or unbagged, is reviewed;
   * an unread cart is reviewed only past REVIEW_UNREAD_MIN_S; a blip is ignored;
   * the clip is REVIEW when any cart is, with that cart's reason;
   * the engine path builds the label from placement-free state only: changing
@@ -56,25 +57,35 @@ def decision(c, **kw):
 
 
 # ---------------------------------------------------------------------------
-section("cart decisions")
+section("cart decisions: normal first")
 check("empty cart -> empty", decision(cart([EMPTY] * 20)) == RL.CART_EMPTY)
 check("empty cart left behind, never loaded -> empty (not reviewed)",
       decision(cart([EMPTY] * 20, abandoned=[False] * 5 + [True] * 5)) == RL.CART_EMPTY)
 check("empty cart left behind on a split loaded track -> split_track",
       decision(cart([EMPTY] * 20, never_loaded=False, abandoned=[True])) == RL.CART_SPLIT_TRACK)
-check("loaded unbagged with shopper -> loaded",
+check("loaded bagged, shopper never left -> bagged_with_shopper (normal)",
+      decision(cart([PART_BAG] * (N + 2), abandoned=[False] * 5)) == RL.CART_BAGGED_WITH_SHOPPER)
+check("loaded unbagged, shopper with it -> loaded (review)",
       decision(cart([PART_UNB] * (N + 2))) == RL.CART_LOADED)
-check("loaded bagged with shopper -> bagged_with_shopper",
-      decision(cart([PART_BAG] * (N + 2), abandoned=[True, False])) == RL.CART_BAGGED_WITH_SHOPPER)
-check("loaded bagged left at the end -> bagged_left",
-      decision(cart([PART_BAG] * (N + 2), abandoned=[False, True])) == RL.CART_BAGGED_LEFT)
-check("abandon_mode=ever: stepping away once counts",
-      decision(cart([PART_BAG] * (N + 2), abandoned=[True, False]), abandon_mode="ever")
-      == RL.CART_BAGGED_LEFT)
+
+section("any abandonment of a cart that held goods needs review")
+check("bagged, shopper stepped away once and came back -> left_with_goods",
+      decision(cart([PART_BAG] * (N + 2), abandoned=[False, True, False])) == RL.CART_LEFT_WITH_GOODS)
+check("bagged, left at the end -> left_with_goods",
+      decision(cart([PART_BAG] * (N + 2), abandoned=[False, True])) == RL.CART_LEFT_WITH_GOODS)
+check("unbagged, left -> left_with_goods",
+      decision(cart([PART_UNB] * (N + 2), abandoned=[True])) == RL.CART_LEFT_WITH_GOODS)
 check("loaded run then empty, shopper gone -> goods_removed",
       decision(cart([PART_UNB] * (N + 2) + [EMPTY] * 15, abandoned=[True])) == RL.CART_GOODS_REMOVED)
-check("same history, shopper still there -> not goods_removed",
-      decision(cart([PART_UNB] * (N + 2) + [EMPTY] * 15, abandoned=[False])) != RL.CART_GOODS_REMOVED)
+check("a long loaded run the vote overrules, shopper left -> still reviewed",
+      decision(cart([PART_UNB] * N + [EMPTY] * (3 * N) + [PART_UNB] * 2, abandoned=[True]))
+      == RL.CART_GOODS_REMOVED)  # the 2 trailing loaded reads are noise; it ends empty
+check("same history, shopper still there -> empty (normal)",
+      decision(cart([PART_UNB] * N + [EMPTY] * (3 * N) + [PART_UNB] * 2, abandoned=[False]))
+      == RL.CART_EMPTY)
+check("abandon_mode=end: stepping away once does not count",
+      decision(cart([PART_BAG] * (N + 2), abandoned=[True, False]), abandon_mode="end")
+      == RL.CART_BAGGED_WITH_SHOPPER)
 
 section("loaded basis")
 short = cart([PART_UNB] * (N - 1))  # wins the vote, run too short
@@ -83,6 +94,8 @@ check("basis vote: the same cart is loaded", decision(short, loaded_basis="vote"
 noisy = cart([PART_UNB] * N + [EMPTY] * (3 * N))  # long run, loses the vote
 check("basis both: a run that loses the vote is not loaded", decision(noisy) == RL.CART_EMPTY)
 check("basis run: the same cart is loaded", decision(noisy, loaded_basis="run") == RL.CART_LOADED)
+check("a short loaded run, shopper left -> not held, so empty (never a review reason)",
+      decision(cart([PART_UNB] * (N - 1), abandoned=[True])) == RL.CART_EMPTY)
 det_only = cart([], loaded=[True] * N, seen_s=5.0)  # NON-EMPTY reads, every crop failed quality
 check("detector-only sustained loaded run -> loaded", decision(det_only) == RL.CART_LOADED)
 
@@ -98,12 +111,12 @@ check("no carts -> SKIP", lab["label"] == RL.SKIP and lab["reasons"] == ["No car
 lab = RL.review_label({1: cart([EMPTY] * 20), 2: cart([EMPTY] * 9, abandoned=[True])})
 check("all empty -> SKIP 'Every cart read empty'",
       lab["label"] == RL.SKIP and lab["reasons"] == ["Every cart read empty"], lab["reasons"])
-lab = RL.review_label({1: cart([EMPTY] * 20), 2: cart([PART_BAG] * (N + 2))})
+lab = RL.review_label({1: cart([EMPTY] * 20), 2: cart([PART_BAG] * (N + 2), abandoned=[False])})
 check("empty + bagged with shopper -> SKIP naming the bagged cart",
       lab["label"] == RL.SKIP and any("Cart 2" in r for r in lab["reasons"]), lab["reasons"])
 lab = RL.review_label({1: cart([EMPTY] * 20), 2: cart([PART_UNB] * (N + 2)),
                        3: cart(seen_s=CART_BLIP_S / 2)})
-check("any loaded cart -> REVIEW with that cart's reason only",
+check("any loaded cart -> NEEDS_REVIEW with that cart's reason only",
       lab["label"] == RL.REVIEW and lab["reasons"] == ["Cart 2 held unbagged goods"], lab["reasons"])
 
 # ---------------------------------------------------------------------------
@@ -137,7 +150,7 @@ b = engine_label([{"cart_id": 2, "event": "PUSHOUT ALERT", "pops_score": 90, "di
                    "abandoned": True}],
                  {1: {"direction": "INBOUND", "abandoned": False, "score": 5},
                   2: {"direction": "OUTBOUND", "abandoned": True, "score": 90}})
-check("engine label: REVIEW for the loaded cart", a["label"] == RL.REVIEW, a)
+check("engine label: NEEDS_REVIEW for the loaded cart", a["label"] == RL.REVIEW, a)
 check("engine label ignores event log and peak snapshots",
       (a["label"], a["reasons"]) == (b["label"], b["reasons"]), (a, b))
 check("abandoned empty cart 1 is not a review reason",

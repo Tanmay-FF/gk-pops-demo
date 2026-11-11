@@ -330,9 +330,10 @@ REVIEW_LOADED_BASIS = "both"
 # a loaded cart seen for only ~2 s (4 reads) is not reviewed.
 REVIEW_LOADED_MIN_RUN = 8
 # When a cart counts as left by its shopper: "ever" (at any frame) or "end"
-# (it ends the clip without its shopper). "end" keeps a bagged cart whose
-# shopper stepped away for a moment from being reviewed.
-REVIEW_ABANDON_MODE = "end"
+# (it ends the clip without its shopper). "ever" is the user's rule
+# (2026-11-11): ANY abandonment of a cart that held goods, bagged or unbagged,
+# needs review. Abandonment of a cart that never held goods never does.
+REVIEW_ABANDON_MODE = "ever"
 # ---------------------------------------------------------------------------
 # Processing cadence
 # ---------------------------------------------------------------------------

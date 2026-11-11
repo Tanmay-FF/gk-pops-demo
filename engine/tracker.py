@@ -2693,7 +2693,7 @@ class TrackingEngine:
                  "severity": d["severity"], "cart_id": d["cart_id"]}
                 for d in full_json["rule_findings"]],
         }
-        # Placement-free REVIEW / SKIP, beside the POPS verdict and independent
+        # Placement-free NEEDS_REVIEW / SKIP, beside the POPS verdict and independent
         # of it: camera placement cannot change it. See engine/review_label.py.
         if self._review_label is not None:
             full_json["review_label"] = {
