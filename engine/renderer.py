@@ -33,7 +33,7 @@ def draw_child_box(im0, box, conf):
     tracked and no rule reads them, so there is no id."""
     x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
     cv2.rectangle(im0, (x1, y1), (x2, y2), _COLOR_CHILD, 2)
-    label = f"child {conf:.2f}"
+    label = f"child_in_cart {conf:.2f}"
     (tw, th), _ = cv2.getTextSize(label, _FONT, 0.6, 2)
     # Under the top edge, inside the box: a child sits inside a cart box whose
     # own label already occupies the strip above it.

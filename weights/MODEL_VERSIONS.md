@@ -40,7 +40,11 @@ What this means:
 - v2's confidences are not temperature scaled, so the confidence-weighted vote in `engine/scoring.py` sees a softer
   scale than with v1. Labels are unaffected.
 - child / stack come out as extra keys on each classification (`child_in_cart`, `child_conf`, `stacked`,
-  `stack_conf`). Nothing in the engine decides on them yet.
+  `stack_conf`). Since 2026-11-12 the child label drives the review label's child rule
+  (`REVIEW_DROP_CHILD_READS` on, `REVIEW_CHILD_SOURCE = "classifier"`, P >= 0.5): a loaded read of a cart the
+  child head calls child_in_cart is dropped, per the policy that a child-only cart is empty. It only changes the
+  review label, never POPS. Its precision on random carts was 12/43 at 0.5, so expect some loaded reads of
+  child-free carts to be dropped. The stacked rule stays off.
 
 Clip spot check (2026-11-12): 9 held-out-camera clips (3 Confirmed, 3 Suspicious, 3 Not_A_Pushout), each run with
 v1 and then v2, same placement and settings. 7 of 9 clip verdicts unchanged and all 3 PUSHOUT ALERTs kept. One

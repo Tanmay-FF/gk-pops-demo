@@ -185,8 +185,8 @@ check("drop_occluded: misaligned evidence never fires",
       == RL.CART_LOADED)
 kid = ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.9)] * N)
 check("drop_child: loaded reads with a child in the cart -> empty",
-      decision(kid, drop_child=True) == RL.CART_EMPTY)
-check("drop_child: off -> loaded", decision(kid) == RL.CART_LOADED)
+      decision(kid, drop_child=True, child_source="detector") == RL.CART_EMPTY)
+check("drop_child: off -> loaded", decision(kid, drop_child=False) == RL.CART_LOADED)
 
 section("stacked carts")
 stack = ev_cart([PART_UNB] * N, stacked=0.8)
@@ -199,8 +199,8 @@ check("child either: classifier alone (P 0.99) drops the reads -> empty",
       decision(cls_kid, drop_child=True, child_source="either") == RL.CART_EMPTY)
 check("child detector: classifier ignored -> loaded",
       decision(cls_kid, drop_child=True, child_source="detector") == RL.CART_LOADED)
-check("child either: classifier below REVIEW_CLS_CHILD_MIN (P 0.6) -> loaded",
-      decision(ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.0, 0.6)] * N),
+check("child either: classifier below REVIEW_CLS_CHILD_MIN (P 0.3) -> loaded",
+      decision(ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.0, 0.3)] * N),
                drop_child=True, child_source="either") == RL.CART_LOADED)
 check("child both: detector child but classifier says no -> loaded",
       decision(ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.9, 0.1)] * N),
@@ -208,7 +208,11 @@ check("child both: detector child but classifier says no -> loaded",
 check("child both: 3-tuple (legacy) evidence falls back to the detector -> empty",
       decision(kid, drop_child=True, child_source="both") == RL.CART_EMPTY)
 check("child: master switch off -> classifier evidence never fires",
-      decision(cls_kid, child_source="either") == RL.CART_LOADED)
+      decision(cls_kid, drop_child=False, child_source="either") == RL.CART_LOADED)
+check("child default (2026-11-12): on, classifier head is the source -> empty",
+      decision(cls_kid) == RL.CART_EMPTY)
+check("child default: detector-only child (3-tuple, no classifier P) does not fire",
+      decision(kid) == RL.CART_LOADED)
 cls_stack = ev_cart([PART_UNB] * N, stacked=0.1)
 cls_stack.cls_stacked_mean = 0.97
 check("stacked either: classifier mean 0.97 alone -> stacked",

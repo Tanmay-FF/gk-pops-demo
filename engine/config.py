@@ -370,7 +370,9 @@ REVIEW_OCCLUDED_KEEP_P = 0.9
 # Phase 3 (5-class backend): a loaded read taken while a child_in_cart box sits
 # in the cart (at least this share of the child box inside the cart box) is
 # dropped; the user's policy is that a child-only cart is empty.
-REVIEW_DROP_CHILD_READS = False
+# On since 2026-11-12 (user), with the v2 classifier's child head as the source
+# (REVIEW_CHILD_SOURCE below).
+REVIEW_DROP_CHILD_READS = True
 REVIEW_CHILD_INSIDE = 0.5
 # Phase 3 (5-class backend): a cart whose mean stacked_cart share over its life
 # reaches STACKED_DRAW_THRESH is a nest of empty carts and never held goods.
@@ -383,9 +385,15 @@ REVIEW_STACKED_NOT_HELD = False
 # >= REVIEW_CLS_CHILD_MIN (either: 9/20 recall, 9/10 precise). Stack detector
 # 26/40 at 26/29; either with v2 mean >= REVIEW_CLS_STACKED_MIN 27/40 at 27/30.
 # With the legacy classifier there are no child / stack outputs and the
-# classifier side never fires, so "either" behaves as "detector".
-REVIEW_CHILD_SOURCE = "either"
-REVIEW_CLS_CHILD_MIN = 0.98
+# classifier side never fires, so "either" behaves as "detector" (and
+# "classifier" never fires at all).
+# Child: the user chose the v2 child head's own label (P >= 0.5) on 2026-11-12.
+# Measured cost at 0.5: on random carts it is wrong about 3 times in 4 when it
+# says child (12/43), so some loaded reads of child-free carts are dropped.
+# Raise REVIEW_CLS_CHILD_MIN (0.98 gave 9/10 precise, with "either") to trade
+# recall for precision.
+REVIEW_CHILD_SOURCE = "classifier"
+REVIEW_CLS_CHILD_MIN = 0.5
 REVIEW_STACKED_SOURCE = "either"
 REVIEW_CLS_STACKED_MIN = 0.95
 # Phase 2: the confident NOTHING_HAPPENED tier. A SKIP clip is promoted when
