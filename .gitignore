@@ -106,12 +106,15 @@ runs/
 # ---------------------------------------------------------------------------
 # Model weights.
 #
-# The four weights the demo actually loads STAY IN GIT (via LFS, see
-# .gitattributes) -- a clone that cannot load them cannot run:
-#   weights/detection/weights/best.pt          engine/config.py:14
-#   weights/pose_estimation/yolo26l-pose.pt    engine/config.py:135
-#   weights/cart_quality/weights/best.pt       engine/config.py:485
-#   weights/fill_and_bag_classifier/.../best.pt engine/config.py:486
+# The weights the engine loads STAY IN GIT (via LFS, see .gitattributes) --
+# a clone that cannot load them cannot run (paths in engine/config.py):
+#   weights/detection_5class_yolo26/weights/best.pt    Y26_5CLASS_WEIGHTS_PATH (default detector)
+#   weights/detection_3class_yolo26/weights/best.pt    Y26_WEIGHTS_PATH
+#   weights/detection/weights/best.pt                  MODEL_PATH (2-class backends)
+#   weights/pose_estimation/yolo26l-pose.pt            POSE_MODEL_PATH
+#   weights/cart_classifier_multihead/weights/best.pt  MULTIHEAD_WEIGHT_PATH (default classifier, v2)
+#   weights/cart_quality/weights/best.pt               QUALITY_WEIGHT_PATH (v1)
+#   weights/fill_and_bag_classifier/.../best.pt        FILL_WEIGHT_PATH (v1)
 #
 # The two below are referenced by nothing in engine/, tests/, api/ or web/ --
 # an older 3-class detector and the nano pose model we did not end up using.

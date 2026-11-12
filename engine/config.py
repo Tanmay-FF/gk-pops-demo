@@ -86,9 +86,12 @@ Y26_TRACK_CONF = 0.1
 Y26_IOU = 0.7
 Y26_IMGSZ = 640
 
-#: YOLOv26m 5-class checkpoint (dillion yolov26m_5_class). Not bundled in the
-#: repo; the path is the training machine's.
-Y26_5CLASS_WEIGHTS_PATH = r"D:\gatekeeper_projects\dillion\yolov26m_5_class\best.pt"
+#: YOLOv26m 5-class checkpoint, bundled in the repo via git-lfs since
+#: 2026-11-12: a byte copy of dillion/yolov26m_5_class/best.pt (md5
+#: 53a7dd24a34b5d5494af867423d10462, epoch 18 of the camera-holdout Run A,
+#: data_holdout.yaml). See weights/MODEL_VERSIONS.md.
+Y26_5CLASS_WEIGHTS_PATH = str(Path(__file__).resolve().parent.parent
+                              / "weights" / "detection_5class_yolo26" / "weights" / "best.pt")
 #: Class names the 5-class checkpoint must carry; checked at load.
 FIVE_CLASS_NAMES = {"person": "person", "empty_cart": "empty_cart", "loaded_cart": "loaded_cart",
                     "stacked_cart": "stacked_cart", "child": "child_in_cart"}

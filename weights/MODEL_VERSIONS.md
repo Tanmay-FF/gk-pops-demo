@@ -1,3 +1,19 @@
+# Detector (5-class, default backend)
+
+`DETECTOR_BACKEND = "yolo26_5class"` loads `detection_5class_yolo26/weights/best.pt`
+(`Y26_5CLASS_WEIGHTS_PATH` in `engine/config.py`).
+
+| | |
+|---|---|
+| File | `detection_5class_yolo26/weights/best.pt` (131 MB, git-lfs) |
+| md5 | `53a7dd24a34b5d5494af867423d10462` |
+| Source | byte copy of `D:\gatekeeper_projects\dillion\yolov26m_5_class\best.pt`, added to the repo 2026-11-12 |
+| Model | YOLOv26m, classes person, empty_cart, loaded_cart, stacked_cart, child_in_cart |
+| Training | Run A, camera holdout (`data_holdout.yaml`), epoch 18, checkpoint dated 2026-11-09 |
+
+The file is the unstripped training checkpoint (it still holds the optimizer state, hence 131 MB). It was kept
+byte-identical on purpose: ultralytics' strip_optimizer would also cast the weights to FP16.
+
 # Cart classifier versions
 
 The engine picks a version with `CLASSIFIER_BACKEND` in `engine/config.py`.
