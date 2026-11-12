@@ -25,10 +25,17 @@ HAS_CUDA = torch.cuda.is_available()
 
 
 class FakeClassifier:
-    def __init__(self, device, quality, fill):
+    def __init__(self, device, quality, fill, multi=None):
         self.device = device
         self._quality_model = quality
         self._fill_model = fill
+        self._multi_model = multi
+
+    def models(self):
+        # Same contract as CartClassifier.models(): the tracker's device moves
+        # walk this list, so the fake must expose it too.
+        return [(n, m) for n, m in (("quality", self._quality_model), ("fill", self._fill_model),
+                                    ("multihead", self._multi_model)) if m is not None]
 
 
 class FakeYOLO:

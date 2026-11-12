@@ -320,18 +320,20 @@ def test_a_stranded_classifier_is_repaired_and_changes_nothing():
     # Load the classifiers by doing one real run, then strand one of them the
     # way a half-completed .to("cuda") does.
     frames_before, _ = _capture(engine_obj, clip, settings)
-    assert engine_obj._classifier._quality_model is not None, (
-        "the warm-up run did not load the quality model")
-    engine_obj._classifier._quality_model.to("cpu")
+    # Whichever classifier CLASSIFIER_BACKEND loaded: v1's quality model, or the
+    # v2 multi-head model that replaces both v1 models.
+    loaded = engine_obj._classifier.models()
+    assert loaded, "the warm-up run did not load a classifier model"
+    name, model = loaded[0]
+    model.to("cpu")
 
     frames_after, log = _capture(engine_obj, clip, settings)
     _assert_same(frames_after, frames_before, "the run after stranding")
     warns = [l for l in log.splitlines() if "models not on" in l]
     assert len(warns) == 1, f"expected exactly one drift warning, got {warns}"
-    assert "quality" in warns[0], warns[0]
+    assert name in warns[0], warns[0]
     assert "start of run" in warns[0], warns[0]
-    assert T.TrackingEngine._param_device(
-        engine_obj._classifier._quality_model) == "cuda"
+    assert T.TrackingEngine._param_device(model) == "cuda"
 
 
 if __name__ == "__main__":

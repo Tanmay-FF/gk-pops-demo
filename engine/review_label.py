@@ -51,6 +51,7 @@ from .config import (
     REVIEW_PROMOTE_BRIEF_STRONG, REVIEW_BRIEF_MIN_READS, REVIEW_BRIEF_MIN_P,
     REVIEW_DROP_OCCLUDED_READS, REVIEW_OCCLUDED_COVER, REVIEW_OCCLUDED_KEEP_P,
     REVIEW_DROP_CHILD_READS, REVIEW_CHILD_INSIDE, REVIEW_STACKED_NOT_HELD,
+    REVIEW_CHILD_SOURCE, REVIEW_CLS_CHILD_MIN, REVIEW_STACKED_SOURCE, REVIEW_CLS_STACKED_MIN,
     REVIEW_CONFIDENT_TIER, REVIEW_CONFIDENT_MIN_READS, REVIEW_CONFIDENT_MAX_P,
 )
 from .scoring import (
@@ -115,8 +116,10 @@ class CartReviewFacts:
     p_mean: Optional[float] = None       # mean detector P(non-empty) over every frame it was scored
     p_stacked_mean: Optional[float] = None  # mean stacked_cart share (5-class backend)
     # One entry per loaded_reads entry: (read P(non-empty) or None, largest
-    # person cover of the cart box, largest share of a child box inside it).
+    # person cover of the cart box, largest share of a child box inside it,
+    # v2 classifier P(child in cart) or None). Older runs have 3-tuples.
     read_evidence: list = field(default_factory=list)
+    cls_stacked_mean: Optional[float] = None  # mean v2 classifier P(stacked) over its reads
 
 
 def _longest_true_run(seq) -> int:
@@ -136,7 +139,23 @@ def _abandoned(flags, mode: str) -> bool:
     return bool(flags[-1]) if mode == "end" else any(flags)
 
 
-def _filtered_reads(f: CartReviewFacts, drop_occluded: bool, drop_child: bool):
+def _signal(source: str, det: bool, cls: Optional[bool]) -> bool:
+    """Combine the detector and v2 classifier views of one yes / no signal.
+    `cls` None means the classifier has no opinion (legacy classifier, or an
+    older run): then every source except "classifier" falls back to the detector."""
+    if cls is None:
+        return det if source != "classifier" else False
+    return {"detector": det, "classifier": cls, "either": det or cls,
+            "both": det and cls}[source]
+
+
+def _child_in_read(child, cls_child, source: str) -> bool:
+    det = child is not None and child >= REVIEW_CHILD_INSIDE
+    return _signal(source, det, None if cls_child is None else cls_child >= REVIEW_CLS_CHILD_MIN)
+
+
+def _filtered_reads(f: CartReviewFacts, drop_occluded: bool, drop_child: bool,
+                    child_source: str = REVIEW_CHILD_SOURCE):
     """The loaded-read sequence with doubtful LOADED reads removed (R4, child).
 
     A removed read neither counts toward nor breaks a run, the same treatment
@@ -149,11 +168,11 @@ def _filtered_reads(f: CartReviewFacts, drop_occluded: bool, drop_child: bool):
         return reads, 0
     kept = []
     for loaded, e in zip(reads, ev):
-        p, cover, child = (tuple(e) + (None, None, None))[:3]
+        p, cover, child, cls_child = (tuple(e) + (None, None, None, None))[:4]
         if loaded and drop_occluded and cover is not None and cover >= REVIEW_OCCLUDED_COVER \
                 and (p is None or p < REVIEW_OCCLUDED_KEEP_P):
             continue
-        if loaded and drop_child and child is not None and child >= REVIEW_CHILD_INSIDE:
+        if loaded and drop_child and _child_in_read(child, cls_child, child_source):
             continue
         kept.append(loaded)
     return kept, len(reads) - len(kept)
@@ -167,7 +186,9 @@ def cart_decision(f: CartReviewFacts, *, unread_min_s: float = REVIEW_UNREAD_MIN
                   promote_brief: bool = REVIEW_PROMOTE_BRIEF_STRONG,
                   drop_occluded: bool = REVIEW_DROP_OCCLUDED_READS,
                   drop_child: bool = REVIEW_DROP_CHILD_READS,
-                  stacked_not_held: bool = REVIEW_STACKED_NOT_HELD) -> tuple[str, dict]:
+                  stacked_not_held: bool = REVIEW_STACKED_NOT_HELD,
+                  child_source: str = REVIEW_CHILD_SOURCE,
+                  stacked_source: str = REVIEW_STACKED_SOURCE) -> tuple[str, dict]:
     """One cart's decision and the facts behind it.
 
     Normal first; anything not positively normal needs review:
@@ -202,7 +223,7 @@ def cart_decision(f: CartReviewFacts, *, unread_min_s: float = REVIEW_UNREAD_MIN
       "either"-- either of the above (loosest)
     """
     fill, bag, _ = vote_classification(f.history)
-    reads, dropped = _filtered_reads(f, drop_occluded, drop_child)
+    reads, dropped = _filtered_reads(f, drop_occluded, drop_child, child_source)
     run = _longest_true_run(reads)
     run_loaded = run >= min_run
     vote_loaded = fill in ("partial", "full")
@@ -220,8 +241,9 @@ def cart_decision(f: CartReviewFacts, *, unread_min_s: float = REVIEW_UNREAD_MIN
     abandoned = _abandoned(f.abandoned_flags, abandon_mode)
     fixture = (static_unlinked and f.moved_px is not None and f.moved_px < REVIEW_STATIC_MOVE_PX
                and f.linked_ever is False and not any(f.abandoned_flags))
-    stacked = (stacked_not_held and f.p_stacked_mean is not None
-               and f.p_stacked_mean >= STACKED_DRAW_THRESH)
+    stacked_det = f.p_stacked_mean is not None and f.p_stacked_mean >= STACKED_DRAW_THRESH
+    stacked_cls = None if f.cls_stacked_mean is None else f.cls_stacked_mean >= REVIEW_CLS_STACKED_MIN
+    stacked = stacked_not_held and _signal(stacked_source, stacked_det, stacked_cls)
     removed = abandoned and merchandise_removed([h[0] for h in f.history], min_run)
     bag = (vote_bag_for_loaded_cart(f.history) if f.history else "unbagged") if held else None
     facts = {"fill": fill, "bag": bag, "loaded_run": run, "loaded": loaded, "held": held,
@@ -231,7 +253,9 @@ def cart_decision(f: CartReviewFacts, *, unread_min_s: float = REVIEW_UNREAD_MIN
              "brief_strong": brief_strong,
              "moved_px": None if f.moved_px is None else round(f.moved_px, 1),
              "linked_ever": f.linked_ever,
-             "p_mean": None if f.p_mean is None else round(f.p_mean, 3)}
+             "p_mean": None if f.p_mean is None else round(f.p_mean, 3),
+             "p_stacked_mean": None if f.p_stacked_mean is None else round(f.p_stacked_mean, 3),
+             "cls_stacked_mean": None if f.cls_stacked_mean is None else round(f.cls_stacked_mean, 3)}
 
     # Loaded reads on something that is not a cart anyone's goods could be in.
     # Only overrides "held": an empty fixture or stack reads empty anyway.

@@ -783,6 +783,16 @@ def build_detection_info(n_people, n_carts, n_links):
     return styled_table("Detection Summary", rows, tone="GOOD")
 
 
+def _weight_name(pt):
+    """'cart_classifier_multihead/best.pt' rather than a bare 'best.pt': every
+    classifier checkpoint is named best.pt, so the model folder is what tells
+    v1 (cart_quality, fill_and_bag_classifier) from v2 (cart_classifier_multihead).
+    See weights/MODEL_VERSIONS.md."""
+    parts = os.path.normpath(pt).split(os.sep)
+    model_dir = parts[-3] if len(parts) >= 3 and parts[-2] == "weights" else parts[-2] if len(parts) >= 2 else ""
+    return f"{model_dir}/{parts[-1]}" if model_dir else parts[-1]
+
+
 def build_config_info(link_confirm, link_grace, camera, quality_pt, fill_pt,
                       threshold, enable_pose=True):
     rows = [
@@ -795,8 +805,8 @@ def build_config_info(link_confirm, link_grace, camera, quality_pt, fill_pt,
         ("Link Confirmation", f"{link_confirm} frames co-movement + overlap"),
         ("Link Grace Period", f"{link_grace} frames before linking new cart"),
         ("Camera Placement", T.esc(camera)),
-        ("Quality Model", T.esc(os.path.basename(quality_pt)) if quality_pt else "None"),
-        ("Fill/Bag Model", T.esc(os.path.basename(fill_pt)) if fill_pt else "None"),
+        ("Quality Model", T.esc(_weight_name(quality_pt)) if quality_pt else "None"),
+        ("Fill/Bag Model", T.esc(_weight_name(fill_pt)) if fill_pt else "None"),
         ("Quality Threshold", f"{threshold:.2f}"),
     ]
     return styled_table("Model Configuration", rows, tone="INFO")

@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 
 from .config import CLS_TRANSFORM, BAG_NA_IDX, BAG_CLASSES, EMPTY_OVERRIDE_THRESH
-from .models import load_quality_checkpoint, load_fill_checkpoint
+from .models import load_quality_checkpoint, load_fill_checkpoint, load_multihead_checkpoint
 
 _EMPTY_RESULT_UNCLEAR = {
     "is_valid": False, "quality": "unclear",
@@ -34,6 +34,7 @@ class CartClassifier:
         "_fill_model", "_fill_pt", "_fill_temp", "_bag_temp",
         "_fill_classes", "_bag_classes", "_n_bag_model",
         "_quality_threshold",
+        "_multi_model", "_multi_pt", "_multi_heads", "_multi_pad",
     )
 
     def __init__(self, device: str):
@@ -49,23 +50,35 @@ class CartClassifier:
         self._bag_classes = list(BAG_CLASSES)
         self._n_bag_model = len(BAG_CLASSES)
         self._quality_threshold = 0.75
+        # v2 multi-head model (one pass for quality / fill / bag / child / stack).
+        # When loaded it replaces both legacy models; see load_multihead().
+        self._multi_model = None
+        self._multi_pt = None
+        self._multi_heads = None
+        self._multi_pad = None
 
     @property
     def quality_pt(self):
-        return self._quality_pt
+        return self._multi_pt if self._multi_model is not None else self._quality_pt
 
     @property
     def fill_pt(self):
-        return self._fill_pt
+        return self._multi_pt if self._multi_model is not None else self._fill_pt
 
     @property
     def has_quality_model(self):
-        return self._quality_model is not None
+        return self._quality_model is not None or self._multi_model is not None
+
+    def models(self):
+        """(name, module) for every loaded classifier model, for device moves."""
+        return [(n, m) for n, m in (("quality", self._quality_model), ("fill", self._fill_model),
+                                    ("multihead", self._multi_model)) if m is not None]
 
     def set_quality_threshold(self, v: float):
         self._quality_threshold = v
 
     def load_quality(self, pt_path: str):
+        self._drop_multihead()
         if pt_path == self._quality_pt:
             return
         print(f"[INFO] Loading quality model: {pt_path}")
@@ -74,6 +87,7 @@ class CartClassifier:
         self._report_load_device("quality", self._quality_model)
 
     def load_fill(self, pt_path: str):
+        self._drop_multihead()
         if pt_path == self._fill_pt:
             return
         print(f"[INFO] Loading fill/bag model: {pt_path}")
@@ -81,6 +95,25 @@ class CartClassifier:
          self._n_bag_model, self._fill_temp, self._bag_temp) = load_fill_checkpoint(pt_path, self.device)
         self._fill_pt = pt_path
         self._report_load_device("fill/bag", self._fill_model)
+
+    def load_multihead(self, pt_path: str):
+        """Load the v2 multi-head classifier. It replaces both legacy models.
+
+        The legacy models are dropped (not just ignored) so the device-move code
+        in the tracker, which walks models(), never carries a stale pair.
+        """
+        if pt_path == self._multi_pt and self._multi_model is not None:
+            return
+        print(f"[INFO] Loading multi-head cart classifier: {pt_path}")
+        self._multi_model, self._multi_heads, self._multi_pad = load_multihead_checkpoint(pt_path, self.device)
+        self._multi_pt = pt_path
+        self._quality_model = self._fill_model = None
+        self._quality_pt = self._fill_pt = None
+        self._report_load_device("multi-head", self._multi_model)
+
+    def _drop_multihead(self):
+        self._multi_model = self._multi_heads = self._multi_pad = None
+        self._multi_pt = None
 
     def _report_load_device(self, kind: str, model) -> torch.device:
         """Say where a freshly loaded model landed, and warn if it is not `self.device`.
@@ -143,14 +176,25 @@ class CartClassifier:
             return torch.device("cpu")
         return devs.pop()
 
-    def _crop_and_transform(self, frame_bgr, bbox):
-        """Crop cart from frame and return transformed tensor, or None if too small."""
-        x1, y1, x2, y2 = bbox
+    def _crop_and_transform(self, frame_bgr, bbox, pad=None):
+        """Crop cart from frame and return transformed tensor, or None if too small.
+
+        pad = (top, sides, bottom) fractions of the box (the multi-head model's
+        training crop). The size check runs on the clipped box before padding,
+        and the padding arithmetic matches cart_attr_labels p1_extract.pad_box
+        exactly: int() truncation of each margin, then clip to the frame.
+        """
+        x1, y1, x2, y2 = (int(v) for v in bbox)
         h, w = frame_bgr.shape[:2]
         x1 = max(0, x1); y1 = max(0, y1)
         x2 = min(w, x2); y2 = min(h, y2)
         if x2 - x1 < 10 or y2 - y1 < 10:
             return None
+        if pad is not None:
+            t, s, bo = pad
+            bw, bh = x2 - x1, y2 - y1
+            x1, y1, x2, y2 = (max(0, x1 - int(s * bw)), max(0, y1 - int(t * bh)),
+                              min(w, x2 + int(s * bw)), min(h, y2 + int(bo * bh)))
         crop = frame_bgr[y1:y2, x1:x2]
         pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         return CLS_TRANSFORM(pil_img)
@@ -167,6 +211,8 @@ class CartClassifier:
         Returns:
             Dict mapping cart_id -> classification result dict.
         """
+        if self._multi_model is not None:
+            return self._classify_batch_multi(frame_bgr, bboxes, cart_ids)
         if not bboxes or self._quality_model is None:
             fallback = _EMPTY_RESULT_NO_MODEL if self._quality_model is None else _EMPTY_RESULT_TINY
             return {cid: fallback for cid in cart_ids}
@@ -264,6 +310,85 @@ class CartClassifier:
 
         return results
 
+    # ------------------------------------------------------------------
+    # v2 multi-head path. Same result dict as the legacy path (same keys, same
+    # label strings, same EMPTY_OVERRIDE_THRESH and classify_loaded rules), plus
+    # four extra keys: child_in_cart / child_conf and stacked / stack_conf.
+    # The extras are informational only; nothing downstream decides on them.
+    # Softmax at T = 1.0: this model has no temperature calibration yet.
+    # ------------------------------------------------------------------
+    _FILL_NAMES = {"E": "empty", "P": "partial", "F": "full"}
+    _BAG_NAMES = {"b": "bagged", "u": "unbagged"}
+
+    def _multi_forward(self, batch):
+        out = self._multi_model(batch.to(self._weights_device(self._multi_model, self.device)))
+        return {h: torch.softmax(v.float(), dim=1) for h, v in out.items()}
+
+    def _multi_extras(self, probs, k) -> dict:
+        extra = {}
+        H = self._multi_heads
+        if "child" in probs and "y" in H["child"]:
+            p = float(probs["child"][k, H["child"].index("y")])
+            extra.update(child_in_cart=p >= 0.5, child_conf=p)
+        if "stack" in probs and "s" in H["stack"]:
+            p = float(probs["stack"][k, H["stack"].index("s")])
+            extra.update(stacked=p >= 0.5, stack_conf=p)
+        return extra
+
+    def _multi_result(self, probs, k, allow_empty: bool) -> dict:
+        H = self._multi_heads
+        pq = probs["q"][k]
+        valid_prob = float(pq[H["q"].index("V")])
+        extra = self._multi_extras(probs, k)
+        if valid_prob < self._quality_threshold:
+            return {
+                "is_valid": False, "quality": "unclear",
+                "fill": "non-applicable", "bag": "non-applicable",
+                "quality_conf": 1.0 - valid_prob,
+                "fill_conf": 0.0, "bag_conf": 0.0, **extra,
+            }
+        fill_classes = [self._FILL_NAMES[c] for c in H["fill"]]
+        fp = probs["fill"][k]
+        empty_idx = fill_classes.index("empty")
+        if allow_empty:
+            fill_idx = int(fp.argmax())
+            if float(fp[empty_idx]) >= EMPTY_OVERRIDE_THRESH:
+                fill_idx = empty_idx
+            fill_conf = float(fp[fill_idx])
+        else:
+            loaded = [i for i, c in enumerate(fill_classes) if c != "empty"]
+            sub = fp[loaded]
+            j = int(sub.argmax())
+            fill_idx = loaded[j]
+            fill_conf = float(sub[j]) / max(float(sub.sum()), 1e-12)
+        if fill_idx == empty_idx:
+            bag_lbl, bag_conf = "not_applicable", 1.0
+        else:
+            bp = probs["bag"][k]
+            bag_idx = int(bp.argmax())
+            bag_lbl, bag_conf = self._BAG_NAMES[H["bag"][bag_idx]], float(bp[bag_idx])
+        return {
+            "is_valid": True, "quality": "valid_cart",
+            "fill": fill_classes[fill_idx], "bag": bag_lbl,
+            "quality_conf": valid_prob,
+            "fill_conf": fill_conf, "bag_conf": bag_conf, **extra,
+        }
+
+    def _classify_batch_multi(self, frame_bgr, bboxes, cart_ids) -> dict:
+        results, tensors, keep = {}, [], []
+        for i, bbox in enumerate(bboxes):
+            t = self._crop_and_transform(frame_bgr, bbox, self._multi_pad)
+            if t is None:
+                results[cart_ids[i]] = _EMPTY_RESULT_TINY
+            else:
+                tensors.append(t)
+                keep.append(i)
+        if tensors:
+            probs = self._multi_forward(torch.stack(tensors))
+            for k, i in enumerate(keep):
+                results[cart_ids[i]] = self._multi_result(probs, k, allow_empty=True)
+        return results
+
     def classify(self, frame_bgr, bbox) -> dict:
         """Classify a single cart crop. Returns result dict (original path)."""
         return self._classify_one(frame_bgr, bbox, allow_empty=True)
@@ -285,6 +410,12 @@ class CartClassifier:
     # on (a graph per crop, and torch's requires_grad scalar warning).
     @torch.no_grad()
     def _classify_one(self, frame_bgr, bbox, allow_empty: bool) -> dict:
+        if self._multi_model is not None:
+            t = self._crop_and_transform(frame_bgr, bbox, self._multi_pad)
+            if t is None:
+                return _EMPTY_RESULT_TINY
+            probs = self._multi_forward(torch.stack([t]))
+            return self._multi_result(probs, 0, allow_empty)
         t = self._crop_and_transform(frame_bgr, bbox)
         if t is None:
             return _EMPTY_RESULT_TINY

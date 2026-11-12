@@ -22,7 +22,7 @@
     "merch_removed": false,
     "owner": null,
     "peak_event": "PUSHOUT ALERT",
-    "peak_frame": 351
+    "peak_frame": 329
    },
    "C3": {
     "abandoned": false,
@@ -48,7 +48,7 @@
     "cart_id": 2,
     "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
-    "fill": "full",
+    "fill": "partial",
     "frame": 24,
     "linked": false,
     "pops_score": 75,
@@ -8143,7 +8143,7 @@
  },
  "provenance": {
   "detector": "ultralytics_track:52009682:1777561815177817200:",
-  "python": "3.11.9",
+  "python": "3.12.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"

@@ -159,3 +159,48 @@ def load_fill_checkpoint(pt_path: str, device: str):
     )
     return (model, fill_classes, bag_classes_display, n_bag,
             calib["fill_temperature"], calib["bag_temperature"])
+
+
+# ---------------------------------------------------------------------------
+# Multi-head cart classifier (v2, 2026-11-12)
+# ---------------------------------------------------------------------------
+class MultiHeadCartModel(nn.Module):
+    """One backbone, one LayerNorm-Dropout-Linear head per field.
+
+    Trained by cart_attr_labels/tools/p4_train.py (MultiHead there; this is the
+    same layout so its state_dict loads with strict=True). Heads and their class
+    order come from the checkpoint's "heads" dict, e.g.
+    {"q": ["V", "U"], "fill": ["E", "P", "F"], "bag": ["b", "u"],
+     "child": ["n", "y"], "stack": ["1", "s"]}.
+    """
+
+    def __init__(self, heads: dict, backbone_name: str = "mobilenet_v3_large", dropout: float = 0.3):
+        super().__init__()
+        self.backbone, self.feat_dim = _build_cls_backbone(backbone_name)
+        self.heads = nn.ModuleDict({
+            h: nn.Sequential(nn.LayerNorm(self.feat_dim), nn.Dropout(dropout), nn.Linear(self.feat_dim, len(c)))
+            for h, c in heads.items()
+        })
+
+    def forward(self, x):
+        f = self.backbone(x)
+        return {h: m(f) for h, m in self.heads.items()}
+
+
+def load_multihead_checkpoint(pt_path: str, device: str):
+    """Load a MultiHeadCartModel. Returns (model, heads dict, crop pad (top, sides, bottom)).
+
+    strict=True on purpose: a key mismatch must fail loudly, never run with
+    randomly initialised heads. No temperature calibration exists for this
+    model, so the caller uses softmax at T = 1.0.
+    """
+    ckpt = torch.load(pt_path, map_location=device, weights_only=False)
+    heads = {h: list(c) for h, c in ckpt["heads"].items()}
+    for need in ("q", "fill", "bag"):
+        if need not in heads:
+            raise ValueError(f"{pt_path}: multi-head checkpoint has no '{need}' head")
+    model = MultiHeadCartModel(heads, ckpt.get("backbone", "mobilenet_v3_large")).to(device)
+    model.load_state_dict(ckpt["model_state"], strict=True)
+    model.eval()
+    pad = tuple(ckpt.get("crop_pad", (0.25, 0.10, 0.05)))
+    return model, heads, pad

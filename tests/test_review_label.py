@@ -193,6 +193,38 @@ stack = ev_cart([PART_UNB] * N, stacked=0.8)
 check("stacked_not_held: a stack -> stacked", decision(stack, stacked_not_held=True) == RL.CART_STACKED)
 check("stacked_not_held: off -> loaded", decision(stack) == RL.CART_LOADED)
 
+section("v2 classifier child / stack evidence (REVIEW_CHILD_SOURCE, REVIEW_STACKED_SOURCE)")
+cls_kid = ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.0, 0.99)] * N)
+check("child either: classifier alone (P 0.99) drops the reads -> empty",
+      decision(cls_kid, drop_child=True, child_source="either") == RL.CART_EMPTY)
+check("child detector: classifier ignored -> loaded",
+      decision(cls_kid, drop_child=True, child_source="detector") == RL.CART_LOADED)
+check("child either: classifier below REVIEW_CLS_CHILD_MIN (P 0.6) -> loaded",
+      decision(ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.0, 0.6)] * N),
+               drop_child=True, child_source="either") == RL.CART_LOADED)
+check("child both: detector child but classifier says no -> loaded",
+      decision(ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.9, 0.1)] * N),
+               drop_child=True, child_source="both") == RL.CART_LOADED)
+check("child both: 3-tuple (legacy) evidence falls back to the detector -> empty",
+      decision(kid, drop_child=True, child_source="both") == RL.CART_EMPTY)
+check("child: master switch off -> classifier evidence never fires",
+      decision(cls_kid, child_source="either") == RL.CART_LOADED)
+cls_stack = ev_cart([PART_UNB] * N, stacked=0.1)
+cls_stack.cls_stacked_mean = 0.97
+check("stacked either: classifier mean 0.97 alone -> stacked",
+      decision(cls_stack, stacked_not_held=True, stacked_source="either") == RL.CART_STACKED)
+check("stacked detector: classifier ignored -> loaded",
+      decision(cls_stack, stacked_not_held=True, stacked_source="detector") == RL.CART_LOADED)
+check("stacked both: detector says no -> loaded",
+      decision(cls_stack, stacked_not_held=True, stacked_source="both") == RL.CART_LOADED)
+check("stacked either: classifier mean 0.9 is under REVIEW_CLS_STACKED_MIN -> loaded",
+      decision(ev_cart([PART_UNB] * N, stacked=0.1), stacked_not_held=True, stacked_source="either")
+      == RL.CART_LOADED)
+check("stacked both: legacy run (no classifier mean) falls back to the detector",
+      decision(stack, stacked_not_held=True, stacked_source="both") == RL.CART_STACKED)
+check("stacked: facts carry both means",
+      RL.cart_decision(cls_stack)[1]["cls_stacked_mean"] == 0.97)
+
 section("NOTHING_HAPPENED tier")
 clean = lambda **kw: ev_cart([EMPTY] * 10, p=0.1, **kw)  # noqa: E731
 lab = RL.review_label({1: clean(), 2: clean()}, confident_tier=True)
@@ -251,9 +283,11 @@ def engine_label(event_log, snapshots):
 
 ev = TrackingEngine._read_evidence({"p_non_empty": 0.8}, (0, 0, 100, 100),
                                    [(50, 0, 150, 100), (0, 0, 10, 10)], [[10, 10, 30, 30, 0.9]])
-check("read evidence: P, largest person cover, child-inside share", ev == (0.8, 0.5, 1.0), ev)
+check("read evidence: P, largest person cover, child-inside share", ev == (0.8, 0.5, 1.0, None), ev)
 ev = TrackingEngine._read_evidence({"quality": "valid_cart"}, (0, 0, 100, 100), [], [])
-check("read evidence: no detector P, no person, no child", ev == (None, 0.0, 0.0), ev)
+check("read evidence: no detector P, no person, no child", ev == (None, 0.0, 0.0, None), ev)
+ev = TrackingEngine._read_evidence({"quality": "valid_cart", "child_conf": 0.991234}, (0, 0, 100, 100), [], [])
+check("read evidence: v2 classifier P(child) is the 4th element", ev == (None, 0.0, 0.0, 0.9912), ev)
 
 a = engine_label([], {})
 b = engine_label([{"cart_id": 2, "event": "PUSHOUT ALERT", "pops_score": 90, "direction": "OUTBOUND",

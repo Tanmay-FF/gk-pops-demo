@@ -5324,7 +5324,7 @@
  },
  "provenance": {
   "detector": "yolo26_3class:44005017:1793028244000000000:conf=0.1,iou=0.7,imgsz=640,state_min_conf=0.25",
-  "python": "3.11.9",
+  "python": "3.12.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"

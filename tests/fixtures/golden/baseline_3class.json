@@ -25,7 +25,7 @@
     "direction": "OUTBOUND",
     "event": "PUSHOUT ALERT",
     "fill": "partial",
-    "frame": 72,
+    "frame": 64,
     "linked": true,
     "pops_score": 75,
     "speed_status": "STATIC"
@@ -5377,7 +5377,7 @@
  },
  "provenance": {
   "detector": "yolov5_3class:42156013:1778613297000000000:conf=0.25,iou=0.45,imgsz=640",
-  "python": "3.11.9",
+  "python": "3.12.9",
   "tracker_config_sha": "26104b659248",
   "ultralytics": "8.4.19",
   "weights": "52009682:1777561815177817200"

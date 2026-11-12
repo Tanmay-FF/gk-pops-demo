@@ -375,6 +375,19 @@ REVIEW_CHILD_INSIDE = 0.5
 # Phase 3 (5-class backend): a cart whose mean stacked_cart share over its life
 # reaches STACKED_DRAW_THRESH is a nest of empty carts and never held goods.
 REVIEW_STACKED_NOT_HELD = False
+# Which signal the two rules above use (2026-11-12): the 5-class detector, the
+# v2 multihead classifier's child / stack heads, or both. "either" = detector OR
+# classifier, "both" = detector AND classifier. Measured on held-out test
+# cameras against Sonnet labels (random carts): child detector precision 8/8
+# but recall 8/20; v2 child is only 12/43 precise at p 0.5, so it votes only at
+# >= REVIEW_CLS_CHILD_MIN (either: 9/20 recall, 9/10 precise). Stack detector
+# 26/40 at 26/29; either with v2 mean >= REVIEW_CLS_STACKED_MIN 27/40 at 27/30.
+# With the legacy classifier there are no child / stack outputs and the
+# classifier side never fires, so "either" behaves as "detector".
+REVIEW_CHILD_SOURCE = "either"
+REVIEW_CLS_CHILD_MIN = 0.98
+REVIEW_STACKED_SOURCE = "either"
+REVIEW_CLS_STACKED_MIN = 0.95
 # Phase 2: the confident NOTHING_HAPPENED tier. A SKIP clip is promoted when
 # every cart that is not a blip read empty with at least
 # REVIEW_CONFIDENT_MIN_READS reads and mean detector P(non-empty) at most
@@ -872,9 +885,25 @@ LATCH_REVERSAL_PX        = 40
 # ---------------------------------------------------------------------------
 WEIGHTS_DIR = Path(r"weights")
 
+# Which cart classifier the engine runs. See weights/MODEL_VERSIONS.md for what
+# each version was trained on and how they scored against each other.
+#   "multihead": v2 (2026-11-12), one model for quality / fill / bag (+ child,
+#                stack as extra outputs), run on the cart box padded top 25% /
+#                sides 10% / bottom 5%, the crop it was trained on.
+#   "legacy":    v1 (2026-04-30), separate quality and fill/bag models on the
+#                exact cart box. Kept, unchanged, so a run can be compared or
+#                rolled back by flipping this one value.
+CLASSIFIER_BACKEND = "multihead"
+
+# v1 (legacy) weights
 QUALITY_WEIGHT_PATH = str(WEIGHTS_DIR / "cart_quality" / "weights" / "best.pt")
 FILL_WEIGHT_PATH    = str(WEIGHTS_DIR / "fill_and_bag_classifier" / "weights" / "best.pt")
 
+# v2 (multihead) weights; the crop padding is read from the checkpoint
+MULTIHEAD_WEIGHT_PATH = str(WEIGHTS_DIR / "cart_classifier_multihead" / "weights" / "best.pt")
+
+# Valid-cart gate on P(valid). For the 2-class multihead quality head 0.50 is
+# the argmax, which is what its test scores were measured at.
 QUALITY_THRESHOLD   = 0.50
 
 # ---------------------------------------------------------------------------

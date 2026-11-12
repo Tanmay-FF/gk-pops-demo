@@ -30,6 +30,7 @@ from .config import (
     PROGRESS_MAX_UPDATES, PROGRESS_MIN_INTERVAL_S,
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES, STALE_CART_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
+    CLASSIFIER_BACKEND, MULTIHEAD_WEIGHT_PATH,
     WALKAWAY_GAP_FRAC, WALKAWAY_MIN_GAP_PX, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
     SPLIT_TRACK_GAP_S, CART_BLIP_S,
     DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX,
@@ -274,6 +275,8 @@ class TrackingEngine:
         self._cart_p_acc        = defaultdict(lambda: [0.0, 0])
         self._cart_stacked_acc  = defaultdict(lambda: [0.0, 0])
         self._cart_read_evidence = defaultdict(list)
+        # v2 classifier P(stacked), summed over every read that produced one
+        self._cart_cls_stack_acc = defaultdict(lambda: [0.0, 0])
         # raw id -> this frame's stacked_cart share (5-class backend), and this
         # frame's child_in_cart boxes, for the frame JSON.
         self._frame_p_stacked   = {}
@@ -414,6 +417,10 @@ class TrackingEngine:
                     "fill_conf": round(cr.get("fill_conf", 0.0), 4),
                     "bag_conf": round(cr.get("bag_conf", 0.0), 4),
                 }
+                # v2 multihead extras (absent with the legacy classifier)
+                for _k in ("child_conf", "stack_conf"):
+                    if cr.get(_k) is not None:
+                        obj["classification"][_k] = round(float(cr[_k]), 4)
                 if self._uses_cart_state:
                     # The latest READ's origin ("detector" when the 3-class
                     # detector called it empty and no classifier ran), and
@@ -790,10 +797,8 @@ class TrackingEngine:
         self.model.to("cpu")
         if self._pose_model is not None:
             self._pose_model.to("cpu")
-        if self._classifier._quality_model is not None:
-            self._classifier._quality_model.to("cpu")
-        if self._classifier._fill_model is not None:
-            self._classifier._fill_model.to("cpu")
+        for _, m in self._classifier.models():
+            m.to("cpu")
         torch.cuda.empty_cache()
 
     def _restore_detection_gpu_memory(self):
@@ -813,10 +818,8 @@ class TrackingEngine:
                 self._held_predictor = None
             if self._pose_model is not None:
                 self._pose_model.to(self.device)
-            if self._classifier._quality_model is not None:
-                self._classifier._quality_model.to(self.device)
-            if self._classifier._fill_model is not None:
-                self._classifier._fill_model.to(self.device)
+            for _, m in self._classifier.models():
+                m.to(self.device)
         except Exception as e:
             # Typically CUDA OOM because the VLM has not finished giving its
             # VRAM back. Never let this escape: it would propagate out of
@@ -931,9 +934,8 @@ class TrackingEngine:
         drifted = [name for name, dev in (
             ("detector", self._param_device(self.model)),
             ("pose", self._param_device(self._pose_model)),
-            ("quality", self._param_device(self._classifier._quality_model)),
-            ("fill", self._param_device(self._classifier._fill_model)),
-        ) if dev is not None and dev != want]
+        ) + tuple((n, self._param_device(m)) for n, m in self._classifier.models())
+        if dev is not None and dev != want]
         if not drifted:
             return []
 
@@ -943,10 +945,8 @@ class TrackingEngine:
             self._move_detector(want)
             if self._pose_model is not None:
                 self._pose_model.to(want)
-            if self._classifier._quality_model is not None:
-                self._classifier._quality_model.to(want)
-            if self._classifier._fill_model is not None:
-                self._classifier._fill_model.to(want)
+            for _, m in self._classifier.models():
+                m.to(want)
         except Exception as e:
             print(f"[ERROR] could not put the model stack back on {want}: {e}")
             print("[ERROR] falling back to CPU for the rest of this process — "
@@ -957,10 +957,8 @@ class TrackingEngine:
                 self._move_detector("cpu")
                 if self._pose_model is not None:
                     self._pose_model.to("cpu")
-                if self._classifier._quality_model is not None:
-                    self._classifier._quality_model.to("cpu")
-                if self._classifier._fill_model is not None:
-                    self._classifier._fill_model.to("cpu")
+                for _, m in self._classifier.models():
+                    m.to("cpu")
             except Exception as e2:
                 print(f"[ERROR] CPU fallback also failed: {e2}")
             if torch.cuda.is_available():
@@ -1035,7 +1033,8 @@ class TrackingEngine:
             self._cart_state.take(cd), CART_STATE_NON_EMPTY_THRESH)
         if decision.state == _cart_state.EMPTY:
             self._cart_state.count_read(cd, _cart_state.READ_EMPTY)
-            return _cart_state.detector_empty_result(decision.p_non_empty)
+            return {**_cart_state.detector_empty_result(decision.p_non_empty),
+                    **self._side_heads(frame, bbox)}
         if decision.state == _cart_state.UNKNOWN:
             self._cart_state.count_read(cd, _cart_state.READ_NO_STATE)
             return {**self._classifier.classify(frame, bbox),
@@ -1046,6 +1045,19 @@ class TrackingEngine:
         self._cart_state.count_read(cd, outcome)
         return {**result, "detector_state": _cart_state.NON_EMPTY,
                 "p_non_empty": decision.p_non_empty}
+
+    _SIDE_KEYS = ("child_in_cart", "child_conf", "stacked", "stack_conf")
+
+    def _side_heads(self, frame, bbox) -> dict:
+        """The v2 classifier's child / stack outputs for a read the detector
+        already decided EMPTY, and nothing else: the detector's empty verdict
+        stands, these only feed the review label's child / stacked evidence.
+        Stacks are empty carts, so without this the v2 stack head would almost
+        never see one. {} with the legacy classifier, which has no such heads."""
+        if self._classifier._multi_model is None:
+            return {}
+        r = self._classifier.classify(frame, bbox)
+        return {k: r[k] for k in self._SIDE_KEYS if k in r}
 
     def _record_loaded_read(self, cd, result) -> None:
         """Log whether one read of cart `cd` said it holds something.
@@ -1096,7 +1108,9 @@ class TrackingEngine:
                     default=0.0)
         p = result.get("p_non_empty")
         p = None if p is None or not np.isfinite(p) else round(float(p), 4)
-        return (p, round(cover, 3), round(child, 3))
+        cls_child = result.get("child_conf")
+        cls_child = None if cls_child is None else round(float(cls_child), 4)
+        return (p, round(cover, 3), round(child, 3), cls_child)
 
     def _never_loaded(self, cd) -> bool:
         """compute_pops()'s `never_loaded` for cart `cd`, from what is known now.
@@ -1501,6 +1515,7 @@ class TrackingEngine:
         p_acc = getattr(self, "_cart_p_acc", {})
         st_acc = getattr(self, "_cart_stacked_acc", {})
         read_ev = getattr(self, "_cart_read_evidence", {})
+        cls_st = getattr(self, "_cart_cls_stack_acc", {})
         carts = {}
         for cd, span in self._cart_span.items():
             ext = extent.get(cd)
@@ -1517,6 +1532,8 @@ class TrackingEngine:
                 p_mean=p[0] / p[1] if p and p[1] else None,
                 p_stacked_mean=ps[0] / ps[1] if ps and ps[1] else None,
                 read_evidence=list(read_ev.get(cd, ())),
+                cls_stacked_mean=(cls_st[cd][0] / cls_st[cd][1]
+                                  if cd in cls_st and cls_st[cd][1] else None),
             )
         return carts
 
@@ -1644,9 +1661,14 @@ class TrackingEngine:
             print(f"[WARN] dropped {_stale_cbs} duplicate tracking callback(s) "
                   f"left over from an earlier run")
 
-        # Load classifiers from fixed weight paths
-        self._classifier.load_quality(QUALITY_WEIGHT_PATH)
-        self._classifier.load_fill(FILL_WEIGHT_PATH)
+        # Load classifiers from fixed weight paths. CLASSIFIER_BACKEND picks v2
+        # (one multi-head model) or v1 (legacy quality + fill/bag pair); see
+        # weights/MODEL_VERSIONS.md.
+        if CLASSIFIER_BACKEND == "multihead":
+            self._classifier.load_multihead(MULTIHEAD_WEIGHT_PATH)
+        else:
+            self._classifier.load_quality(QUALITY_WEIGHT_PATH)
+            self._classifier.load_fill(FILL_WEIGHT_PATH)
 
         cap, w, h, fps, total_frames = open_video(source_path)
         self._fps = fps if fps and fps > 0 else 30.0
@@ -1999,6 +2021,9 @@ class TrackingEngine:
                     result = self._classify_cart_read(cd, im0_clean, bb)
                     self._cart_cls_cache[cd] = result
                     self._cls_last_frame[cd] = frame_idx
+                    if result.get("stack_conf") is not None:
+                        _sa = self._cart_cls_stack_acc[cd]
+                        _sa[0] += float(result["stack_conf"]); _sa[1] += 1
                     if result.get("quality") == "valid_cart":
                         self._cart_cls_history[cd].append(
                             (result["fill"], result["bag"],
