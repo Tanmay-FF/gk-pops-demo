@@ -134,11 +134,13 @@ def ev_cart(history=(), *, moved=200.0, linked=True, p=None, stacked=None, evide
     return c
 
 
-section("candidate rules are off by default")
+section("candidate rules are on by default (user, 2026-11-12: \"new + all\")")
 rack = ev_cart([("full", "unbagged", 0.9, 0.9)] * (N + 4), moved=1.0, linked=False, p=1.0)
-check("default: a static unlinked loaded box is reviewed", decision(rack) == RL.CART_LOADED)
+check("default: a static unlinked loaded box is a fixture", decision(rack) == RL.CART_FIXTURE)
+check("static_unlinked off: the same box is reviewed", decision(rack, static_unlinked=False) == RL.CART_LOADED)
 brief = ev_cart([PART_UNB] * 3, p=0.99, seen_s=2.0)
-check("default: a brief all-loaded cart is not promoted", decision(brief) == RL.CART_EMPTY)
+check("default: a brief all-loaded cart is promoted", decision(brief) == RL.CART_LOADED)
+check("promote_brief off: the same cart is not promoted", decision(brief, promote_brief=False) == RL.CART_EMPTY)
 
 section("R2: static, never-linked fixture")
 check("static_unlinked: display rack -> fixture",
@@ -176,7 +178,8 @@ section("R4 / child: doubtful loaded reads dropped per read")
 occl = ev_cart([PART_UNB] * N, evidence=[(0.7, 0.6, 0.0)] * N)
 check("drop_occluded: every loaded read under a person at P 0.7 -> run 0, empty",
       decision(occl, drop_occluded=True) == RL.CART_EMPTY)
-check("drop_occluded: off -> loaded", decision(occl) == RL.CART_LOADED)
+check("drop_occluded: off -> loaded", decision(occl, drop_occluded=False) == RL.CART_LOADED)
+check("drop_occluded: on by default", decision(occl) == RL.CART_EMPTY)
 check("drop_occluded: high-confidence reads under the pusher are kept",
       decision(ev_cart([PART_UNB] * N, evidence=[(0.95, 0.8, 0.0)] * N), drop_occluded=True)
       == RL.CART_LOADED)
@@ -191,7 +194,8 @@ check("drop_child: off -> loaded", decision(kid, drop_child=False) == RL.CART_LO
 section("stacked carts")
 stack = ev_cart([PART_UNB] * N, stacked=0.8)
 check("stacked_not_held: a stack -> stacked", decision(stack, stacked_not_held=True) == RL.CART_STACKED)
-check("stacked_not_held: off -> loaded", decision(stack) == RL.CART_LOADED)
+check("stacked_not_held: off -> loaded", decision(stack, stacked_not_held=False) == RL.CART_LOADED)
+check("stacked_not_held: on by default", decision(stack) == RL.CART_STACKED)
 
 section("v2 classifier child / stack evidence (REVIEW_CHILD_SOURCE, REVIEW_STACKED_SOURCE)")
 cls_kid = ev_cart([PART_UNB] * N, evidence=[(0.9, 0.0, 0.0, 0.99)] * N)
@@ -234,7 +238,9 @@ clean = lambda **kw: ev_cart([EMPTY] * 10, p=0.1, **kw)  # noqa: E731
 lab = RL.review_label({1: clean(), 2: clean()}, confident_tier=True)
 check("tier on: two clean empty carts -> NOTHING_HAPPENED", lab["label"] == RL.NOTHING_HAPPENED, lab)
 lab = RL.review_label({1: clean(), 2: clean()})
-check("tier off (default): same clip -> SKIP with confident evidence",
+check("tier on by default: same clip -> NOTHING_HAPPENED", lab["label"] == RL.NOTHING_HAPPENED, lab)
+lab = RL.review_label({1: clean(), 2: clean()}, confident_tier=False)
+check("tier off: same clip -> SKIP with confident evidence",
       lab["label"] == RL.SKIP and lab["confidence"]["confident"], lab["confidence"])
 lab = RL.review_label({1: clean(), 2: clean(abandoned=[False, True])}, confident_tier=True)
 check("Q3: an EMPTY cart left by its shopper blocks the tier (still SKIP)",

@@ -318,7 +318,9 @@ CART_BLIP_S = 0.5
 #
 # A cart that is never read clearly sends the clip to review only when it was
 # on screen at least this long; a briefer unread cart is skipped.
-REVIEW_UNREAD_MIN_S = 2.0
+# 3.0 since 2026-11-12 (user chose "new + all", see the candidate rules below);
+# it was 2.0.
+REVIEW_UNREAD_MIN_S = 3.0
 # What makes a cart "loaded" for the review label: "run" (a sustained run of
 # loaded reads), "vote" (the fill vote says partial/full), "both" or "either".
 # "both" is the strictest: the false loaded reads on empty carts (a child in
@@ -342,13 +344,22 @@ REVIEW_LOADED_MIN_RUN = GRABRUN_MIN_RUN_OBS
 REVIEW_ABANDON_MODE = "ever"
 
 # Candidate rules from docs/review_label_empty_cart_plan.md, each behind its own
-# switch and OFF until it passes the fresh validation set (plan section 8: P
-# not lower, E higher, the NOTHING HAPPENED tier 0 pushouts). In-sample numbers
-# on the 165 eval clips are in the plan; they were tuned on those clips.
+# switch. ALL ON since 2026-11-12 by the user's choice ("new + all"), before the
+# fresh validation set: they were tuned on the eval clips, so the numbers below
+# are in-sample. Engine run of 1120172 on the 203 eval clips with a Dillion
+# result, offline replay, review rate per group:
+#                                  Dillion  all off  all on (now)
+#   pushout seen, reviewed (49)        48       43       47
+#   every cart empty, skipped (56)      9       41       43 (10 NOTHING_HAPPENED)
+#   empty folder, unchecked (38)        1       27       28 (3 NOTHING_HAPPENED)
+#   clips sent to review (203)        192      105      109
+# POPS 5-class with each camera's true placement, same 165 checked clips: 47
+# pushouts, 42 empty skipped, 103 sent. Each switch below can still be turned
+# off on its own.
 #
 # R2: a cart that never moved and was never linked to a person is a fixture (a
 # merchandise display rack read as a loaded cart), never a cart that held goods.
-REVIEW_IGNORE_STATIC_UNLINKED = False
+REVIEW_IGNORE_STATIC_UNLINKED = True
 # Movement under this many pixels (largest extent of the box centre over the
 # cart's life) counts as "never moved". Shared by R2 and R3.
 REVIEW_STATIC_MOVE_PX = 40
@@ -356,7 +367,7 @@ REVIEW_STATIC_MOVE_PX = 40
 # confidence, and moving, holds goods even below REVIEW_LOADED_MIN_RUN. Catches
 # loaded carts that cross the frame in ~2 s (4 of the 5 missed pushouts). Such a
 # cart still goes through the normal rules (bagged with its shopper is skipped).
-REVIEW_PROMOTE_BRIEF_STRONG = False
+REVIEW_PROMOTE_BRIEF_STRONG = True
 REVIEW_BRIEF_MIN_READS = 2
 REVIEW_BRIEF_MIN_P = 0.9
 # R4: a loaded read taken while a person covers at least this share of the cart
@@ -364,7 +375,7 @@ REVIEW_BRIEF_MIN_P = 0.9
 # before the run is measured: the body over the basket, not goods, may be what
 # the detector saw. Per read, so a real pushout read with high confidence under
 # its pusher is kept.
-REVIEW_DROP_OCCLUDED_READS = False
+REVIEW_DROP_OCCLUDED_READS = True
 REVIEW_OCCLUDED_COVER = 0.5
 REVIEW_OCCLUDED_KEEP_P = 0.9
 # Phase 3 (5-class backend): a loaded read taken while a child_in_cart box sits
@@ -376,7 +387,7 @@ REVIEW_DROP_CHILD_READS = True
 REVIEW_CHILD_INSIDE = 0.5
 # Phase 3 (5-class backend): a cart whose mean stacked_cart share over its life
 # reaches STACKED_DRAW_THRESH is a nest of empty carts and never held goods.
-REVIEW_STACKED_NOT_HELD = False
+REVIEW_STACKED_NOT_HELD = True
 # Which signal the two rules above use (2026-11-12): the 5-class detector, the
 # v2 multihead classifier's child / stack heads, or both. "either" = detector OR
 # classifier, "both" = detector AND classifier. Measured on held-out test
@@ -402,7 +413,7 @@ REVIEW_CLS_STACKED_MIN = 0.95
 # REVIEW_CONFIDENT_MAX_P, no cart went unread, and no cart was ever left by its
 # shopper, even an empty one (user's answer to plan Q3, 2026-11-11). The
 # evidence block is always written; the label only changes when this is on.
-REVIEW_CONFIDENT_TIER = False
+REVIEW_CONFIDENT_TIER = True
 REVIEW_CONFIDENT_MIN_READS = 5
 REVIEW_CONFIDENT_MAX_P = 0.30
 # ---------------------------------------------------------------------------
