@@ -305,7 +305,8 @@ class PersonCartLinker:
     # --- Main per-frame update ---
     def update(self, person_bboxes: dict, cart_bboxes: dict,
                frame_idx: int, obj_disappeared: dict,
-               obj_positions: dict, obj_first_frame: dict):
+               obj_positions: dict, obj_first_frame: dict,
+               no_link=frozenset()):
         """Run linking logic for one frame.
 
         Args:
@@ -315,6 +316,10 @@ class PersonCartLinker:
             obj_disappeared: {raw_id: frames_gone}
             obj_positions:   {raw_id: [(cx,cy), ...]}
             obj_first_frame: {raw_id: first_frame_idx}
+            no_link:         raw cart ids that must not get a NEW link this
+                             frame (stacked carts, user rule 2026-11-12). A
+                             link they already hold is kept; their pending
+                             candidates are dropped so nothing accrues.
         """
         gdi = self._get_display_id
         self._disowned = set()
@@ -607,6 +612,10 @@ class PersonCartLinker:
         proposals = []          # (mean_iou, cart_raw, person_raw)
         for cart_id, cart_bbox in cart_bboxes.items():
             if cart_id in self._links:
+                continue
+            if cart_id in no_link:
+                self._link_candidates.pop(cart_id, None)
+                self._candidate_misses.pop(cart_id, None)
                 continue
             cd = gdi('cart', cart_id)
             if cd in self._perm_carts:

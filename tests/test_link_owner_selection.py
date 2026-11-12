@@ -55,7 +55,7 @@ def _linker():
     return L.PersonCartLinker(lambda label, raw: raw)
 
 
-def _step(lk, people, carts, frame, first_frame=None, gone=None, positions=None):
+def _step(lk, people, carts, frame, first_frame=None, gone=None, positions=None, no_link=frozenset()):
     """One update() call with the boilerplate filled in.
 
     Positions default to a short static history for every object: are_co_moving()
@@ -73,6 +73,7 @@ def _step(lk, people, carts, frame, first_frame=None, gone=None, positions=None)
             i: [(0.0, 0.0)] * 6 for i in ids
         },
         obj_first_frame=first_frame or {i: 0 for i in ids},
+        no_link=no_link,
     )
 
 
@@ -277,6 +278,35 @@ check("the still-linked person is not stolen by the cart whose owner left",
       f"links={lk.links} — one person cannot own two carts, and cart 20's owner "
       f"is still standing right there")
 
+
+# ---------------------------------------------------------------------------
+section("stacked carts are never linked (no_link, user rule 2026-11-12)")
+# ---------------------------------------------------------------------------
+lk = _linker()
+for f in range(1, LINK_CONTESTED_FRAMES + 2):
+    _step(lk, {1: _plausible}, {10: _cart}, frame=LINK_GRACE_FRAMES + f, no_link={10})
+check("a stacked cart with a person on it every frame never links",
+      lk.links.get(10) is None, f"links={lk.links}")
+check("...and accrues no candidate while stacked",
+      10 not in lk._link_candidates, f"candidates={lk._link_candidates}")
+for f in range(LINK_CONTESTED_FRAMES + 2, LINK_CONTESTED_FRAMES + 2 + LINK_CONFIRM_FRAMES):
+    _step(lk, {1: _plausible}, {10: _cart}, frame=LINK_GRACE_FRAMES + f)
+check("once no longer stacked, the same cart links normally",
+      lk.links.get(10) == 1, f"links={lk.links}")
+lk = _linker()
+for f in range(1, LINK_CONFIRM_FRAMES + 1):
+    _step(lk, {1: _plausible}, {10: _cart}, frame=LINK_GRACE_FRAMES + f)
+check("(setup) the cart links", lk.links.get(10) == 1, f"links={lk.links}")
+for f in range(LINK_CONFIRM_FRAMES + 1, LINK_CONFIRM_FRAMES + 5):
+    _step(lk, {1: _plausible}, {10: _cart}, frame=LINK_GRACE_FRAMES + f, no_link={10})
+check("a cart linked BEFORE it was stacked keeps its owner",
+      lk.links.get(10) == 1, f"links={lk.links}")
+lk = _linker()
+for f in range(1, LINK_CONFIRM_FRAMES + 1):
+    _step(lk, {1: _plausible}, {10: _cart, 11: (100, 320, 270, 560)},
+          frame=LINK_GRACE_FRAMES + f, no_link={11})
+check("no_link on one cart does not stop another cart linking",
+      lk.links.get(10) == 1 and 11 not in lk.links, f"links={lk.links}")
 
 print(f"\n{_passed} passed, {_failed} failed")
 if _failed:

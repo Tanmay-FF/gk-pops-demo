@@ -31,6 +31,7 @@ from .config import (
     LINK_CONFIRM_FRAMES, LINK_GRACE_FRAMES, ABANDON_FRAMES, STALE_CART_FRAMES,
     QUALITY_WEIGHT_PATH, FILL_WEIGHT_PATH, QUALITY_THRESHOLD,
     CLASSIFIER_BACKEND, MULTIHEAD_WEIGHT_PATH,
+    LINK_SKIP_STACKED, LINK_STACKED_SOURCE, LINK_STACKED_MIN_FRAMES, REVIEW_CLS_STACKED_MIN,
     WALKAWAY_GAP_FRAC, WALKAWAY_MIN_GAP_PX, GRABRUN_MIN_RUN_OBS, DIRECTION_WINDOW_S,
     SPLIT_TRACK_GAP_S, CART_BLIP_S,
     DIRECTION_LATCH_FRAMES, LATCH_REVERSAL_PX,
@@ -277,6 +278,8 @@ class TrackingEngine:
         self._cart_read_evidence = defaultdict(list)
         # v2 classifier P(stacked), summed over every read that produced one
         self._cart_cls_stack_acc = defaultdict(lambda: [0.0, 0])
+        # display ids of carts that were refused a new link as stacked
+        self._stacked_no_link = set()
         # raw id -> this frame's stacked_cart share (5-class backend), and this
         # frame's child_in_cart boxes, for the frame JSON.
         self._frame_p_stacked   = {}
@@ -1047,6 +1050,21 @@ class TrackingEngine:
                 "p_non_empty": decision.p_non_empty}
 
     _SIDE_KEYS = ("child_in_cart", "child_conf", "stacked", "stack_conf")
+
+    def _stacked_now(self, cd) -> bool:
+        """Is cart `cd` (display id) a stack of carts, on the evidence so far?
+        Running means up to this frame: the 5-class detector's stacked share
+        (trusted from LINK_STACKED_MIN_FRAMES scored frames) and the v2
+        classifier's P(stacked) over its reads, combined per LINK_STACKED_SOURCE
+        with the review label's own rule so the two never disagree on what
+        "either" / "both" mean. Stacked carts get no new link (user rule)."""
+        det_acc = self._cart_stacked_acc.get(cd)
+        det = (det_acc is not None and det_acc[1] >= LINK_STACKED_MIN_FRAMES
+               and det_acc[0] / det_acc[1] >= STACKED_DRAW_THRESH)
+        cls_acc = self._cart_cls_stack_acc.get(cd)
+        cls = (None if not cls_acc or not cls_acc[1]
+               else cls_acc[0] / cls_acc[1] >= REVIEW_CLS_STACKED_MIN)
+        return _review._signal(LINK_STACKED_SOURCE, det, cls)
 
     def _side_heads(self, frame, bbox) -> dict:
         """The v2 classifier's child / stack outputs for a read the detector
@@ -1992,9 +2010,16 @@ class TrackingEngine:
                 else:
                     ext[0], ext[1] = min(ext[0], _cx), max(ext[1], _cx)
                     ext[2], ext[3] = min(ext[2], _cy), max(ext[3], _cy)
+            # Stacked carts are never linked to anyone (LINK_SKIP_STACKED). Only
+            # NEW links are blocked: a cart linked before it became stacked
+            # keeps its owner.
+            _no_link = (frozenset(raw for raw in cart_bb if self._stacked_now(gdi('cart', raw)))
+                        if LINK_SKIP_STACKED else frozenset())
+            if _no_link:
+                self._stacked_no_link |= {gdi('cart', raw) for raw in _no_link}
             self._linker.update(person_bb, cart_bb, frame_idx,
                                 self._obj_disappeared, self._obj_positions,
-                                self._obj_first_frame)
+                                self._obj_first_frame, no_link=_no_link)
 
             # A link the linker has just disowned was never real — a person who
             # brushed past a parked cart, not one who took it. `_last_owner_raw`
@@ -2800,6 +2825,8 @@ class TrackingEngine:
         # answer "is anything blocked or unattended". Listed BESIDE the verdict,
         # never folded into it: an empty cart parked in the doorway is still
         # NOTHING HAPPENED for theft and still a blocked door for operations.
+        # Carts refused a new link because they were stacked (LINK_SKIP_STACKED).
+        full_json["stacked_no_link_carts"] = sorted(getattr(self, "_stacked_no_link", ()))
         full_json["clip_verdict"] = {
             **(self._clip_verdict or {}),
             "operational_findings": [

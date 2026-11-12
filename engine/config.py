@@ -445,6 +445,15 @@ POSE_MATCH_IOU_MIN    = 0.20  # min IoU between tracked person bbox and pose bbo
 LINK_CONFIRM_FRAMES = 6       # frames of overlap to confirm link (single candidate)
 LINK_CONTESTED_FRAMES = 20    # frames to wait when multiple candidates overlap before deciding
 LINK_GRACE_FRAMES   = 15      # wait N frames before linking a new cart
+# Stacked carts are never linked to anyone (user, 2026-11-12). A cart is
+# stacked when its running mean 5-class-detector stacked share (over at least
+# LINK_STACKED_MIN_FRAMES scored frames) reaches STACKED_DRAW_THRESH, OR its
+# running mean v2 classifier P(stacked) reaches REVIEW_CLS_STACKED_MIN, per
+# LINK_STACKED_SOURCE (detector / classifier / either / both). It only blocks
+# NEW links: a cart linked before it became stacked keeps its owner.
+LINK_SKIP_STACKED = True
+LINK_STACKED_SOURCE = "either"
+LINK_STACKED_MIN_FRAMES = 3
 LINK_CANDIDATE_PATIENCE = 4   # frames a candidate survives being outscored before replaced
 LINK_DRIFT_FRAMES   = 6       # if linked person IoU < 0.05 with cart for N frames, release link
 
